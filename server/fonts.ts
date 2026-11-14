@@ -53,16 +53,20 @@ function* fontFiles(dir: string, depth = 0): Generator<string> {
   }
 }
 
+function byte(bytes: Uint8Array, at: number): number {
+  return bytes[at] ?? 0
+}
+
 function u16(bytes: Uint8Array, at: number) {
-  return (bytes[at] << 8) | bytes[at + 1]
+  return (byte(bytes, at) << 8) | byte(bytes, at + 1)
 }
 
 function u32(bytes: Uint8Array, at: number) {
-  return ((bytes[at] << 24) >>> 0) + ((bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3])
+  return ((byte(bytes, at) << 24) >>> 0) + ((byte(bytes, at + 1) << 16) | (byte(bytes, at + 2) << 8) | byte(bytes, at + 3))
 }
 
 function tag(bytes: Uint8Array, at: number) {
-  return String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3])
+  return String.fromCharCode(byte(bytes, at), byte(bytes, at + 1), byte(bytes, at + 2), byte(bytes, at + 3))
 }
 
 function decodeName(bytes: Uint8Array, platformId: number): string {

@@ -2,6 +2,8 @@ node_modules/
 .acde/
 public/rdocx.bin
 public/word.bin
+public/engine.wasm
+src/engine/pkg/
 engine/target/
 .audit/
 decisions.tsv

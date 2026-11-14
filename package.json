@@ -5,10 +5,15 @@
   "scripts": {
     "dev": "acde dev",
     "build": "acde build",
-    "check": "acde check"
+    "check": "acde check",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\" \"server/**/*.test.ts\"",
+    "engine": "sh scripts/build-engine.sh"
   },
   "devDependencies": {
     "@dopame/acde-api": "https://pkgs.dopame.ai/acde/0.0.10/acde-api-0.0.10.tar.gz",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
     "vite": "^8"
   },
   "packageManager": "npm@11.12.1"
