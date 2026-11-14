@@ -1,0 +1,18 @@
+export default {
+  unsaved: '未保存',
+  newDoc: '新建',
+  open: '打开',
+  save: '保存',
+  normal: '正文',
+  heading1: '标题 1',
+  heading2: '标题 2',
+  ready: 'Word',
+  working: '正在处理…',
+  saved: '已保存',
+  opened: '已打开 {name}',
+  created: '新建文档',
+  failed: '文档没有改成。',
+  missing: '找不到 Word 引擎。',
+  words: '{count} 个词',
+  exporting: '正在导出 PDF…',
+}

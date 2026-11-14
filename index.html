@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Word</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ribbon: #1f4e89;
+        --ribbon-2: #163a68;
+        --ink: #1c1c1c;
+        --muted: #5c6570;
+        --desk: #e6e8ec;
+        --line: rgba(255, 255, 255, 0.22);
+        --page: #fff;
+      }
+      * { box-sizing: border-box }
+      html, body { height: 100% }
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--desk);
+        font: 14px/1.4 Calibri, Carlito, "Segoe UI", sans-serif;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+      header {
+        background: var(--ribbon);
+        color: white;
+        padding: 10px 16px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .titlebar { display: flex; align-items: baseline; gap: 12px }
+      .titlebar strong { font-size: 18px; font-weight: 650; letter-spacing: 0.01em }
+      #doc-name { opacity: 0.9 }
+      #dirty { color: #ffd27a }
+      .ribbon { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+      .group {
+        display: flex;
+        gap: 4px;
+        padding-right: 8px;
+        border-right: 1px solid var(--line);
+      }
+      .group:last-child { border-right: 0 }
+      button {
+        font: inherit;
+        color: white;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 3px;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+      button:hover { background: rgba(255, 255, 255, 0.12) }
+      button[aria-pressed="true"] { background: white; color: var(--ribbon-2) }
+      button.mark { font-weight: 750; min-width: 32px }
+      #desk { overflow: auto; padding: 28px 16px 48px }
+      #paper {
+        width: min(816px, calc(100% - 8px));
+        min-height: 960px;
+        margin: 0 auto;
+        background: var(--page);
+        box-shadow: 0 12px 36px rgba(20, 32, 48, 0.16);
+        padding: 86px 96px 110px;
+      }
+      #paper textarea {
+        display: block;
+        width: 100%;
+        margin: 0 0 10px;
+        padding: 0;
+        border: 0;
+        resize: none;
+        overflow: hidden;
+        outline: none;
+        background: transparent;
+        color: inherit;
+        font: 16px/1.45 Calibri, Carlito, "Segoe UI", sans-serif;
+        field-sizing: content;
+      }
+      #paper textarea[data-heading="1"] { font-size: 28px; line-height: 1.2; font-weight: 650; margin-bottom: 14px }
+      #paper textarea[data-heading="2"] { font-size: 22px; line-height: 1.25; font-weight: 650 }
+      #paper textarea[data-heading="3"] { font-size: 18px; font-weight: 650 }
+      #paper textarea[data-bold="1"] { font-weight: 750 }
+      #paper textarea[data-italic="1"] { font-style: italic }
+      #paper textarea[data-heading="1"][data-bold="1"],
+      #paper textarea[data-heading="2"][data-bold="1"] { font-weight: 800 }
+      footer {
+        background: var(--ribbon-2);
+        color: rgba(255, 255, 255, 0.88);
+        padding: 6px 16px;
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="titlebar">
+        <strong>Word</strong>
+        <span id="doc-name">Document.docx</span>
+        <span id="dirty" hidden data-i18n="unsaved"></span>
+      </div>
+      <div class="ribbon">
+        <div class="group">
+          <button id="new" type="button" data-i18n="newDoc"></button>
+          <button id="open" type="button" data-i18n="open"></button>
+          <button id="save" type="button" data-i18n="save"></button>
+          <input id="file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
+        </div>
+        <div class="group">
+          <button id="style-normal" type="button" data-heading="0" aria-pressed="true" data-i18n="normal"></button>
+          <button id="style-h1" type="button" data-heading="1" aria-pressed="false" data-i18n="heading1"></button>
+          <button id="style-h2" type="button" data-heading="2" aria-pressed="false" data-i18n="heading2"></button>
+        </div>
+        <div class="group">
+          <button id="bold" type="button" class="mark" aria-pressed="false">B</button>
+          <button id="italic" type="button" class="mark" aria-pressed="false"><span style="font-style: italic">I</span></button>
+        </div>
+        <div class="group">
+          <button id="pdf" type="button">PDF</button>
+        </div>
+      </div>
+    </header>
+    <div id="desk">
+      <article id="paper"></article>
+    </div>
+    <footer>
+      <span id="status" role="status"></span>
+      <span id="words"></span>
+    </footer>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,5 @@
+node_modules/
+.acde/
+public/rdocx.bin
+public/word.bin
+engine/target/
