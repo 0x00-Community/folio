@@ -3,3 +3,5 @@ node_modules/
 public/rdocx.bin
 public/word.bin
 engine/target/
+.audit/
+decisions.tsv
