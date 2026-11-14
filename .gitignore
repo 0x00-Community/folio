@@ -5,3 +5,5 @@ public/word.bin
 engine/target/
 .audit/
 decisions.tsv
+tools/corpus/target/
+tools/corpus/Cargo.lock
