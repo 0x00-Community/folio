@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { extname } from 'node:path'
-import { scanFonts } from './server/fonts.ts'
+import { extractFace, fontDirectories, readFontFile, resolveFont, scanFonts, type FontFace } from './server/fonts.ts'
 
 const TYPES: Record<string, string> = {
   '.ttf': 'font/ttf',
@@ -9,15 +9,44 @@ const TYPES: Record<string, string> = {
   '.otc': 'font/collection',
 }
 
-let faces: ReturnType<typeof scanFonts> | undefined
+let cached: { stamp: string; faces: FontFace[] } | undefined
 
-function index() {
-  faces ??= scanFonts()
-  return faces
+function stamp(): string {
+  return fontDirectories()
+    .map((dir) => {
+      try {
+        return `${dir}:${statSync(dir).mtimeMs}`
+      } catch {
+        return `${dir}:missing`
+      }
+    })
+    .join('\n')
+}
+
+function index(): FontFace[] {
+  const current = stamp()
+  if (cached === undefined || cached.stamp !== current) cached = { stamp: current, faces: scanFonts() }
+  return cached.faces
 }
 
 function notFound(): Response {
   return new Response('not found', { status: 404 })
+}
+
+function fontId(pathname: string): { id: string; face: boolean } | undefined {
+  const prefix = '/api/fonts/'
+  if (!pathname.startsWith(prefix)) return undefined
+  const raw = pathname.slice(prefix.length)
+  const face = raw.endsWith('/face')
+  const encoded = face ? raw.slice(0, -'/face'.length) : raw
+  let id: string
+  try {
+    id = decodeURIComponent(encoded)
+  } catch {
+    return undefined
+  }
+  if (id === '' || id.includes('/')) return undefined
+  return { id, face }
 }
 
 export default {
@@ -36,17 +65,26 @@ export default {
         })),
       )
     }
-    const prefix = '/api/fonts/'
-    if (!url.pathname.startsWith(prefix)) return notFound()
-    let id: string
-    try {
-      id = decodeURIComponent(url.pathname.slice(prefix.length))
-    } catch {
-      return notFound()
+    if (url.pathname === '/api/fonts/resolve') {
+      const family = url.searchParams.get('family')
+      if (family === null || family.trim() === '') return notFound()
+      const resolved = resolveFont(family, index())
+      if (resolved === null) return notFound()
+      return Response.json({
+        id: resolved.id,
+        family: resolved.family,
+        faceIndex: resolved.faceIndex,
+        metrics: resolved.metrics,
+      })
     }
-    if (id === '' || id.includes('/')) return notFound()
-    const face = index().find((item) => item.id === id)
+    const route = fontId(url.pathname)
+    if (route === undefined) return notFound()
+    const face = index().find((item) => item.id === route.id)
     if (face === undefined) return notFound()
+    if (route.face) {
+      const bytes = extractFace(readFontFile(face.path), face.faceIndex)
+      return new Response(new Uint8Array(bytes), { headers: { 'content-type': 'font/sfnt' } })
+    }
     const type = TYPES[extname(face.path).toLowerCase()]
     if (type === undefined) return notFound()
     return new Response(new Uint8Array(readFileSync(face.path)), {

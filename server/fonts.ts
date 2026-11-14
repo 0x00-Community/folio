@@ -1,6 +1,7 @@
-import { closeSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { extname, join } from 'node:path'
+import { aliasChain } from '../src/fonts.ts'
 
 export type FontFace = {
   id: string
@@ -59,6 +60,11 @@ function byte(bytes: Uint8Array, at: number): number {
 
 function u16(bytes: Uint8Array, at: number) {
   return (byte(bytes, at) << 8) | byte(bytes, at + 1)
+}
+
+function i16(bytes: Uint8Array, at: number) {
+  const value = u16(bytes, at)
+  return value >= 0x8000 ? value - 0x10000 : value
 }
 
 function u32(bytes: Uint8Array, at: number) {
@@ -166,4 +172,213 @@ export function scanFonts(directories = fontDirectories()): FontFace[] {
     }
   }
   return faces
+}
+
+export type FaceMetrics = {
+  unitsPerEm: number
+  ascender: number
+  descender: number
+  lineGap: number
+  winAscent: number
+  winDescent: number
+  typoAscender: number
+  typoDescender: number
+  typoLineGap: number
+  hheaAscender: number
+  hheaDescender: number
+  hheaLineGap: number
+}
+
+export type ResolvedFont = {
+  id: string
+  family: string
+  faceIndex: number
+  path: string
+  metrics: FaceMetrics
+}
+
+function directoryTables(read: Reader, faceAt: number): Map<string, { at: number; length: number }> {
+  const directory = read(faceAt, 12)
+  const tableCount = u16(directory, 4)
+  const records = read(faceAt + 12, tableCount * 16)
+  const tables = new Map<string, { at: number; length: number }>()
+  for (let i = 0; i < tableCount; i++) {
+    tables.set(tag(records, i * 16), { at: u32(records, i * 16 + 8), length: u32(records, i * 16 + 12) })
+  }
+  return tables
+}
+
+function faceStart(read: Reader, faceIndex: number): number {
+  const head = read(0, 12)
+  if (tag(head, 0) !== 'ttcf') {
+    if (faceIndex !== 0) throw new Error(`face ${faceIndex} is out of range`)
+    return 0
+  }
+  const count = u32(head, 8)
+  if (faceIndex < 0 || faceIndex >= count) throw new Error(`face ${faceIndex} is out of range`)
+  return u32(read(12, (faceIndex + 1) * 4), faceIndex * 4)
+}
+
+/** hhea and OS/2 vertical metrics. `ascender`/`descender`/`lineGap` follow USE_TYPO_METRICS (fsSelection bit 7). */
+export function readFaceMetrics(read: Reader, faceIndex: number): FaceMetrics | undefined {
+  const tables = directoryTables(read, faceStart(read, faceIndex))
+  const head = tables.get('head')
+  const hhea = tables.get('hhea')
+  if (head === undefined || hhea === undefined || head.length < 20 || hhea.length < 10) return undefined
+  const headBytes = read(head.at, 20)
+  const hheaBytes = read(hhea.at, 10)
+  const unitsPerEm = u16(headBytes, 18)
+  const hheaAscender = i16(hheaBytes, 4)
+  const hheaDescender = i16(hheaBytes, 6)
+  const hheaLineGap = i16(hheaBytes, 8)
+  let winAscent = Math.abs(hheaAscender)
+  let winDescent = Math.abs(hheaDescender)
+  let typoAscender = hheaAscender
+  let typoDescender = hheaDescender
+  let typoLineGap = hheaLineGap
+  let useTypo = false
+  const os2 = tables.get('OS/2')
+  if (os2 !== undefined && os2.length >= 64) {
+    const bytes = read(os2.at, Math.min(os2.length, 96))
+    const selection = u16(bytes, 62)
+    if (bytes.length >= 78) {
+      winAscent = u16(bytes, 74)
+      winDescent = u16(bytes, 76)
+    }
+    if (bytes.length >= 74) {
+      typoAscender = i16(bytes, 68)
+      typoDescender = i16(bytes, 70)
+      typoLineGap = i16(bytes, 72)
+      // Bit 7 selects the OS/2 typographic line metrics over hhea.
+      useTypo = (selection & 0x80) !== 0
+    }
+  }
+  const honored = useTypo
+    ? { ascender: typoAscender, descender: typoDescender, lineGap: typoLineGap }
+    : { ascender: hheaAscender, descender: hheaDescender, lineGap: hheaLineGap }
+  return {
+    unitsPerEm,
+    ...honored,
+    winAscent,
+    winDescent,
+    typoAscender,
+    typoDescender,
+    typoLineGap,
+    hheaAscender,
+    hheaDescender,
+    hheaLineGap,
+  }
+}
+
+function familyMatches(face: FontFace, family: string): boolean {
+  const key = family.toLowerCase()
+  return face.families.some((name) => name.toLowerCase() === key)
+}
+
+/** The first alias that is installed, preferring a regular face over bold or italic. */
+export function resolveFont(family: string, faces: readonly FontFace[]): ResolvedFont | null {
+  for (const name of aliasChain(family)) {
+    const matches = faces.filter((face) => familyMatches(face, name))
+    const face = matches.find((item) => !item.bold && !item.italic) ?? matches[0]
+    if (face === undefined) continue
+    const reader = fileReader(face.path)
+    try {
+      const metrics = readFaceMetrics(reader.read, face.faceIndex)
+      if (metrics === undefined) continue
+      return { id: face.id, family: name, faceIndex: face.faceIndex, path: face.path, metrics }
+    } finally {
+      reader.close()
+    }
+  }
+  return null
+}
+
+function writeU16(bytes: Uint8Array, at: number, value: number) {
+  bytes[at] = (value >> 8) & 0xff
+  bytes[at + 1] = value & 0xff
+}
+
+function writeU32(bytes: Uint8Array, at: number, value: number) {
+  bytes[at] = (value >>> 24) & 0xff
+  bytes[at + 1] = (value >>> 16) & 0xff
+  bytes[at + 2] = (value >>> 8) & 0xff
+  bytes[at + 3] = value & 0xff
+}
+
+function writeTag(bytes: Uint8Array, at: number, name: string) {
+  bytes[at] = name.charCodeAt(0)
+  bytes[at + 1] = name.charCodeAt(1)
+  bytes[at + 2] = name.charCodeAt(2)
+  bytes[at + 3] = name.charCodeAt(3)
+}
+
+function sumU32(bytes: Uint8Array): number {
+  let sum = 0
+  for (let at = 0; at < bytes.length; at += 4) sum = (sum + u32(bytes, at)) >>> 0
+  return sum
+}
+
+/**
+ * A single-face sfnt. Collection offsets are absolute, so the table directory is rewritten
+ * and `head.checksumAdjustment` is recomputed for the new file.
+ */
+export function extractFace(bytes: Uint8Array, faceIndex: number): Uint8Array {
+  const read = (offset: number, length: number) => bytes.subarray(offset, offset + length)
+  const faceAt = faceStart(read, faceIndex)
+  const directory = read(faceAt, 12)
+  const tableCount = u16(directory, 4)
+  const records = read(faceAt + 12, tableCount * 16)
+  const tables: { name: string; checksum: number; length: number; bytes: Uint8Array }[] = []
+  for (let i = 0; i < tableCount; i++) {
+    const name = tag(records, i * 16)
+    const checksum = u32(records, i * 16 + 4)
+    const at = u32(records, i * 16 + 8)
+    const length = u32(records, i * 16 + 12)
+    if (at + length > bytes.length) throw new Error(`table ${name} is truncated`)
+    const padded = new Uint8Array((length + 3) & ~3)
+    padded.set(bytes.subarray(at, at + length))
+    tables.push({ name, checksum, length, bytes: padded })
+  }
+  tables.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  let searchRange = 16
+  let entrySelector = 0
+  while (searchRange * 2 <= tableCount * 16) {
+    searchRange *= 2
+    entrySelector += 1
+  }
+  const rangeShift = tableCount * 16 - searchRange
+  let offset = 12 + tableCount * 16
+  const placed = tables.map((table) => {
+    const at = offset
+    offset += table.bytes.length
+    return { ...table, at }
+  })
+  const out = new Uint8Array(offset)
+  out.set(directory.subarray(0, 4))
+  writeU16(out, 4, tableCount)
+  writeU16(out, 6, searchRange)
+  writeU16(out, 8, entrySelector)
+  writeU16(out, 10, rangeShift)
+  const head = placed.find((table) => table.name === 'head')
+  if (head !== undefined && head.length >= 12) writeU32(head.bytes, 8, 0)
+  for (let i = 0; i < placed.length; i++) {
+    const table = placed[i]
+    if (table === undefined) continue
+    const at = 12 + i * 16
+    writeTag(out, at, table.name)
+    // Directory checksums are taken with head.checksumAdjustment still zero.
+    writeU32(out, at + 4, sumU32(table.bytes))
+    writeU32(out, at + 8, table.at)
+    writeU32(out, at + 12, table.length)
+    out.set(table.bytes, table.at)
+  }
+  if (head !== undefined && head.length >= 12) {
+    const adjustment = (0xb1b0afba - sumU32(out)) >>> 0
+    writeU32(out, head.at + 8, adjustment)
+  }
+  return out
+}
+
+export function readFontFile(path: string): Uint8Array {
+  return new Uint8Array(readFileSync(path))
 }
