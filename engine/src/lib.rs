@@ -1,28 +1,76 @@
+mod import;
+pub mod wire;
+
+use std::collections::BTreeMap;
+
 use wasm_bindgen::prelude::*;
+
+struct StoredMedia {
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+#[wasm_bindgen]
+pub struct MediaFile {
+    bytes: Vec<u8>,
+    content_type: String,
+}
+
+#[wasm_bindgen]
+impl MediaFile {
+    #[wasm_bindgen(getter)]
+    pub fn bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = contentType)]
+    pub fn content_type(&self) -> String {
+        self.content_type.clone()
+    }
+}
 
 #[wasm_bindgen]
 pub struct Session {
     doc: rdocx::Document,
+    imported: wire::Imported,
+    sources: import::SourceMap,
+    media: BTreeMap<String, StoredMedia>,
 }
 
 impl Session {
     pub fn from_bytes(bytes: &[u8]) -> Result<Session, String> {
-        rdocx::Document::from_bytes(bytes)
-            .map(|doc| Session { doc })
-            .map_err(|error| error.to_string())
+        let doc = rdocx::Document::from_bytes(bytes).map_err(|error| error.to_string())?;
+        Ok(Self::from_document(doc))
+    }
+
+    fn from_document(doc: rdocx::Document) -> Session {
+        let imported = import::import(&doc);
+        let media = imported
+            .media_bytes
+            .into_iter()
+            .map(|(key, (content_type, bytes))| (key, StoredMedia { content_type, bytes }))
+            .collect();
+        Session {
+            doc,
+            imported: imported.imported,
+            sources: imported.sources,
+            media,
+        }
+    }
+
+    pub fn block_sources(&self) -> usize {
+        self.sources.blocks.len()
     }
 }
 
 #[wasm_bindgen]
 impl Session {
     pub fn blank() -> Session {
-        Session {
-            doc: rdocx::Document::new(),
-        }
+        Self::from_document(rdocx::Document::new())
     }
 
     pub fn open(bytes: &[u8]) -> Result<Session, JsValue> {
-        Session::from_bytes(bytes).map_err(|message| JsValue::from_str(&message))
+        Session::from_bytes(bytes).map_err(|message| open_error(&message))
     }
 
     pub fn paragraph_count(&self) -> u32 {
@@ -32,4 +80,119 @@ impl Session {
     pub fn text(&self) -> String {
         self.doc.text()
     }
+
+    pub fn import(&self) -> String {
+        serde_json::to_string(&self.imported).expect("imported document is JSON")
+    }
+
+    /// Image bytes and content type for one media key. The sketch's `image` returns bytes only.
+    pub fn media(&self, key: &str) -> Option<MediaFile> {
+        self.media.get(key).map(|media| MediaFile {
+            bytes: media.bytes.clone(),
+            content_type: media.content_type.clone(),
+        })
+    }
+
+    pub fn image(&self, rel_id: &str) -> Option<Vec<u8>> {
+        self.media.get(rel_id).map(|media| media.bytes.clone())
+    }
+
+    pub fn look(&self, para_style: &str, char_style: Option<String>) -> String {
+        let look = self
+            .imported
+            .run_looks
+            .iter()
+            .find(|entry| {
+                entry.para == para_style && entry.character.as_deref() == char_style.as_deref()
+            })
+            .or_else(|| {
+                self.imported
+                    .run_looks
+                    .iter()
+                    .find(|entry| entry.para == para_style && entry.character.is_none())
+            })
+            .map(|entry| entry.look.clone())
+            .unwrap_or_else(default_run_look);
+        serde_json::to_string(&look).expect("run look is JSON")
+    }
+
+    pub fn para_look(&self, style: &str) -> String {
+        let look = self
+            .imported
+            .para_looks
+            .iter()
+            .find(|entry| entry.style == style)
+            .map(|entry| entry.look.clone())
+            .unwrap_or_else(default_para_look);
+        serde_json::to_string(&look).expect("paragraph look is JSON")
+    }
+}
+
+fn default_run_look() -> wire::RunLook {
+    wire::RunLook {
+        fonts: wire::RunFonts {
+            ascii: "Calibri".into(),
+            h_ansi: "Calibri".into(),
+            east_asia: "Calibri".into(),
+            cs: "Calibri".into(),
+            hint: None,
+        },
+        size_pt: 11.0,
+        bold: false,
+        italic: false,
+        underline: false,
+        strike: false,
+        color: "auto".into(),
+        highlight: None,
+        caps: false,
+        char_spacing_pt: 0.0,
+    }
+}
+
+fn default_para_look() -> wire::ParaLook {
+    wire::ParaLook {
+        align: "left".into(),
+        indent: wire::ParaIndent {
+            left: 0.0,
+            right: 0.0,
+            first_line: 0.0,
+            hanging: 0.0,
+            first_line_chars: None,
+        },
+        spacing: wire::ParaSpacing {
+            before: 0.0,
+            after: 0.0,
+            line: wire::LineSpacing::Auto { multiple: 1.0 },
+            contextual: false,
+        },
+        numbering: None,
+        keep_next: false,
+        keep_lines: false,
+        page_break_before: false,
+        widow_control: true,
+    }
+}
+
+fn open_error(message: &str) -> JsValue {
+    let lower = message.to_ascii_lowercase();
+    let reason = if lower.contains("encrypt") || lower.contains("password") {
+        "encrypted"
+    } else if lower.contains("not a zip")
+        || lower.contains("invalid zip")
+        || lower.contains("central directory")
+    {
+        "notDocx"
+    } else if lower.contains("too large") || lower.contains("limit") {
+        "tooLarge"
+    } else {
+        "corrupt"
+    };
+    JsValue::from_str(
+        &serde_json::json!({
+            "kind": "open",
+            "reason": reason,
+            "detail": message,
+        })
+        .to_string(),
+    )
 }
