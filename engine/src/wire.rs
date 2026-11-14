@@ -93,7 +93,11 @@ impl Para {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Inline {
     Text {
         text: String,
@@ -110,7 +114,11 @@ pub enum Inline {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Atom {
     Image {
         media: String,
@@ -197,7 +205,11 @@ pub struct ParaProps {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "rule", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "rule",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum LineSpacing {
     Auto { multiple: f64 },
     Exact { pt: f64 },
