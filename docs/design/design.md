@@ -57,8 +57,15 @@ On a branch of `/Users/lilleap/code/rdocx`, never `main`. Each item has a regres
 5. `Document::remove_content_range(start, end)` as one staged operation.
 6. `Paragraph::insert_run_like(at, like_run, text)`, which clones `like_run`'s `w:rPr`.
 
-The app works without 3-6 (lossy fallback for moved runs, one staged removal per deleted paragraph) and switches to them
-when the branch lands.
+7. `ParagraphRef::has_section_break()`. Measured: on a real thesis, finding section-ending paragraphs through
+   `StoryItemRef` cost 4.9 s (each call rescans the story) and through `story_item_snapshots` 750 ms (it serializes
+   every item). Reading the paragraph's own `w:sectPr` is constant time.
+
+The branch is `work/editing-kit-grok`, checked out at `/Users/lilleap/code/rdocx-editing-kit`. Items 1-6 and two review
+fixes were verified there: the new tests pass, the existing suites fail only where `main` already fails, clippy, fmt, the
+wasm32 check and the hash harness are clean, and split-then-join restores the bytes of every paragraph of the corpus and
+the thesis. The engine builds against this branch from round 1 on, because item 7 is needed for import speed and items
+1-6 for save.
 
 ## Build order
 
