@@ -1,0 +1,212 @@
+.page-view {
+  position: relative;
+  height: 100%;
+  overflow: auto;
+  background: #d4d4d4;
+  color: #222;
+}
+
+.page-sizer {
+  position: relative;
+  margin: 0 auto;
+}
+
+.page-stack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding-top: 16px;
+  transform-origin: top left;
+}
+
+.page {
+  position: relative;
+  margin: 0 0 16px;
+  background: #fff;
+  color: #222;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.page-body {
+  position: absolute;
+  overflow: hidden;
+}
+
+.page-header,
+.page-footer {
+  position: absolute;
+  overflow: hidden;
+}
+
+.page-num {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  text-align: center;
+  font: 11px/1 sans-serif;
+  color: #888;
+  pointer-events: none;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 2;
+}
+
+.caret {
+  position: absolute;
+  width: 1px;
+  background: #111;
+  pointer-events: none;
+}
+
+.sel {
+  position: absolute;
+  background: rgba(46, 116, 214, 0.28);
+  pointer-events: none;
+}
+
+.cell-sel {
+  position: absolute;
+  background: rgba(46, 116, 214, 0.18);
+  outline: 1px solid rgba(46, 116, 214, 0.7);
+  pointer-events: none;
+}
+
+.ime-sink {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  opacity: 0;
+  z-index: 3;
+  pointer-events: none;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+}
+
+.slice {
+  position: relative;
+}
+
+.clip {
+  position: relative;
+  overflow: hidden;
+}
+
+.shift {
+  position: relative;
+}
+
+.blk {
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 48px;
+}
+
+.blk.p {
+  position: relative;
+}
+
+.marker {
+  position: absolute;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.preedit {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+.atom {
+  display: inline-block;
+  vertical-align: baseline;
+  user-select: none;
+}
+
+.atom.field,
+.atom.opaque-atom,
+.atom.break {
+  white-space: pre;
+}
+
+.atom.opaque-atom {
+  border: 1px solid #b9b9b9;
+  border-radius: 2px;
+  padding: 0 3px;
+  background: #f3f3f3;
+  font-size: 0.85em;
+}
+
+.atom.break {
+  width: 0;
+  overflow: hidden;
+}
+
+img.atom {
+  vertical-align: text-bottom;
+}
+
+.blk.o {
+  border: 1px dashed #9a9a9a;
+  background: #fafafa;
+}
+
+.opaque-label {
+  font: 11px/1.4 sans-serif;
+  color: #666;
+  padding: 2px 4px;
+}
+
+.blk.t > table,
+.repeat-head {
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.blk.t td,
+.repeat-head td {
+  border: 1px solid #8d8d8d;
+  vertical-align: top;
+  padding: 2px 4px;
+  overflow-wrap: break-word;
+}
+
+.repeat-head {
+  width: 100%;
+}
+
+tr[data-header='1'] {
+  background: #f4f4f4;
+}
+
+.measure-host {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.measure-host > .blk {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
