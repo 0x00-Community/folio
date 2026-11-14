@@ -1,4 +1,4 @@
-mod import;
+pub mod import;
 pub mod wire;
 
 use std::collections::BTreeMap;
@@ -48,7 +48,15 @@ impl Session {
         let media = imported
             .media_bytes
             .into_iter()
-            .map(|(key, (content_type, bytes))| (key, StoredMedia { content_type, bytes }))
+            .map(|(key, (content_type, bytes))| {
+                (
+                    key,
+                    StoredMedia {
+                        content_type,
+                        bytes,
+                    },
+                )
+            })
             .collect();
         Session {
             doc,

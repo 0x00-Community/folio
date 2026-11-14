@@ -1,9 +1,20 @@
 use std::path::PathBuf;
 
-use rdocx::{BodyItemRef, CellItemRef, Document, HeaderFooterKind, HdrFtrType, StoryId, StoryItemKind};
-use rdocx_word_engine::wire::{Atom, Block, Imported, Inline};
+use rdocx::{
+    BodyItemRef, CellItemRef, Document, HdrFtrType, HeaderFooterKind, StoryId, StoryItemKind,
+};
 use rdocx_word_engine::Session;
+use rdocx_word_engine::wire::{Atom, Block, Imported, Inline};
 use serde_json::Value;
+
+fn golden(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden")
+        .join(format!("{name}.json"));
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -113,7 +124,10 @@ fn has_lock(blocks: &[Block], reason: &str) -> bool {
             .rows
             .iter()
             .any(|row| row.cells.iter().any(|cell| has_lock(&cell.blocks, reason))),
-        Block::Opaque(opaque) => opaque.preview.iter().any(|para| para.lock.as_deref() == Some(reason)),
+        Block::Opaque(opaque) => opaque
+            .preview
+            .iter()
+            .any(|para| para.lock.as_deref() == Some(reason)),
     })
 }
 
@@ -216,7 +230,10 @@ fn basic_docx_has_table_lists_image_stories_and_roles() {
         "image content type is png, got {content_type}"
     );
     let media = session.media(key).expect("media bytes");
-    assert!(media.bytes().starts_with(&[0x89, b'P', b'N', b'G']), "media bytes are a PNG");
+    assert!(
+        media.bytes().starts_with(&[0x89, b'P', b'N', b'G']),
+        "media bytes are a PNG"
+    );
 
     let story_text = |key_part: &str| {
         imported
@@ -243,7 +260,10 @@ fn basic_docx_has_table_lists_image_stories_and_roles() {
         .filter_map(|style| style.role.clone())
         .collect();
     for role in ["title", "heading1", "heading2", "normal"] {
-        assert!(roles.iter().any(|item| item == role), "role {role} detected");
+        assert!(
+            roles.iter().any(|item| item == role),
+            "role {role} detected"
+        );
     }
     assert!(session.block_sources() > 0, "src ids were minted");
 }
@@ -256,7 +276,9 @@ fn preserve_docx_keeps_comment_bookmark_field_and_hyperlink() {
     let mut saw_field = false;
     walk_atoms(&imported.body, &mut |atom| match atom {
         Atom::Opaque { label, .. } if label == "comment" => saw_comment = true,
-        Atom::Opaque { label, display, .. } if label == "bookmark" && display.contains("kept_bookmark") => {
+        Atom::Opaque { label, display, .. }
+            if label == "bookmark" && display.contains("kept_bookmark") =>
+        {
             saw_bookmark = true;
         }
         Atom::Field { .. } => saw_field = true,
@@ -299,7 +321,11 @@ fn collect_keys(value: &Value, source: &str, missing: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
-                if !source.contains(&format!("'{key}'")) && !source.contains(&format!("\"{key}\"")) && !source.contains(&format!("{key}:")) && !source.contains(&format!("{key}?:")) {
+                if !source.contains(&format!("'{key}'"))
+                    && !source.contains(&format!("\"{key}\""))
+                    && !source.contains(&format!("{key}:"))
+                    && !source.contains(&format!("{key}?:"))
+                {
                     missing.push(key.clone());
                 }
                 collect_keys(child, source, missing);
@@ -339,4 +365,120 @@ fn header_story_text_matches_story_items() {
         .unwrap_or_default();
     assert_eq!(actual, expected, "header paragraphs match story_items");
     let _ = StoryId::body();
+}
+
+#[test]
+fn fixture_import_matches_recorded_golden_json() {
+    for name in ["basic.docx", "long.docx", "preserve.docx"] {
+        let bytes = fixture(name);
+        let session = Session::from_bytes(&bytes).expect("session opens");
+        let actual = session.import();
+        let expected = golden(name);
+        if actual == expected {
+            continue;
+        }
+        let actual_bytes = actual.as_bytes();
+        let expected_bytes = expected.as_bytes();
+        let shared = actual_bytes.len().min(expected_bytes.len());
+        let mut index = 0;
+        while index < shared && actual_bytes[index] == expected_bytes[index] {
+            index += 1;
+        }
+        let start = index.saturating_sub(60);
+        panic!(
+            "{name} import JSON differs at byte {index} (actual {}, golden {})\nactual: {:?}\ngolden: {:?}",
+            actual_bytes.len(),
+            expected_bytes.len(),
+            String::from_utf8_lossy(&actual_bytes[start..(index + 60).min(actual_bytes.len())]),
+            String::from_utf8_lossy(&expected_bytes[start..(index + 60).min(expected_bytes.len())]),
+        );
+    }
+}
+
+#[test]
+fn footer_field_text_matches_story_items() {
+    let mut doc = Document::new();
+    doc.set_raw_footer_with_images(footer_with_fields(), &[], HdrFtrType::Default);
+    doc.add_paragraph("body");
+    let bytes = doc.to_bytes().expect("serialize");
+    let doc = Document::from_bytes(&bytes).expect("reopen");
+    let session = Session::from_bytes(&bytes).expect("session opens");
+    let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
+    let story = doc
+        .section_story(0, HeaderFooterKind::Footer, HdrFtrType::Default)
+        .expect("story lookup")
+        .expect("default footer");
+    let expected = doc
+        .story_items(story.story())
+        .expect("footer items")
+        .into_iter()
+        .filter(|item| item.kind() == StoryItemKind::Paragraph)
+        .map(|item| item.text().ok().flatten().unwrap_or_default())
+        .collect::<Vec<_>>();
+    let actual = imported
+        .stories
+        .iter()
+        .filter(|(key, _)| key.contains("footer"))
+        .flat_map(|(_, blocks)| imported_texts(blocks))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "footer paragraphs match story_items");
+}
+
+fn footer_with_fields() -> Vec<u8> {
+    r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>页脚 Footer</w:t></w:r></w:p><w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p><w:p><w:r><w:t>A</w:t><w:br/><w:t>B</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:t> PAGE </w:t></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>3</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:r><w:t>n=</w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p><w:p><w:r><w:t>keep</w:t></w:r><w:del><w:r><w:t>gone</w:t></w:r></w:del></w:p></w:ftr>"#.as_bytes().to_vec()
+}
+
+#[test]
+fn section_break_paragraph_carries_section_end() {
+    let mut doc = Document::new();
+    doc.add_paragraph("before");
+    doc.insert_section(doc.section_count())
+        .expect("section break");
+    doc.add_paragraph("after");
+    let bytes = doc.to_bytes().expect("serialize");
+    let session = Session::from_bytes(&bytes).expect("session opens");
+    let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
+    let marked: Vec<(String, u32)> = imported
+        .body
+        .iter()
+        .filter_map(|block| {
+            let Block::P(para) = block else {
+                return None;
+            };
+            para.section_end.map(|end| (flat_text(&para.inlines), end))
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        vec![("".to_string(), 0)],
+        "the paragraph that carries sectPr ends section 0"
+    );
+}
+
+#[test]
+fn each_section_keeps_its_own_header() {
+    let mut doc = Document::new();
+    doc.set_header("页眉 Header 0");
+    doc.add_paragraph("one");
+    doc.insert_section(doc.section_count())
+        .expect("section break");
+    doc.set_header("页眉 Header 1");
+    doc.add_paragraph("two");
+    let bytes = doc.to_bytes().expect("serialize");
+    let session = Session::from_bytes(&bytes).expect("session opens");
+    let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
+    let texts = imported
+        .stories
+        .iter()
+        .filter(|(key, _)| key.contains("header"))
+        .map(|(key, blocks)| (key.clone(), imported_texts(blocks).join("\n")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec![
+            ("s0/header/default".to_string(), "页眉 Header 0".to_string()),
+            ("s1/header/default".to_string(), "页眉 Header 1".to_string()),
+        ],
+        "each section's header story keeps its own text"
+    );
 }

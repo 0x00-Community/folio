@@ -1,17 +1,17 @@
 //! Walk a pristine document into the wire model. The document is only read.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rdocx::{
-    Alignment, BodyItemRef, BreakKind, CellItemRef, Document, HeaderFooterKind,
-    HdrFtrType, HyperlinkItemRef, Length, NumberingFormat, ParagraphItemRef, ParagraphRef,
-    RevisionKind, RunFontSlot, RunItemRef, RunRef, ST_DocGrid, StoryId, StoryItemKind, StyleType,
-    VMerge,
+    Alignment, BodyItemRef, BreakKind, CellItemRef, Document, HdrFtrType, HeaderFooterKind,
+    HyperlinkItemRef, Length, NumberingFormat, ParagraphItemRef, ParagraphRef, RevisionKind,
+    RunFontSlot, RunItemRef, RunRef, ST_DocGrid, SectionRef, StoryId, StoryItemKind, StoryKind,
+    StyleType, VMerge,
 };
 
 use crate::wire::{
-    self, Atom, Block, Inline, LineSpacing, ListDef, ListLevel, Marks, Para, ParaIndent,
-    ParaLook, ParaProps, ParaSpacing, ParaStyle, RunFonts, RunLook, StyleSheet,
+    self, Atom, Block, Inline, LineSpacing, ListDef, ListLevel, Marks, Para, ParaIndent, ParaLook,
+    ParaProps, ParaSpacing, ParaStyle, RunFonts, RunLook, StyleSheet,
 };
 
 /// Where a minted paragraph src points. Read by a future write pass.
@@ -34,7 +34,9 @@ pub struct ParaOrigin {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ParaAddr {
-    Body { content_index: usize },
+    Body {
+        content_index: usize,
+    },
     Cell {
         table_content_index: usize,
         row: usize,
@@ -87,11 +89,11 @@ struct Ctx {
     fonts: BTreeSet<String>,
     media: BTreeMap<String, (String, Vec<u8>)>,
     default_style: String,
-    section_ends: Vec<usize>,
     run_counter: usize,
 }
 
 pub fn import(doc: &Document) -> Import {
+    let read = read_stories(doc);
     let styles = stylesheet(doc);
     let mut ctx = Ctx {
         sources: SourceMap {
@@ -104,16 +106,24 @@ pub fn import(doc: &Document) -> Import {
         pairs: BTreeSet::new(),
         nums: BTreeSet::new(),
         fonts: BTreeSet::new(),
-        media: load_media(doc),
+        media: BTreeMap::new(),
         default_style: styles.default_paragraph.clone(),
-        section_ends: section_ends(doc),
         run_counter: 0,
     };
     for style in &styles.paragraph {
         ctx.pairs.insert((style.id.clone(), String::new()));
     }
     let body = walk_body(doc, &mut ctx);
-    let (sections, stories) = sections_and_stories(doc);
+    // A relationship id shared with a header keeps the main-part image.
+    for (key, value) in read.media {
+        ctx.media.entry(key).or_insert(value);
+    }
+    let (sections, stories) = sections_and_stories(
+        doc,
+        &read.paragraphs,
+        &read.header_stories,
+        &read.footer_stories,
+    );
     let para_looks = para_looks(doc, &styles, &mut ctx);
     let run_looks = run_looks(doc, &ctx);
     for entry in &run_looks {
@@ -153,43 +163,601 @@ pub fn import(doc: &Document) -> Import {
     }
 }
 
-fn load_media(doc: &Document) -> BTreeMap<String, (String, Vec<u8>)> {
-    let mut media = BTreeMap::new();
-    if let Ok(pictures) = doc.pictures() {
-        for picture in pictures {
-            if picture.relationship_id.is_empty() {
-                continue;
-            }
-            media
-                .entry(picture.relationship_id)
-                .or_insert((picture.content_type, picture.bytes));
-        }
-    }
-    media
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StoryKey {
+    kind: StoryKind,
+    part: String,
+    owner: usize,
 }
 
-fn section_ends(doc: &Document) -> Vec<usize> {
-    let mut ends = Vec::new();
-    let Ok(items) = doc.story_items(&StoryId::body()) else {
-        return ends;
-    };
-    for item in items {
-        if item.kind() != StoryItemKind::Paragraph {
-            continue;
-        }
-        let Ok(xml) = item.xml() else {
-            continue;
-        };
-        if !xml.windows(8).any(|window| window == b"w:sectPr") {
-            continue;
-        }
-        if let Ok(Some(index)) = item.direct_body_index() {
-            ends.push(index);
+impl StoryKey {
+    fn from_story(story: &StoryId) -> Self {
+        Self {
+            kind: story.kind(),
+            part: story.part_name().to_string(),
+            owner: story.owner_index(),
         }
     }
-    ends.sort_unstable();
-    ends.dedup();
-    ends
+}
+
+struct StoryWalk {
+    paragraphs: HashMap<StoryKey, Vec<String>>,
+    header_stories: Vec<StoryKey>,
+    footer_stories: Vec<StoryKey>,
+    media: BTreeMap<String, (String, Vec<u8>)>,
+}
+
+fn read_stories(doc: &Document) -> StoryWalk {
+    // `story_items` serializes the main document on every call, so header and
+    // footer paragraphs are taken from one inventory.
+    let mut walk = StoryWalk {
+        paragraphs: HashMap::new(),
+        header_stories: Vec::new(),
+        footer_stories: Vec::new(),
+        media: BTreeMap::new(),
+    };
+    let Ok(paragraphs) = doc.story_range_paragraphs() else {
+        return walk;
+    };
+    let mut seen = HashSet::new();
+    for (location, xml) in &paragraphs {
+        let story = location.story();
+        if story.kind() != StoryKind::Body {
+            remember_story_media(doc, story, xml, &mut walk.media);
+        }
+        if !matches!(story.kind(), StoryKind::Header | StoryKind::Footer)
+            || location.index_path().len() != 1
+        {
+            continue;
+        }
+        let key = StoryKey::from_story(story);
+        if seen.insert(key.clone()) {
+            if key.kind == StoryKind::Header {
+                walk.header_stories.push(key.clone());
+            } else if key.kind == StoryKind::Footer {
+                walk.footer_stories.push(key.clone());
+            }
+        }
+        walk.paragraphs
+            .entry(key)
+            .or_default()
+            .push(paragraph_text(xml));
+    }
+    walk
+}
+
+fn remember_story_media(
+    doc: &Document,
+    story: &StoryId,
+    xml: &[u8],
+    media: &mut BTreeMap<String, (String, Vec<u8>)>,
+) {
+    for rel in attribute_values(xml, b"embed")
+        .into_iter()
+        .chain(attribute_values(xml, b"link"))
+    {
+        if media.contains_key(&rel) {
+            continue;
+        }
+        let Ok(bytes) = doc.image_data_for_story(story, &rel) else {
+            continue;
+        };
+        media.insert(rel, (sniff(&bytes).to_string(), bytes));
+    }
+}
+
+fn attribute_values(xml: &[u8], local_name: &[u8]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut start = 0;
+    while let Some(offset) = xml[start..]
+        .windows(local_name.len())
+        .position(|window| window == local_name)
+    {
+        let index = start + offset;
+        let preceded = index == 0 || matches!(xml[index - 1], b':' | b' ' | b'\t' | b'\n' | b'\r');
+        let after = index + local_name.len();
+        if preceded && xml.get(after) == Some(&b'=') {
+            let quote = *xml.get(after + 1).unwrap_or(&0);
+            if quote == b'"' || quote == b'\'' {
+                let value_start = after + 2;
+                if let Some(end) = xml[value_start..].iter().position(|byte| *byte == quote) {
+                    let value = &xml[value_start..value_start + end];
+                    if !value.is_empty()
+                        && let Ok(value) = String::from_utf8(value.to_vec())
+                    {
+                        values.push(value);
+                    }
+                }
+            }
+        }
+        start = index + local_name.len();
+    }
+    values
+}
+
+const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+#[derive(Clone, Copy)]
+enum FieldMark {
+    Begin,
+    Separate,
+    End,
+}
+
+struct FieldTrack {
+    open: Vec<(usize, bool)>,
+    closed: Vec<bool>,
+}
+
+impl FieldTrack {
+    fn mark(&mut self, mark: FieldMark) {
+        match mark {
+            FieldMark::Begin => {
+                self.open.push((self.closed.len(), false));
+                self.closed.push(false);
+            }
+            FieldMark::Separate => {
+                if let Some((_, separated)) = self.open.last_mut() {
+                    *separated = true;
+                }
+            }
+            FieldMark::End => {
+                if let Some((field, _)) = self.open.pop()
+                    && let Some(closed) = self.closed.get_mut(field)
+                {
+                    *closed = true;
+                }
+            }
+        }
+    }
+
+    fn context(&self) -> Vec<(usize, bool)> {
+        self.open.clone()
+    }
+
+    fn hides(&self, context: &[(usize, bool)]) -> bool {
+        context.iter().any(|(field, separated)| {
+            self.closed.get(*field).copied().unwrap_or(false) && !separated
+        })
+    }
+
+    fn in_result(&self, context: &[(usize, bool)]) -> bool {
+        context
+            .iter()
+            .any(|(field, _)| self.closed.get(*field).copied().unwrap_or(false))
+    }
+}
+
+enum Piece {
+    Text(String),
+    Tab,
+    Break(u8),
+}
+
+struct TextRecord {
+    context: Vec<(usize, bool)>,
+    piece: Piece,
+}
+
+struct TextFrame {
+    local: String,
+    word: bool,
+    opaque: bool,
+    hides: bool,
+    nested: bool,
+    opened_text: bool,
+}
+
+struct Tag {
+    end: bool,
+    empty: bool,
+    prefix: String,
+    local: String,
+    decls: Vec<(String, String)>,
+    fld: Option<FieldMark>,
+    break_form: u8,
+}
+
+fn paragraph_text(xml: &[u8]) -> String {
+    let mut scopes: Vec<Vec<(String, String)>> = Vec::new();
+    let mut frames: Vec<TextFrame> = Vec::new();
+    let mut fields = FieldTrack {
+        open: Vec::new(),
+        closed: Vec::new(),
+    };
+    let mut records: Vec<TextRecord> = Vec::new();
+    let mut text_open: Vec<usize> = Vec::new();
+    let mut index = 0;
+    while index < xml.len() {
+        if xml[index] != b'<' {
+            let end = xml[index..]
+                .iter()
+                .position(|byte| *byte == b'<')
+                .map(|offset| index + offset)
+                .unwrap_or(xml.len());
+            if let Some(&slot) = text_open.last()
+                && let Piece::Text(text) = &mut records[slot].piece
+            {
+                text.push_str(&xml_unescape(&xml[index..end]));
+            }
+            index = end;
+            continue;
+        }
+        if xml[index..].starts_with(b"<!--") {
+            index = xml[index..]
+                .windows(3)
+                .position(|window| window == b"-->")
+                .map(|offset| index + offset + 3)
+                .unwrap_or(xml.len());
+            continue;
+        }
+        if xml[index..].starts_with(b"<![CDATA[") {
+            let start = index + 9;
+            let end = xml[start..]
+                .windows(3)
+                .position(|window| window == b"]]>")
+                .map(|offset| start + offset)
+                .unwrap_or(xml.len());
+            if let Some(&slot) = text_open.last()
+                && let Piece::Text(text) = &mut records[slot].piece
+                && let Ok(raw) = std::str::from_utf8(&xml[start..end])
+            {
+                text.push_str(raw);
+            }
+            index = (end + 3).min(xml.len());
+            continue;
+        }
+        if xml[index..].starts_with(b"<?") {
+            index = xml[index..]
+                .windows(2)
+                .position(|window| window == b"?>")
+                .map(|offset| index + offset + 2)
+                .unwrap_or(xml.len());
+            continue;
+        }
+        if xml[index..].starts_with(b"<! ") || xml[index..].starts_with(b"<!") {
+            index = xml[index..]
+                .iter()
+                .position(|byte| *byte == b'>')
+                .map(|offset| index + offset + 1)
+                .unwrap_or(xml.len());
+            continue;
+        }
+        let Some(end) = tag_end(xml, index) else {
+            break;
+        };
+        let tag = parse_tag(&xml[index + 1..end]);
+        index = end + 1;
+        if tag.end {
+            if let Some(frame) = frames.pop()
+                && frame.opened_text
+            {
+                text_open.pop();
+            }
+            scopes.pop();
+            continue;
+        }
+        scopes.push(tag.decls.clone());
+        let ancestors_opaque = frames.last().is_some_and(|frame| frame.opaque);
+        let ancestors_hidden = frames.iter().any(|frame| frame.hides);
+        let ancestors_nested = frames.iter().any(|frame| frame.nested);
+        let word = namespace_is(&scopes, &tag.prefix, WORD_NS);
+        let modeled =
+            word && word_child_modeled(frames.last().map(|frame| frame.local.as_str()), &tag.local);
+        let fallback =
+            tag.local == "Fallback" && frames.iter().any(|frame| frame.local == "AlternateContent");
+        let opaque = ancestors_opaque || !modeled || fallback;
+        let visible = !opaque && !ancestors_hidden && !ancestors_nested;
+        let parent_run = frames
+            .last()
+            .is_some_and(|frame| frame.word && frame.local == "r");
+        if visible && tag.local == "fldChar" {
+            if let Some(mark) = tag.fld {
+                fields.mark(mark);
+            }
+        }
+        let opened_text = visible && tag.local == "t";
+        if opened_text {
+            records.push(TextRecord {
+                context: fields.context(),
+                piece: Piece::Text(String::new()),
+            });
+            text_open.push(records.len() - 1);
+        } else if visible && parent_run && tag.local == "tab" {
+            records.push(TextRecord {
+                context: fields.context(),
+                piece: Piece::Tab,
+            });
+        } else if visible && parent_run && (tag.local == "br" || tag.local == "cr") {
+            let form = if tag.local == "cr" { 3 } else { tag.break_form };
+            records.push(TextRecord {
+                context: fields.context(),
+                piece: Piece::Break(form),
+            });
+        }
+        if tag.empty {
+            if opened_text {
+                text_open.pop();
+            }
+            scopes.pop();
+            continue;
+        }
+        let nested =
+            !opaque && !frames.is_empty() && (tag.local == "tc" || tag.local == "txbxContent");
+        let hides = !opaque && (tag.local == "del" || tag.local == "moveFrom");
+        frames.push(TextFrame {
+            local: tag.local,
+            word,
+            opaque,
+            hides,
+            nested,
+            opened_text,
+        });
+    }
+    let mut text = String::new();
+    for record in records {
+        if fields.hides(&record.context) {
+            continue;
+        }
+        match record.piece {
+            Piece::Text(value) => text.push_str(&value),
+            Piece::Tab => text.push('\t'),
+            Piece::Break(3) => text.push('\n'),
+            Piece::Break(form) => {
+                let character = if fields.in_result(&record.context) {
+                    match form {
+                        1 => '\u{000c}',
+                        2 => '\u{000b}',
+                        _ => '\n',
+                    }
+                } else {
+                    '\n'
+                };
+                text.push(character);
+            }
+        }
+    }
+    text
+}
+
+fn namespace_is(scopes: &[Vec<(String, String)>], prefix: &str, uri: &str) -> bool {
+    for scope in scopes.iter().rev() {
+        for (key, value) in scope.iter().rev() {
+            if key == prefix {
+                return value == uri;
+            }
+        }
+    }
+    prefix == "w" && uri == WORD_NS
+}
+
+fn word_child_modeled(parent: Option<&str>, child: &str) -> bool {
+    let Some(parent) = parent else {
+        return true;
+    };
+    match parent {
+        "sdtContent" => matches!(child, "r" | "ins" | "del" | "moveFrom" | "moveTo" | "sdt"),
+        "p" => matches!(
+            child,
+            "pPr"
+                | "r"
+                | "sdt"
+                | "hyperlink"
+                | "fldSimple"
+                | "ins"
+                | "del"
+                | "moveFrom"
+                | "moveTo"
+                | "bookmarkStart"
+                | "bookmarkEnd"
+                | "commentRangeStart"
+                | "commentRangeEnd"
+                | "proofErr"
+        ),
+        "r" => matches!(
+            child,
+            "rPr"
+                | "t"
+                | "delText"
+                | "instrText"
+                | "delInstrText"
+                | "fldChar"
+                | "drawing"
+                | "pict"
+                | "object"
+                | "tab"
+                | "br"
+                | "cr"
+                | "sym"
+                | "noBreakHyphen"
+                | "softHyphen"
+                | "footnoteReference"
+                | "endnoteReference"
+                | "commentReference"
+                | "lastRenderedPageBreak"
+        ),
+        "hyperlink" => matches!(child, "r" | "ins" | "del" | "moveFrom" | "moveTo"),
+        "ins" | "del" | "moveFrom" | "moveTo" => matches!(
+            child,
+            "r" | "sdt" | "hyperlink" | "ins" | "del" | "moveFrom" | "moveTo"
+        ),
+        "fldSimple" => child == "r",
+        "sdt" => matches!(child, "sdtPr" | "sdtEndPr" | "sdtContent"),
+        _ => false,
+    }
+}
+
+fn tag_end(xml: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    let mut quote = 0u8;
+    while index < xml.len() {
+        let byte = xml[index];
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+        } else if byte == b'"' || byte == b'\'' {
+            quote = byte;
+        } else if byte == b'>' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_tag(inner: &[u8]) -> Tag {
+    let mut index = 0;
+    let mut end = false;
+    if inner.first() == Some(&b'/') {
+        end = true;
+        index = 1;
+    }
+    while inner.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let name_start = index;
+    while inner
+        .get(index)
+        .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'/')
+    {
+        index += 1;
+    }
+    let name = String::from_utf8_lossy(&inner[name_start..index]).into_owned();
+    let (prefix, local) = match name.split_once(':') {
+        Some((prefix, local)) => (prefix.to_string(), local.to_string()),
+        None => (String::new(), name),
+    };
+    let mut decls = Vec::new();
+    let mut fld = None;
+    let mut break_form = 0u8;
+    let mut empty = false;
+    while index < inner.len() {
+        while inner.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if index >= inner.len() {
+            break;
+        }
+        if inner[index] == b'/' {
+            empty = true;
+            index += 1;
+            continue;
+        }
+        let attr_start = index;
+        while inner
+            .get(index)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'=' && *byte != b'/')
+        {
+            index += 1;
+        }
+        let attr_name = String::from_utf8_lossy(&inner[attr_start..index]).into_owned();
+        while inner.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if inner.get(index) != Some(&b'=') {
+            continue;
+        }
+        index += 1;
+        while inner.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let Some(quote) = inner.get(index).copied() else {
+            break;
+        };
+        if quote != b'"' && quote != b'\'' {
+            continue;
+        }
+        index += 1;
+        let value_start = index;
+        while inner.get(index).is_some_and(|byte| *byte != quote) {
+            index += 1;
+        }
+        let value = xml_unescape(&inner[value_start..index]);
+        if inner.get(index) == Some(&quote) {
+            index += 1;
+        }
+        if let Some(declared) = attr_name.strip_prefix("xmlns:") {
+            decls.push((declared.to_string(), value));
+        } else if attr_name == "xmlns" {
+            decls.push((String::new(), value));
+        } else {
+            let attr_local = attr_name
+                .split_once(':')
+                .map(|(_, local)| local)
+                .unwrap_or(attr_name.as_str());
+            if attr_local == "fldCharType" {
+                fld = match value.as_str() {
+                    "begin" => Some(FieldMark::Begin),
+                    "separate" => Some(FieldMark::Separate),
+                    "end" => Some(FieldMark::End),
+                    _ => None,
+                };
+            } else if attr_local == "type" {
+                break_form = match value.as_str() {
+                    "page" => 1,
+                    "column" => 2,
+                    _ => 0,
+                };
+            }
+        }
+    }
+    Tag {
+        end,
+        empty,
+        prefix,
+        local,
+        decls,
+        fld,
+        break_form,
+    }
+}
+
+fn xml_unescape(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let mut out = String::new();
+    let mut rest: &str = &text;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find(';') else {
+            out.push('&');
+            out.push_str(rest);
+            return out;
+        };
+        let entity = &rest[..end];
+        rest = &rest[end + 1..];
+        match entity {
+            "amp" => out.push('&'),
+            "lt" => out.push('<'),
+            "gt" => out.push('>'),
+            "quot" => out.push('"'),
+            "apos" => out.push('\''),
+            _ => {
+                if let Some(character) = char_entity(entity) {
+                    out.push(character);
+                } else {
+                    out.push('&');
+                    out.push_str(entity);
+                    out.push(';');
+                }
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn char_entity(entity: &str) -> Option<char> {
+    let code = if let Some(hex) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        entity.strip_prefix('#')?.parse().ok()?
+    };
+    char::from_u32(code)
 }
 
 fn stylesheet(doc: &Document) -> StyleSheet {
@@ -237,15 +805,23 @@ fn role_of(name: &str) -> Option<&'static str> {
 
 fn walk_body(doc: &Document, ctx: &mut Ctx) -> Vec<Block> {
     let mut blocks = Vec::new();
+    let mut next_section = 0u32;
     for (content_index, item) in doc.body_items().enumerate() {
         match item {
             BodyItemRef::Paragraph(paragraph) => {
+                let section_end = if paragraph.has_section_break() {
+                    let ordinal = next_section;
+                    next_section += 1;
+                    Some(ordinal)
+                } else {
+                    None
+                };
                 blocks.push(Block::P(import_paragraph(
                     doc,
                     ctx,
                     &paragraph,
                     ParaAddr::Body { content_index },
-                    Some(content_index),
+                    section_end,
                 )));
             }
             BodyItemRef::Table(table) => {
@@ -287,12 +863,13 @@ fn import_table(
     table: &rdocx::TableRef<'_>,
     content_index: usize,
 ) -> Block {
-    let src = alloc_block(
-        ctx,
-        BlockOrigin::Table { content_index },
-        None,
-    );
-    let grid_pt = table.grid_widths().iter().copied().map(Length::to_pt).collect();
+    let src = alloc_block(ctx, BlockOrigin::Table { content_index }, None);
+    let grid_pt = table
+        .grid_widths()
+        .iter()
+        .copied()
+        .map(Length::to_pt)
+        .collect();
     let mut rows = Vec::new();
     for row_index in 0..table.row_count() {
         let Some(row) = table.row(row_index) else {
@@ -381,7 +958,7 @@ fn import_paragraph(
     ctx: &mut Ctx,
     paragraph: &ParagraphRef<'_>,
     addr: ParaAddr,
-    body_index: Option<usize>,
+    section_end: Option<u32>,
 ) -> Para {
     let src = alloc_block(ctx, BlockOrigin::Paragraph(0), Some(ParaOrigin { addr }));
     if let Some(BlockOrigin::Paragraph(slot)) = ctx.sources.blocks.get_mut(src as usize) {
@@ -421,12 +998,6 @@ fn import_paragraph(
     } else if model_text(&inlines) != paragraph.text() {
         lock = Some("roundTrip".into());
     }
-    let section_end = body_index.and_then(|index| {
-        ctx.section_ends
-            .iter()
-            .position(|end| *end == index)
-            .map(|position| position as u32)
-    });
     Para::new(
         Some(src),
         direct_props(paragraph),
@@ -450,7 +1021,14 @@ fn walk_items(
     for item in paragraph.items() {
         match item {
             ParagraphItemRef::Run(run) => emit_run(
-                doc, ctx, &run, link, para_src, style_id, inlines, field_depth,
+                doc,
+                ctx,
+                &run,
+                link,
+                para_src,
+                style_id,
+                inlines,
+                field_depth,
             ),
             ParagraphItemRef::Hyperlink(hyperlink) => {
                 let target = link_target(doc, hyperlink);
@@ -501,7 +1079,15 @@ fn walk_items(
                 inlines.push(opaque_atom(None, "contentControl", &display, false));
             }
             ParagraphItemRef::Revision(revision) => note_revision(
-                doc, ctx, &revision, link, para_src, style_id, inlines, revisions, field_depth,
+                doc,
+                ctx,
+                &revision,
+                link,
+                para_src,
+                style_id,
+                inlines,
+                revisions,
+                field_depth,
             ),
             ParagraphItemRef::CommentRangeStart { id, .. } => {
                 inlines.push(opaque_atom(None, "comment", &id.to_string(), false));
@@ -513,7 +1099,12 @@ fn walk_items(
             ParagraphItemRef::UnsupportedXml(raw) => {
                 note_field_xml(raw, field_depth);
                 if !is_ignorable_marker(raw) {
-                    inlines.push(opaque_atom(None, "xml", &xml_text(raw), !mentions_comment(raw)));
+                    inlines.push(opaque_atom(
+                        None,
+                        "xml",
+                        &xml_text(raw),
+                        !mentions_comment(raw),
+                    ));
                 }
             }
             _ => {}
@@ -539,7 +1130,15 @@ fn note_revision(
     ) && let Some(inner) = revision.insertion_paragraph()
     {
         walk_items(
-            doc, ctx, &inner, link, para_src, style_id, inlines, revisions, field_depth,
+            doc,
+            ctx,
+            &inner,
+            link,
+            para_src,
+            style_id,
+            inlines,
+            revisions,
+            field_depth,
         );
     }
 }
@@ -562,12 +1161,7 @@ fn emit_run(
         .filter(|item| matches!(item, RunItemRef::Text(_) | RunItemRef::DeletedText(_)))
         .count();
     let other_items = items.len() - text_items;
-    let src = alloc_run(
-        ctx,
-        para_src,
-        run_index,
-        text_items > 0 && other_items > 0,
-    );
+    let src = alloc_run(ctx, para_src, run_index, text_items > 0 && other_items > 0);
     let mut marks = direct_marks(run);
     if let Some(link) = link {
         marks.link = Some(link.to_string());
@@ -717,10 +1311,14 @@ fn direct_marks(run: &RunRef<'_>) -> Marks {
         strike: run.strike_value(),
         font: run.font_name().map(str::to_string),
         size_pt: run.size(),
-        color: run.color().filter(|color| !color.eq_ignore_ascii_case("auto")).map(|color| {
-            color.trim_start_matches('#').to_ascii_uppercase()
-        }),
-        highlight: run.highlight_color().and_then(known_highlight).map(str::to_string),
+        color: run
+            .color()
+            .filter(|color| !color.eq_ignore_ascii_case("auto"))
+            .map(|color| color.trim_start_matches('#').to_ascii_uppercase()),
+        highlight: run
+            .highlight_color()
+            .and_then(known_highlight)
+            .map(str::to_string),
         vert_align: run.vert_align().and_then(vert_align).map(str::to_string),
         char_style: run.style_id().map(str::to_string),
         ..Marks::default()
@@ -859,7 +1457,13 @@ fn opaque_atom(src: Option<u32>, label: &str, display: &str, removable: bool) ->
     }
 }
 
-fn opaque_block(ctx: &mut Ctx, content_index: usize, label: String, text: &str, removable: bool) -> wire::Opaque {
+fn opaque_block(
+    ctx: &mut Ctx,
+    content_index: usize,
+    label: String,
+    text: &str,
+    removable: bool,
+) -> wire::Opaque {
     let src = alloc_block(ctx, BlockOrigin::Opaque { content_index }, None);
     let inlines = if text.is_empty() {
         Vec::new()
@@ -873,7 +1477,13 @@ fn opaque_block(ctx: &mut Ctx, content_index: usize, label: String, text: &str, 
     wire::Opaque::new(
         src,
         label,
-        vec![Para::new(None, ParaProps::default(), inlines, Some("preview".into()), None)],
+        vec![Para::new(
+            None,
+            ParaProps::default(),
+            inlines,
+            Some("preview".into()),
+            None,
+        )],
         removable,
     )
 }
@@ -911,10 +1521,63 @@ fn alloc_cell(ctx: &mut Ctx, table: u32, row: usize, cell: usize) -> u32 {
     src
 }
 
-fn sections_and_stories(doc: &Document) -> (Vec<wire::Section>, Vec<(String, Vec<Block>)>) {
+fn sections_and_stories(
+    doc: &Document,
+    paragraphs: &HashMap<StoryKey, Vec<String>>,
+    header_stories: &[StoryKey],
+    footer_stories: &[StoryKey],
+) -> (Vec<wire::Section>, Vec<(String, Vec<Block>)>) {
     let mut sections = Vec::new();
     let mut stories = Vec::new();
     let mut seen = BTreeSet::new();
+    // section_story reparses every earlier header. Inventory order matches the
+    // order section properties first mention each relationship.
+    let header_of = align_stories(doc, header_stories, true);
+    let footer_of = align_stories(doc, footer_stories, false);
+    if let (Some(header_of), Some(footer_of)) = (header_of, footer_of) {
+        let mut effective_headers: [Option<(usize, String)>; 3] = [None, None, None];
+        let mut effective_footers: [Option<(usize, String)>; 3] = [None, None, None];
+        for section in doc.sections() {
+            note_refs(
+                &mut effective_headers,
+                section.ordinal(),
+                section
+                    .properties()
+                    .header_refs
+                    .iter()
+                    .map(|reference| (reference.hdr_ftr_type, reference.rel_id.as_str())),
+                &header_of,
+            );
+            note_refs(
+                &mut effective_footers,
+                section.ordinal(),
+                section
+                    .properties()
+                    .footer_refs
+                    .iter()
+                    .map(|reference| (reference.hdr_ftr_type, reference.rel_id.as_str())),
+                &footer_of,
+            );
+            let headers = linked_stories(
+                &mut stories,
+                &mut seen,
+                paragraphs,
+                &effective_headers,
+                &header_of,
+                "header",
+            );
+            let footers = linked_stories(
+                &mut stories,
+                &mut seen,
+                paragraphs,
+                &effective_footers,
+                &footer_of,
+                "footer",
+            );
+            sections.push(wire_section(&section, headers, footers));
+        }
+        return (sections, stories);
+    }
     let kinds = [
         (HeaderFooterKind::Header, "header"),
         (HeaderFooterKind::Footer, "footer"),
@@ -940,46 +1603,133 @@ fn sections_and_stories(doc: &Document) -> (Vec<wire::Section>, Vec<(String, Vec
                     footers.push((type_name.to_string(), key.clone()));
                 }
                 if seen.insert(key.clone()) {
-                    stories.push((key, import_story(doc, story.story())));
+                    let blocks = match paragraphs.get(&StoryKey::from_story(story.story())) {
+                        Some(items) => import_story(items),
+                        None => import_story(&story_paragraphs(doc, story.story())),
+                    };
+                    stories.push((key, blocks));
                 }
             }
         }
         let Some(section) = doc.section(ordinal) else {
             continue;
         };
-        let (width, height) = section
-            .page_size()
-            .map(|(width, height)| (width.to_pt(), height.to_pt()))
-            .unwrap_or((612.0, 792.0));
-        let (top, right, bottom, left) = section
-            .margins()
-            .map(|(top, right, bottom, left)| {
-                (top.to_pt(), right.to_pt(), bottom.to_pt(), left.to_pt())
-            })
-            .unwrap_or((72.0, 72.0, 72.0, 72.0));
-        let (header, footer) = section
-            .header_footer_distance()
-            .map(|(header, footer)| (header.to_pt(), footer.to_pt()))
-            .unwrap_or((36.0, 36.0));
-        let gutter = section.gutter().map(Length::to_pt).unwrap_or(0.0);
-        sections.push(wire::Section {
-            src: Some(ordinal as u32),
-            width_pt: width,
-            height_pt: height,
-            margins_pt: [top, right, bottom, left, header, footer, gutter],
-            break_type: break_name(
-                section
-                    .break_type()
-                    .map(|value| format!("{value:?}"))
-                    .as_deref(),
-            ),
-            title_page: section.different_first_page().unwrap_or(false),
-            headers,
-            footers,
-            grid: section_grid(&section),
-        });
+        sections.push(wire_section(&section, headers, footers));
     }
     (sections, stories)
+}
+
+fn align_stories(
+    doc: &Document,
+    stories: &[StoryKey],
+    header: bool,
+) -> Option<HashMap<String, StoryKey>> {
+    let mut rels = Vec::new();
+    let mut seen = HashSet::new();
+    for section in doc.sections() {
+        let refs = if header {
+            &section.properties().header_refs
+        } else {
+            &section.properties().footer_refs
+        };
+        for reference in refs {
+            if seen.insert(reference.rel_id.clone()) {
+                rels.push(reference.rel_id.clone());
+            }
+        }
+    }
+    if rels.len() != stories.len() {
+        return None;
+    }
+    Some(rels.into_iter().zip(stories.iter().cloned()).collect())
+}
+
+fn note_refs<'a>(
+    effective: &mut [Option<(usize, String)>; 3],
+    ordinal: usize,
+    refs: impl IntoIterator<Item = (HdrFtrType, &'a str)>,
+    available: &HashMap<String, StoryKey>,
+) {
+    let refs: Vec<(HdrFtrType, &str)> = refs.into_iter().collect();
+    for (index, hdr_type) in [HdrFtrType::Default, HdrFtrType::First, HdrFtrType::Even]
+        .into_iter()
+        .enumerate()
+    {
+        let Some((_, rel)) = refs
+            .iter()
+            .find(|(kind, rel)| *kind == hdr_type && available.contains_key(*rel))
+        else {
+            continue;
+        };
+        effective[index] = Some((ordinal, (*rel).to_string()));
+    }
+}
+
+fn linked_stories(
+    stories: &mut Vec<(String, Vec<Block>)>,
+    seen: &mut BTreeSet<String>,
+    paragraphs: &HashMap<StoryKey, Vec<String>>,
+    effective: &[Option<(usize, String)>; 3],
+    stories_of: &HashMap<String, StoryKey>,
+    kind_name: &str,
+) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    for (index, type_name) in ["default", "first", "even"].into_iter().enumerate() {
+        let Some((source, rel)) = &effective[index] else {
+            continue;
+        };
+        let Some(story) = stories_of.get(rel) else {
+            continue;
+        };
+        let key = format!("s{source}/{kind_name}/{type_name}");
+        links.push((type_name.to_string(), key.clone()));
+        if seen.insert(key.clone()) {
+            let blocks = paragraphs
+                .get(story)
+                .map(|items| import_story(items))
+                .unwrap_or_default();
+            stories.push((key, blocks));
+        }
+    }
+    links
+}
+
+fn wire_section(
+    section: &SectionRef<'_>,
+    headers: Vec<(String, String)>,
+    footers: Vec<(String, String)>,
+) -> wire::Section {
+    let (width, height) = section
+        .page_size()
+        .map(|(width, height)| (width.to_pt(), height.to_pt()))
+        .unwrap_or((612.0, 792.0));
+    let (top, right, bottom, left) = section
+        .margins()
+        .map(|(top, right, bottom, left)| {
+            (top.to_pt(), right.to_pt(), bottom.to_pt(), left.to_pt())
+        })
+        .unwrap_or((72.0, 72.0, 72.0, 72.0));
+    let (header, footer) = section
+        .header_footer_distance()
+        .map(|(header, footer)| (header.to_pt(), footer.to_pt()))
+        .unwrap_or((36.0, 36.0));
+    let gutter = section.gutter().map(Length::to_pt).unwrap_or(0.0);
+    wire::Section {
+        src: Some(section.ordinal() as u32),
+        width_pt: width,
+        height_pt: height,
+        margins_pt: [top, right, bottom, left, header, footer, gutter],
+        break_type: break_name(
+            section
+                .break_type()
+                .map(|value| format!("{value:?}"))
+                .as_deref(),
+        ),
+        title_page: section.different_first_page().unwrap_or(false),
+        headers,
+        footers,
+        grid: section_grid(section),
+    }
 }
 
 fn break_name(value: Option<&str>) -> String {
@@ -1008,21 +1758,25 @@ fn section_grid(section: &rdocx::SectionRef<'_>) -> Option<(String, f64, Option<
     ))
 }
 
-fn import_story(doc: &Document, story: &StoryId) -> Vec<Block> {
+fn story_paragraphs(doc: &Document, story: &StoryId) -> Vec<String> {
     let Ok(items) = doc.story_items(story) else {
         return Vec::new();
     };
+    items
+        .into_iter()
+        .filter(|item| item.kind() == StoryItemKind::Paragraph)
+        .map(|item| item.text().ok().flatten().unwrap_or_default())
+        .collect()
+}
+
+fn import_story(paragraphs: &[String]) -> Vec<Block> {
     let mut blocks = Vec::new();
-    for item in items {
-        if item.kind() != StoryItemKind::Paragraph {
-            continue;
-        }
-        let text = item.text().ok().flatten().unwrap_or_default();
+    for text in paragraphs {
         let inlines = if text.is_empty() {
             Vec::new()
         } else {
             vec![Inline::Text {
-                text,
+                text: text.clone(),
                 marks: Marks::default(),
                 src: None,
             }]
@@ -1044,7 +1798,11 @@ fn para_looks(doc: &Document, styles: &StyleSheet, ctx: &mut Ctx) -> Vec<wire::P
     let ids: Vec<String> = if styles.paragraph.is_empty() {
         vec![styles.default_paragraph.clone()]
     } else {
-        styles.paragraph.iter().map(|style| style.id.clone()).collect()
+        styles
+            .paragraph
+            .iter()
+            .map(|style| style.id.clone())
+            .collect()
     };
     for style in ids {
         let mut props = doc.resolve_paragraph_properties(Some(&style));
@@ -1095,7 +1853,10 @@ fn para_look_from(props: &rdocx::CT_PPr) -> ParaLook {
                 .or(props.ind_end)
                 .map(|value| value.to_pt())
                 .unwrap_or(0.0),
-            first_line: props.ind_first_line.map(|value| value.to_pt()).unwrap_or(0.0),
+            first_line: props
+                .ind_first_line
+                .map(|value| value.to_pt())
+                .unwrap_or(0.0),
             hanging: props.ind_hanging.map(|value| value.to_pt()).unwrap_or(0.0),
             first_line_chars: None,
         },
@@ -1146,7 +1907,12 @@ fn run_looks(doc: &Document, ctx: &Ctx) -> Vec<wire::RunLookEntry> {
 }
 
 fn run_look_from(props: &rdocx::CT_RPr, theme: Option<&rdocx::CT_OfficeStyleSheet>) -> RunLook {
-    let ascii = font_of(props.font_ascii.as_deref(), props.font_ascii_theme.as_deref(), theme, "Calibri");
+    let ascii = font_of(
+        props.font_ascii.as_deref(),
+        props.font_ascii_theme.as_deref(),
+        theme,
+        "Calibri",
+    );
     let h_ansi = match props.font_hansi.as_deref().filter(|name| !name.is_empty()) {
         Some(name) => name.to_string(),
         None => match props.font_hansi_theme.as_deref() {
@@ -1160,7 +1926,12 @@ fn run_look_from(props: &rdocx::CT_RPr, theme: Option<&rdocx::CT_OfficeStyleShee
         theme,
         &ascii,
     );
-    let cs = font_of(props.font_cs.as_deref(), props.font_cs_theme.as_deref(), theme, &ascii);
+    let cs = font_of(
+        props.font_cs.as_deref(),
+        props.font_cs_theme.as_deref(),
+        theme,
+        &ascii,
+    );
     RunLook {
         fonts: RunFonts {
             ascii,
@@ -1272,7 +2043,10 @@ fn lists(doc: &Document, nums: &BTreeSet<u32>) -> Vec<(i32, ListDef)> {
                 format: list_format(&definition.format, definition.format_name),
                 text: definition.level_text.unwrap_or("").to_string(),
                 start: definition.start,
-                indent_left_pt: definition.indent_left.map(|value| value.to_pt()).unwrap_or(0.0),
+                indent_left_pt: definition
+                    .indent_left
+                    .map(|value| value.to_pt())
+                    .unwrap_or(0.0),
                 hanging_pt: definition
                     .indent_hanging
                     .map(|value| value.to_pt())
@@ -1312,8 +2086,8 @@ fn list_format(format: &NumberingFormat<'_>, name: &str) -> String {
 
 fn note_field_xml(raw: &[u8], depth: &mut i32) {
     let text = String::from_utf8_lossy(raw);
-    let begins = text.matches("fldCharType=\"begin\"").count()
-        + text.matches("fldCharType='begin'").count();
+    let begins =
+        text.matches("fldCharType=\"begin\"").count() + text.matches("fldCharType='begin'").count();
     let ends =
         text.matches("fldCharType=\"end\"").count() + text.matches("fldCharType='end'").count();
     *depth += begins as i32;
