@@ -296,42 +296,294 @@ export interface DocIndex {
 
 // ---- Pure helpers --------------------------------------------------------------------------------------------------
 
+const MARK_KEYS = [
+  'bold', 'italic', 'underline', 'strike', 'font', 'fontEastAsia', 'sizePt', 'color', 'highlight', 'vertAlign', 'charStyle', 'link',
+] as const satisfies readonly (keyof Marks)[]
+
+const indexCache = new WeakMap<readonly Block[], DocIndex>()
+const textCache = new WeakMap<Paragraph, string>()
+let idCounter = 1
+
 /** Derived paragraph index, cached per body array identity. O(paragraphs) to rebuild, about 0.3 ms at 100 pages. */
 export function indexOf(doc: Doc): DocIndex {
-  throw new Error('not implemented')
+  const cached = indexCache.get(doc.body)
+  if (cached) return cached
+  const built = buildIndex(doc)
+  indexCache.set(doc.body, built)
+  return built
 }
 
 /** The paragraph's flat text: run text, with U+FFFC for each atom. Length is the paragraph's offset range. */
 export function flatText(para: Paragraph): string {
-  throw new Error('not implemented')
+  const cached = textCache.get(para)
+  if (cached !== undefined) return cached
+  let text = ''
+  for (const inline of para.inlines) text += inline.kind === 'text' ? inline.text : '\uFFFC'
+  textCache.set(para, text)
+  return text
 }
 
 export function comparePos(index: DocIndex, a: Pos, b: Pos): -1 | 0 | 1 {
-  throw new Error('not implemented')
+  const left = index.get(a.p)
+  const right = index.get(b.p)
+  if (left.order < right.order) return -1
+  if (left.order > right.order) return 1
+  if (a.o < b.o) return -1
+  if (a.o > b.o) return 1
+  return 0
 }
 
 /** Merge adjacent runs with equal src and marks, drop empty runs. Every command that edits inlines ends here. */
 export function normalizeInlines(inlines: readonly Inline[]): readonly Inline[] {
-  throw new Error('not implemented')
+  const out: Inline[] = []
+  let changed = false
+  for (const inline of inlines) {
+    if (inline.kind === 'atom') {
+      out.push(inline)
+      continue
+    }
+    if (inline.text.length === 0) {
+      changed = true
+      continue
+    }
+    const prev = out[out.length - 1]
+    if (prev && prev.kind === 'text' && prev.src === inline.src && marksEqual(prev.marks, inline.marks)) {
+      out[out.length - 1] = { ...prev, text: prev.text + inline.text }
+      changed = true
+      continue
+    }
+    out.push(inline)
+  }
+  if (!changed && out.length === inlines.length) return inlines
+  return out
 }
 
 /** Which inline covers offset o, and the offset inside it. At a boundary, prefers the inline before (Word's rule). */
 export function inlineAt(para: Paragraph, o: number): { index: number; offset: number } {
-  throw new Error('not implemented')
+  const inlines = para.inlines
+  if (inlines.length === 0) return { index: 0, offset: 0 }
+  if (o <= 0) return { index: 0, offset: 0 }
+  let cursor = 0
+  for (let i = 0; i < inlines.length; i++) {
+    const inline = inlines[i]
+    if (!inline) break
+    const len = inline.kind === 'text' ? inline.text.length : 1
+    const next = cursor + len
+    if (o <= next) return { index: i, offset: o - cursor }
+    cursor = next
+  }
+  const last = inlines.length - 1
+  const tail = inlines[last]
+  const tailLen = tail?.kind === 'text' ? tail.text.length : 1
+  return { index: last, offset: tailLen }
 }
 
-/** The marks typed text gets at this position: the stored marks if any, else the marks of the run before the caret. */
+/**
+ * Marks and run src typed text inherits at `o`.
+ * Stored marks are applied by the caller: this is the run before the caret (the run after, at offset 0).
+ * An atom has no text src to extend, so the src is null and marks come from the nearest text run.
+ */
 export function marksAt(para: Paragraph, o: number): { marks: Marks; src: RunSrc | null } {
-  throw new Error('not implemented')
+  if (para.inlines.length === 0) return { marks: {}, src: null }
+  const at = inlineAt(para, o)
+  const inline = para.inlines[at.index]
+  if (inline?.kind === 'text') return { marks: inline.marks, src: inline.src }
+  if (at.offset > 0) {
+    for (let i = at.index - 1; i >= 0; i--) {
+      const prev = para.inlines[i]
+      if (prev?.kind === 'text') return { marks: prev.marks, src: null }
+    }
+  }
+  for (let i = at.index + 1; i < para.inlines.length; i++) {
+    const next = para.inlines[i]
+    if (next?.kind === 'text') return { marks: next.marks, src: null }
+  }
+  for (let i = at.index - 1; i >= 0; i--) {
+    const prev = para.inlines[i]
+    if (prev?.kind === 'text') return { marks: prev.marks, src: null }
+  }
+  return { marks: {}, src: null }
 }
 
 /** Throws with the first violated invariant (1 to 6 above). Tests and debug builds only. */
 export function checkDoc(doc: Doc, baseline?: Doc): void {
-  // TODO: walk every story. Check run text, non-decreasing src order per story, normalization, and cells ending in a
-  // paragraph. With a baseline doc, also check that locked paragraphs and non-removable atoms are the same objects.
-  throw new Error('not implemented')
+  const seen = new Set<ParaId>()
+  checkStory(doc.body, seen)
+  for (const blocks of doc.stories.values()) checkStory(blocks, seen)
+  if (!baseline) return
+  const lockedNow = collectLocked(doc)
+  const lockedBase = collectLocked(baseline)
+  if (!sameRefs(lockedBase, lockedNow)) throw new Error('invariant 5: locked paragraph changed')
+  const atomsNow = collectFixedAtoms(doc)
+  const atomsBase = collectFixedAtoms(baseline)
+  if (!sameRefs(atomsBase, atomsNow)) throw new Error('invariant 5: non-removable atom changed')
 }
 
 export function newParaId(): ParaId {
-  throw new Error('not implemented')
+  return `id-${idCounter++}` as ParaId
+}
+
+function marksEqual(a: Marks, b: Marks): boolean {
+  for (const key of MARK_KEYS) {
+    if (a[key] !== b[key]) return false
+  }
+  return true
+}
+
+function buildIndex(doc: Doc): DocIndex {
+  const byId = new Map<ParaId, ParaLoc>()
+  const ordered: ParaId[] = []
+  let order = 0
+  const visitPara = (para: Paragraph, story: 'body' | StoryKey, path: number[]): void => {
+    if (byId.has(para.id)) throw new Error(`duplicate paragraph id ${para.id}`)
+    const loc: ParaLoc = { story, path, order, para }
+    order += 1
+    byId.set(para.id, loc)
+    ordered.push(para.id)
+  }
+  const visitBlocks = (blocks: readonly Block[], story: 'body' | StoryKey, prefix: number[]): void => {
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i]
+      if (!block) continue
+      const path = prefix.concat(i)
+      if (block.kind === 'p') visitPara(block, story, path)
+      else if (block.kind === 'table') {
+        for (let r = 0; r < block.rows.length; r++) {
+          const row = block.rows[r]
+          if (!row) continue
+          for (let c = 0; c < row.cells.length; c++) {
+            const cell = row.cells[c]
+            if (!cell) continue
+            visitBlocks(cell.blocks, story, path.concat(r, c))
+          }
+        }
+      } else {
+        for (let p = 0; p < block.preview.length; p++) {
+          const para = block.preview[p]
+          if (para) visitPara(para, story, path.concat(p))
+        }
+      }
+    }
+  }
+  visitBlocks(doc.body, 'body', [])
+  for (const [key, blocks] of doc.stories) visitBlocks(blocks, key, [])
+  return {
+    get(id: ParaId): ParaLoc {
+      const loc = byId.get(id)
+      if (!loc) throw new Error(`unknown paragraph ${id}`)
+      return loc
+    },
+    ordered,
+  }
+}
+
+interface SrcCursor {
+  para: number | null
+  run: number | null
+}
+
+function checkStory(blocks: readonly Block[], seen: Set<ParaId>): void {
+  const cursor: SrcCursor = { para: null, run: null }
+  checkBlocks(blocks, cursor, seen)
+}
+
+function checkBlocks(blocks: readonly Block[], cursor: SrcCursor, seen: Set<ParaId>): void {
+  for (const block of blocks) {
+    if (block.kind === 'p') checkParagraph(block, cursor, seen)
+    else if (block.kind === 'table') {
+      for (const row of block.rows) {
+        for (const cell of row.cells) {
+          if (cell.blocks.length === 0) throw new Error('invariant 6: empty cell')
+          const last = cell.blocks[cell.blocks.length - 1]
+          if (!last || last.kind !== 'p') throw new Error('invariant 6: cell does not end with a paragraph')
+          checkBlocks(cell.blocks, cursor, seen)
+        }
+      }
+    } else {
+      for (const para of block.preview) checkParagraph(para, cursor, seen)
+    }
+  }
+}
+
+function checkParagraph(para: Paragraph, cursor: SrcCursor, seen: Set<ParaId>): void {
+  if (seen.has(para.id)) throw new Error(`duplicate paragraph id ${para.id}`)
+  seen.add(para.id)
+  if (para.src !== null) {
+    if (cursor.para !== null && para.src < cursor.para) throw new Error('invariant 3: paragraph src order')
+    cursor.para = para.src
+  }
+  let prev: TextRun | null = null
+  for (const inline of para.inlines) {
+    if (inline.kind === 'atom') {
+      prev = null
+      if (inline.src !== null) {
+        if (cursor.run !== null && inline.src < cursor.run) throw new Error('invariant 3: run src order')
+        cursor.run = inline.src
+      }
+      continue
+    }
+    if (inline.text.length === 0) throw new Error('invariant 2: empty text run')
+    if (inline.text.includes('\uFFFC')) throw new Error('invariant 2: text run contains U+FFFC')
+    if (prev && prev.src === inline.src && marksEqual(prev.marks, inline.marks)) {
+      throw new Error('invariant 4: adjacent text runs must be merged')
+    }
+    if (inline.src !== null) {
+      if (cursor.run !== null && inline.src < cursor.run) throw new Error('invariant 3: run src order')
+      cursor.run = inline.src
+    }
+    prev = inline
+  }
+}
+
+function collectLocked(doc: Doc): Paragraph[] {
+  const out: Paragraph[] = []
+  const walk = (blocks: readonly Block[]): void => {
+    for (const block of blocks) {
+      if (block.kind === 'p') {
+        if (block.lock) out.push(block)
+      } else if (block.kind === 'table') {
+        for (const row of block.rows) for (const cell of row.cells) walk(cell.blocks)
+      } else {
+        for (const para of block.preview) if (para.lock) out.push(para)
+      }
+    }
+  }
+  walk(doc.body)
+  for (const blocks of doc.stories.values()) walk(blocks)
+  return out
+}
+
+function collectFixedAtoms(doc: Doc): Atom[] {
+  const out: Atom[] = []
+  const walkPara = (para: Paragraph): void => {
+    for (const inline of para.inlines) {
+      if (inline.kind === 'atom' && inline.atom.type === 'opaque' && !inline.atom.removable) out.push(inline)
+    }
+  }
+  const walk = (blocks: readonly Block[]): void => {
+    for (const block of blocks) {
+      if (block.kind === 'p') walkPara(block)
+      else if (block.kind === 'table') {
+        for (const row of block.rows) for (const cell of row.cells) walk(cell.blocks)
+      } else {
+        for (const para of block.preview) walkPara(para)
+      }
+    }
+  }
+  walk(doc.body)
+  for (const blocks of doc.stories.values()) walk(blocks)
+  return out
+}
+
+function sameRefs<T extends object>(a: readonly T[], b: readonly T[]): boolean {
+  if (a.length !== b.length) return false
+  const counts = new Map<T, number>()
+  for (const item of a) counts.set(item, (counts.get(item) ?? 0) + 1)
+  for (const item of b) {
+    const count = counts.get(item)
+    if (count === undefined) return false
+    if (count === 1) counts.delete(item)
+    else counts.set(item, count - 1)
+  }
+  return counts.size === 0
 }
