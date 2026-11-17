@@ -640,10 +640,3 @@ export function pageBoxStyle(section: Section): { page: Partial<CSSStyleDeclarat
     },
   }
 }
-
-/** Flat text of a paragraph. Private stand-in until model.ts exports flatText. */
-export function flatText(para: Paragraph): string {
-  let text = ''
-  for (const inline of para.inlines) text += inline.kind === 'text' ? inline.text : '\uFFFC'
-  return text
-}

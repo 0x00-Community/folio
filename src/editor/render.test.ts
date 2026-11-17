@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Pt, RunLook } from '../model.ts'
-import { flatText, pageBoxStyle, scriptSegments } from './render.ts'
-import type { Paragraph, Section } from '../model.ts'
+import { pageBoxStyle, scriptSegments } from './render.ts'
+import type { Section } from '../model.ts'
 
 const look = {
   fonts: { ascii: 'Times', hAnsi: 'TimesHigh', eastAsia: 'SimSun', cs: 'Naskh' },
@@ -30,23 +30,6 @@ test('scriptSegments keeps fullwidth forms on the east Asia font and high ANSI o
   assert.equal(segments[0]?.family, 'Times')
   assert.equal(segments[1]?.family, 'SimSun')
   assert.equal(segments[2]?.family, 'TimesHigh')
-})
-
-test('flatText counts an atom as one object-replacement character', () => {
-  const para = {
-    kind: 'p',
-    id: 'p' as Paragraph['id'],
-    src: null,
-    props: {},
-    inlines: [
-      { kind: 'text', text: 'ab', marks: {}, src: null },
-      { kind: 'atom', atom: { type: 'pageBreak' }, src: null },
-      { kind: 'text', text: 'c', marks: {}, src: null },
-    ],
-    lock: null,
-    sectionEnd: null,
-  } satisfies Paragraph
-  assert.equal(flatText(para), 'ab\uFFFCc')
 })
 
 test('pageBoxStyle converts points to px at 4/3', () => {

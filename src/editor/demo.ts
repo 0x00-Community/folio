@@ -1,3 +1,4 @@
+import { flatText } from '../model.ts'
 import type {
   Block,
   Cell,
@@ -19,7 +20,7 @@ import type {
   TableId,
 } from '../model.ts'
 import { PageView } from './pages.ts'
-import { flatText, type RenderContext } from './render.ts'
+import type { RenderContext } from './render.ts'
 import './view.css'
 
 const NORMAL = 'Normal' as StyleId

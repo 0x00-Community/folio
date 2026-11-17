@@ -1,3 +1,4 @@
+import { flatText } from '../model.ts'
 import type {
   Block,
   BlockId,
@@ -13,7 +14,6 @@ import type {
 import {
   blockElements,
   domPoint,
-  flatText,
   pageBoxStyle,
   posFromDom,
   PT_TO_PX,
