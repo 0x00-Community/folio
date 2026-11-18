@@ -1,6 +1,8 @@
 # Round 2 brief: the editor shell
 
-Status: written, not dispatched. The user asked to stop after this brief.
+Status: all three units pass their checks on `r2/shell` (2026-11-18). Not verified: clipboard and IME composition, which
+a headless session cannot drive. Delegates cannot reach the `acde dev` socket from their sandbox, so the reviewer runs
+every e2e script on the host.
 
 ## Goal
 
@@ -16,7 +18,7 @@ service. This round connects them and adds the input layer and the app shell. Sa
 - `docs/design/candidate-b/sketch/editor/editor.ts`, `sketch/editor/input.ts`, `sketch/usage.ts`. These hold the
   intended signatures.
 - `docs/design/grounding.md` for what acdert can and cannot do.
-- The acde skill (`~/.grok/skills/acde/SKILL.md`) and its references on capabilities, files, opening apps and windows.
+- The acde skill (`~/.acde/current/lib/acde/skills/acde/SKILL.md`) and its references on capabilities, files, opening apps and windows.
   Read the reference before using any `acde:` module. Do not guess an API.
 - The code this round builds on: `src/model.ts`, `src/editor/edit.ts`, `src/editor/pages.ts` (`PageView`),
   `src/editor/render.ts` (`RenderContext`), `src/engine/engine.ts` (`loadEngine`, `Engine`, `Opened`, `Source`),
