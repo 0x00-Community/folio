@@ -54,6 +54,10 @@ export function cssStack(family: string, generic: 'serif' | 'sans-serif'): strin
 
 export type FontMetrics = {
   readonly unitsPerEm: number
+  /** Line box the resolver honors. `descender` is negative: OS/2 typo metrics when USE_TYPO_METRICS is set, otherwise hhea. */
+  readonly ascender: number
+  readonly descender: number
+  readonly lineGap: number
   readonly winAscent: number
   readonly winDescent: number
   readonly typoAscender: number
@@ -109,15 +113,22 @@ async function resolveFamily(family: string): Promise<ResolvedFace | undefined> 
   return body
 }
 
-/** Fetches one standalone face per family that resolves. Missing families are omitted. */
+/** Fetches one standalone face per family that resolves. Missing families are omitted, without a request that 404s. */
 export async function fetchFonts(families: readonly string[]): Promise<ReadonlyMap<string, Uint8Array>> {
+  const installed = await installedNames()
   const out = new Map<string, Uint8Array>()
+  if (installed === null) return out
   for (const family of families) {
-    const resolved = await resolveFamily(family)
-    if (resolved === undefined) continue
-    const response = await fetch(`/api/fonts/${encodeURIComponent(resolved.id)}/face`)
-    if (!response.ok) throw new Error(`font face ${family}: ${response.status}`)
-    out.set(family, new Uint8Array(await response.arrayBuffer()))
+    if (!listed(family, installed)) continue
+    try {
+      const resolved = await resolveFamily(family)
+      if (resolved === undefined) continue
+      const response = await fetch(`/api/fonts/${encodeURIComponent(resolved.id)}/face`)
+      if (!response.ok) continue
+      out.set(family, new Uint8Array(await response.arrayBuffer()))
+    } catch {
+      // One face that fails to read leaves the others usable.
+    }
   }
   return out
 }
@@ -127,24 +138,66 @@ function metric(resolved: ResolvedFace, name: keyof ResolvedFace['metrics'], fal
   return typeof value === 'number' ? value : fallback
 }
 
-/** Units and the vertical metrics the resolver read. The honored triple fills any slot the response omits. */
+/**
+ * Units and the vertical metrics the resolver read. The honored triple fills any slot the response omits.
+ * Families the index does not list are skipped: a 404 for a missing face is a console error, and line height falls back.
+ */
 export async function fetchMetrics(families: readonly string[]): Promise<ReadonlyMap<string, FontMetrics>> {
+  const installed = await installedNames()
   const out = new Map<string, FontMetrics>()
+  if (installed === null) return out
   for (const family of families) {
-    const resolved = await resolveFamily(family)
-    if (resolved === undefined) continue
-    const { ascender, descender, lineGap, unitsPerEm } = resolved.metrics
-    out.set(family, {
-      unitsPerEm,
-      winAscent: metric(resolved, 'winAscent', Math.abs(ascender)),
-      winDescent: metric(resolved, 'winDescent', Math.abs(descender)),
-      typoAscender: metric(resolved, 'typoAscender', ascender),
-      typoDescender: metric(resolved, 'typoDescender', descender),
-      typoLineGap: metric(resolved, 'typoLineGap', lineGap),
-      hheaAscender: metric(resolved, 'hheaAscender', ascender),
-      hheaDescender: metric(resolved, 'hheaDescender', descender),
-      hheaLineGap: metric(resolved, 'hheaLineGap', lineGap),
-    })
+    if (!listed(family, installed)) continue
+    try {
+      const resolved = await resolveFamily(family)
+      if (resolved === undefined) continue
+      const { ascender, descender, lineGap, unitsPerEm } = resolved.metrics
+      out.set(family, {
+        unitsPerEm,
+        ascender,
+        descender,
+        lineGap,
+        winAscent: metric(resolved, 'winAscent', Math.abs(ascender)),
+        winDescent: metric(resolved, 'winDescent', Math.abs(descender)),
+        typoAscender: metric(resolved, 'typoAscender', ascender),
+        typoDescender: metric(resolved, 'typoDescender', descender),
+        typoLineGap: metric(resolved, 'typoLineGap', lineGap),
+        hheaAscender: metric(resolved, 'hheaAscender', ascender),
+        hheaDescender: metric(resolved, 'hheaDescender', descender),
+        hheaLineGap: metric(resolved, 'hheaLineGap', lineGap),
+      })
+    } catch {
+      // One face that fails to read leaves the others usable.
+    }
   }
   return out
+}
+
+function listed(family: string, names: ReadonlySet<string>): boolean {
+  return aliasChain(family).some((name) => names.has(name.toLowerCase()))
+}
+
+async function installedNames(): Promise<ReadonlySet<string> | null> {
+  let response: Response
+  try {
+    response = await fetch('/api/fonts')
+  } catch {
+    return null
+  }
+  if (!response.ok) return null
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(body)) return null
+  const names = new Set<string>()
+  for (const item of body) {
+    if (!isRecord(item) || !Array.isArray(item.families)) continue
+    for (const name of item.families) {
+      if (typeof name === 'string' && name.trim() !== '') names.add(name.toLowerCase())
+    }
+  }
+  return names
 }
