@@ -312,6 +312,15 @@ export const deleteSelection: Command = (state) => {
   return done(removed.doc, caret(removed.pos), null, 'deleting')
 }
 
+/** Drops a non-empty selection at the start of an IME composition, as a typing step so the commit coalesces with it. */
+export function compositionDelete(): Command {
+  return (state) => {
+    const tr = deleteSelection(state)
+    if (!tr) return null
+    return { ...tr, intent: 'typing' }
+  }
+}
+
 export type ToggleMark = 'bold' | 'italic' | 'underline' | 'strike'
 
 export function toggleMark(mark: ToggleMark): Command {
@@ -2082,6 +2091,13 @@ function prevWordStop(text: string, o: number): number {
     prev = stop
   }
   return prev
+}
+
+/** The word a double click selects. An offset on whitespace uses the nearest word, preferring the one before. */
+export function wordRange(text: string, offset: number): { start: number, end: number } {
+  if (text.length === 0) return { start: 0, end: 0 }
+  const o = offset < 0 ? 0 : offset > text.length ? text.length : offset
+  return wordSpan(text, o)
 }
 
 function wordSpan(text: string, o: number): { start: number, end: number } {

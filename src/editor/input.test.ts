@@ -2,9 +2,23 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { checkDoc, flatText } from '../model.ts'
 import type { Paragraph, Pos } from '../model.ts'
-import { apply, initialState, insertText, setSelection } from './edit.ts'
+import { apply, compositionDelete, initialState, insertText, selectedText, setSelection, splitParagraph, undo } from './edit.ts'
 import type { EditorState } from './edit.ts'
-import { buildKeymap, chordOf, defaultKeymap, IDLE, transition } from './input.ts'
+import {
+  buildKeymap,
+  chordOf,
+  defaultKeymap,
+  detectPlatform,
+  dragEndpoints,
+  dragUnit,
+  gestureOffsets,
+  IDLE,
+  paragraphRange,
+  planBeforeInput,
+  trackGoal,
+  transition,
+  wordRange,
+} from './input.ts'
 import type { Action, DragUnit, InputMode, KeyFields, ModeEvent, Platform } from './input.ts'
 import { makeDoc, paragraph, paraId, text } from './testkit.ts'
 
@@ -355,6 +369,143 @@ test('a composition that starts during a drag takes over from the drag', () => {
 test('reset abandons a composition or a drag', () => {
   assert.deepEqual(transition(composing, reset), IDLE)
   assert.deepEqual(transition(dragging, reset), IDLE)
+})
+
+test('wordRange selects the word under the offset and the word before a space', () => {
+  assert.deepEqual(wordRange('hello world', 1), { start: 0, end: 5 })
+  assert.deepEqual(wordRange('hello world', 5), { start: 0, end: 5 }, 'a space belongs to the word before it')
+  assert.deepEqual(wordRange('hello world', 6), { start: 6, end: 11 })
+  assert.deepEqual(wordRange('hello world', 11), { start: 6, end: 11 }, 'the end of the text is the last word')
+  assert.deepEqual(wordRange('', 0), { start: 0, end: 0 })
+  const cjk = wordRange('你好世界', 1)
+  assert.ok(cjk.start <= 1 && cjk.end > 1 && cjk.end <= 4, `cjk word ${cjk.start}-${cjk.end}`)
+})
+
+test('paragraphRange is the whole paragraph, including an empty one', () => {
+  assert.deepEqual(paragraphRange('hello'), { start: 0, end: 5 })
+  assert.deepEqual(paragraphRange(''), { start: 0, end: 0 })
+})
+
+test('dragUnit follows the click count', () => {
+  assert.equal(dragUnit(1), 'char')
+  assert.equal(dragUnit(0), 'char')
+  assert.equal(dragUnit(2), 'word')
+  assert.equal(dragUnit(3), 'paragraph')
+  assert.equal(dragUnit(4), 'paragraph')
+})
+
+test('a double click selects the word and a drag grows by that word', () => {
+  assert.deepEqual(gestureOffsets('hello world', 1, 1, 'word'), { anchor: 0, head: 5 })
+  assert.deepEqual(gestureOffsets('hello world', 1, 8, 'word'), { anchor: 0, head: 11 }, 'dragging forward covers both words')
+  assert.deepEqual(gestureOffsets('hello world', 8, 1, 'word'), { anchor: 11, head: 0 }, 'dragging backward keeps the press as the anchor side')
+  assert.deepEqual(gestureOffsets('hello world', 2, 5, 'char'), { anchor: 2, head: 5 })
+  assert.deepEqual(gestureOffsets('hello world', 5, 2, 'char'), { anchor: 5, head: 2 })
+  assert.deepEqual(gestureOffsets('abcdef', 4, 1, 'paragraph'), { anchor: 6, head: 0 })
+  assert.deepEqual(gestureOffsets('abcdef', 1, 4, 'paragraph'), { anchor: 0, head: 6 })
+})
+
+test('a drag across paragraphs expands each end to its unit', () => {
+  assert.deepEqual(dragEndpoints('hello', 1, 'world', 1, false, false, 'word'), { anchor: 0, head: 5 })
+  assert.deepEqual(dragEndpoints('hello', 1, 'world', 1, false, true, 'word'), { anchor: 5, head: 0 })
+  assert.deepEqual(dragEndpoints('hello', 1, 'world', 3, false, false, 'char'), { anchor: 1, head: 3 })
+  assert.deepEqual(dragEndpoints('hello', 2, 'world', 1, false, false, 'paragraph'), { anchor: 0, head: 5 })
+  assert.deepEqual(dragEndpoints('hello', 2, 'world', 1, true, false, 'word'), gestureOffsets('hello', 2, 1, 'word'))
+})
+
+test('the goal column sticks across vertical moves and clears on any other action', () => {
+  const down: Action = { kind: 'visual', motion: 'lineDown', extend: false }
+  const downExtend: Action = { kind: 'visual', motion: 'lineDown', extend: true }
+  const up: Action = { kind: 'visual', motion: 'lineUp', extend: false }
+  const page: Action = { kind: 'visual', motion: 'pageDown', extend: false }
+  assert.equal(trackGoal(null, down, 40), 40, 'the first vertical move measures the caret')
+  assert.equal(trackGoal(40, down, 12), 40, 'the next vertical move keeps the column')
+  assert.equal(trackGoal(40, downExtend, 3), 40, 'shift does not start a new column')
+  assert.equal(trackGoal(40, up, 90), 40)
+  assert.equal(trackGoal(40, page, 1), 40)
+  assert.equal(trackGoal(40, { kind: 'visual', motion: 'lineStart', extend: false }, 40), null)
+  assert.equal(trackGoal(40, { kind: 'visual', motion: 'lineEnd', extend: true }, 40), null)
+  assert.equal(trackGoal(40, { kind: 'history', step: 'undo' }, 40), null)
+  assert.equal(trackGoal(40, { kind: 'clipboard', op: 'paste' }, 40), null)
+  assert.equal(trackGoal(40, { kind: 'command', command: splitParagraph }, 40), null)
+  assert.equal(trackGoal(null, down, null), null)
+})
+
+test('beforeinput maps text, breaks and deletes, and leaves composition to the composition events', () => {
+  const start = stateAt(first, 5)
+  const inserted = planBeforeInput('insertText', 'XY', false)
+  assert.equal(inserted.kind, 'run')
+  if (inserted.kind === 'run') {
+    const tr = inserted.command(start)
+    assert.ok(tr)
+    const para = apply(start, tr, 0).doc.body[0]
+    assert.ok(para && para.kind === 'p')
+    assert.equal(flatText(para), 'helloXY world')
+  }
+  assert.equal(planBeforeInput('insertText', '', false).kind, 'ignore')
+  assert.equal(planBeforeInput('insertText', null, false).kind, 'ignore')
+  const line = planBeforeInput('insertLineBreak', null, false)
+  assert.equal(line.kind, 'run')
+  if (line.kind === 'run') {
+    const tr = line.command(start)
+    assert.ok(tr)
+    const para = apply(start, tr, 0).doc.body[0]
+    assert.ok(para && para.kind === 'p')
+    assert.equal(flatText(para), 'hello\n world')
+  }
+  const split = planBeforeInput('insertParagraph', null, false)
+  assert.equal(split.kind, 'run')
+  if (split.kind === 'run') assert.equal(split.command, splitParagraph)
+  const back = planBeforeInput('deleteContentBackward', null, false)
+  assert.equal(back.kind, 'run')
+  if (back.kind === 'run') {
+    const tr = back.command(start)
+    assert.ok(tr)
+    const para = apply(start, tr, 0).doc.body[0]
+    assert.ok(para && para.kind === 'p')
+    assert.equal(flatText(para), 'hell world')
+  }
+  const forward = planBeforeInput('deleteContentForward', null, false)
+  assert.equal(forward.kind, 'run')
+  if (forward.kind === 'run') {
+    const tr = forward.command(start)
+    assert.ok(tr)
+    const para = apply(start, tr, 0).doc.body[0]
+    assert.ok(para && para.kind === 'p')
+    assert.equal(flatText(para), 'helloworld')
+  }
+  assert.equal(planBeforeInput('insertText', 'a', true).kind, 'compose', 'typing during composition stays out of the model')
+  for (const type of ['insertCompositionText', 'deleteCompositionText', 'insertFromComposition', 'deleteByComposition']) {
+    assert.equal(planBeforeInput(type, 'a', false).kind, 'compose', type)
+  }
+  assert.equal(planBeforeInput('insertFromPaste', 'pasted', false).kind, 'ignore', 'paste arrives as a clipboard event')
+})
+
+test('replacing a selection with a composition is one typing entry', () => {
+  const start = stateAt(first, 2)
+  const selectedTr = setSelection({ kind: 'text', anchor: { p: first.id, o: 2 }, head: { p: first.id, o: 5 } })(start)
+  assert.ok(selectedTr)
+  const selected = apply(start, selectedTr, 0)
+  assert.equal(compositionDelete()(stateAt(first, 3)), null, 'a collapsed caret deletes nothing')
+  const cleared = compositionDelete()(selected)
+  assert.ok(cleared)
+  const mid = apply(selected, cleared, 0)
+  const typed = insertText('XY')(mid)
+  assert.ok(typed)
+  const done = apply(mid, typed, 20)
+  assert.equal(done.history.past.length, 1, 'the deletion and the commit coalesce')
+  const para = done.doc.body[0]
+  assert.ok(para && para.kind === 'p')
+  assert.equal(flatText(para), 'heXY world')
+  const undone = undo(done)
+  assert.ok(undone)
+  assert.equal(selectedText(undone), 'llo')
+})
+
+test('detectPlatform treats Macintosh as mac and Linux, including Dopame, as other', () => {
+  assert.equal(detectPlatform('MacIntel'), 'mac')
+  assert.equal(detectPlatform('', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'), 'mac')
+  assert.equal(detectPlatform('Linux', 'Mozilla/5.0 (X11; Linux x86_64)'), 'other')
+  assert.equal(detectPlatform('Win32'), 'other')
 })
 
 test('every mode and event pair returns a mode without throwing', () => {

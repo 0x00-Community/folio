@@ -4,8 +4,12 @@ import { cssStack, fetchMetrics } from '../fonts.ts'
 import type { FontMetrics } from '../fonts.ts'
 import { indexOf } from '../model.ts'
 import type { Block, Doc, Paragraph, ParaId, Pos, Table } from '../model.ts'
-import { apply, initialState, redo as redoState, toolbarState, undo as undoState, wordCount } from './edit.ts'
+import { apply, initialState, redo as redoState, setSelection, toolbarState, undo as undoState, wordCount } from './edit.ts'
 import type { Command, EditorState, ToolbarState } from './edit.ts'
+import { attachInput } from './input-dom.ts'
+import type { EditingSurface, InputBinding } from './input-dom.ts'
+import { detectPlatform } from './input.ts'
+import type { Platform } from './input.ts'
 import {
   cssGeneric,
   documentGridPitch,
@@ -37,10 +41,12 @@ export interface Status {
 const EMPTY_IMAGE =
   'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
 
-export class Editor {
+export class Editor implements EditingSurface {
+  readonly platform: Platform
   private readonly host: HTMLElement
   private readonly view: PageView
   private readonly sink: HTMLTextAreaElement
+  private input: InputBinding | null = null
   private readonly listeners = new Set<() => void>()
   private session: Source
   private current: EditorState
@@ -60,6 +66,7 @@ export class Editor {
     const doc = withCaretParagraph(opened.doc)
     const state = initialState(doc)
     this.host = host
+    this.platform = detectPlatform(navigator.platform, navigator.userAgent)
     this.session = opened.source
     this.current = state
     this.markers = listMarkers(doc)
@@ -72,6 +79,7 @@ export class Editor {
     this.view = new PageView(host, () => this.renderContext())
     this.view.show(doc)
     this.paintSelection(true)
+    this.input = attachInput(this, this.sink, this.host)
     this.scheduleChange()
     void this.applyMetrics(this.generation)
   }
@@ -82,6 +90,7 @@ export class Editor {
       opened.source.free()
       return
     }
+    this.input?.reset()
     this.generation += 1
     const generation = this.generation
     const doc = withCaretParagraph(opened.doc)
@@ -183,9 +192,66 @@ export class Editor {
     this.sink.focus()
   }
 
+  /** Where a pointer click lands, or null when it misses the pages. */
+  positionAtPoint(clientX: number, clientY: number): Pos | null {
+    if (this.destroyed) return null
+    return this.view.posAtPoint(clientX, clientY)
+  }
+
+  /** The caret's x in page coordinates, kept as the goal column across vertical moves. */
+  caretColumn(): number | null {
+    if (this.destroyed) return null
+    const sel = this.current.sel
+    if (sel.kind !== 'text') return null
+    return this.view.caretRect(sel.head).x
+  }
+
+  /**
+   * Moves the caret one visual line. `goalX` is the column to hit; null measures the caret.
+   * Returns the column to keep for the next vertical move.
+   */
+  moveLine(direction: 'up' | 'down', extend: boolean, goalX: number | null): number | null {
+    if (this.destroyed) return goalX
+    const sel = this.current.sel
+    if (sel.kind !== 'text') return goalX
+    const moved = this.view.lineMove(sel.head, direction, goalX)
+    const anchor = extend ? sel.anchor : moved.pos
+    this.run(setSelection({ kind: 'text', anchor, head: moved.pos }))
+    return moved.goalX
+  }
+
+  /** Page Up and Page Down. Returns the goal column, like moveLine. */
+  movePage(direction: 'up' | 'down', extend: boolean, goalX: number | null): number | null {
+    if (this.destroyed) return goalX
+    const sel = this.current.sel
+    if (sel.kind !== 'text') return goalX
+    const moved = this.view.pageMove(sel.head, direction, goalX)
+    const anchor = extend ? sel.anchor : moved.pos
+    this.run(setSelection({ kind: 'text', anchor, head: moved.pos }))
+    return moved.goalX
+  }
+
+  /** Home and End: the first or last offset on the caret's visual line. */
+  moveToLineEdge(edge: 'start' | 'end', extend: boolean): void {
+    if (this.destroyed) return
+    const sel = this.current.sel
+    if (sel.kind !== 'text') return
+    const next = this.view.lineEdge(sel.head, edge)
+    const anchor = extend ? sel.anchor : next
+    this.run(setSelection({ kind: 'text', anchor, head: next }))
+  }
+
+  /** Places the caret, or a selection when anchor and head differ. */
+  setTextSelection(anchor: Pos, head: Pos): void {
+    if (this.destroyed) return
+    this.run(setSelection({ kind: 'text', anchor, head }))
+  }
+
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
+    this.input?.detach()
+    this.input = null
     this.generation += 1
     if (this.changeFrame !== 0) cancelAnimationFrame(this.changeFrame)
     this.changeFrame = 0

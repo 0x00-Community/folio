@@ -1,7 +1,10 @@
 import { window as appWindow } from 'acde:window'
 import type { Editor } from './editor/editor.ts'
+import { insertText, setSelection } from './editor/edit.ts'
+import type { Command } from './editor/edit.ts'
 import type { Engine } from './engine/engine.ts'
 import { locale, t, translate } from './i18n.ts'
+import type { Selection } from './model.ts'
 import './editor/view.css'
 
 translate()
@@ -28,11 +31,14 @@ async function bootEditor(): Promise<void> {
 function installHook(engine: Engine, editor: Editor): void {
   window.__word = {
     editor,
+    platform: editor.platform,
     openBytes(base64) {
       const opened = engine.open(bytesFromBase64(base64))
       editor.load(opened)
       return whenLaidOut(editor)
     },
+    insertText,
+    setSelection,
   }
 }
 
@@ -57,7 +63,10 @@ declare global {
   interface Window {
     __word?: {
       editor: Editor
+      platform: Editor['platform']
       openBytes(base64: string): Promise<void>
+      insertText(text: string): Command
+      setSelection(sel: Selection): Command
     }
   }
 }

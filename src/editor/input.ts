@@ -5,10 +5,12 @@ import {
   deleteForward,
   insertLineBreak,
   insertPageBreak,
+  insertText,
   move,
   selectAll,
   splitParagraph,
   toggleMark,
+  wordRange,
 } from './edit.ts'
 import type { Command, LogicalUnit } from './edit.ts'
 
@@ -181,4 +183,136 @@ export function defaultKeymap(platform: Platform): Keymap {
     ...extendable('alt+arrowdown', step('forward', 'paragraph')),
   ]
   return buildKeymap(platform === 'mac' ? [...common, ...mac] : common)
+}
+
+export { wordRange }
+
+export interface TextRange {
+  readonly start: number
+  readonly end: number
+}
+
+/** The whole paragraph, which is what a triple click selects. */
+export function paragraphRange(text: string): TextRange {
+  return { start: 0, end: text.length }
+}
+
+/** Click count on a primary button: one click is a caret, two a word, three or more a paragraph. */
+export function dragUnit(detail: number): DragUnit {
+  if (detail >= 3) return 'paragraph'
+  if (detail === 2) return 'word'
+  return 'char'
+}
+
+function clampOffset(offset: number, length: number): number {
+  if (offset < 0) return 0
+  if (offset > length) return length
+  return offset
+}
+
+function unitRange(text: string, offset: number, unit: DragUnit): TextRange {
+  if (unit === 'paragraph') return paragraphRange(text)
+  if (unit === 'word') return wordRange(text, offset)
+  const o = clampOffset(offset, text.length)
+  return { start: o, end: o }
+}
+
+/**
+ * Offsets for a press or a drag inside one paragraph. A forward drag anchors at the start of the press's unit
+ * and ends at the end of the unit under the pointer, so a double click selects the word and a drag grows by words.
+ */
+export function gestureOffsets(
+  text: string,
+  anchor: number,
+  head: number,
+  unit: DragUnit,
+): { readonly anchor: number; readonly head: number } {
+  const a = clampOffset(anchor, text.length)
+  const h = clampOffset(head, text.length)
+  if (unit === 'char') return { anchor: a, head: h }
+  const from = unitRange(text, a, unit)
+  const to = unitRange(text, h, unit)
+  if (h < a) return { anchor: from.end, head: to.start }
+  return { anchor: from.start, head: to.end }
+}
+
+/**
+ * Endpoints when the drag crosses a paragraph boundary. `headBeforeAnchor` is document order, not string order.
+ * The caller keeps the paragraph ids; only the offsets change.
+ */
+export function dragEndpoints(
+  anchorText: string,
+  anchorOffset: number,
+  headText: string,
+  headOffset: number,
+  sameParagraph: boolean,
+  headBeforeAnchor: boolean,
+  unit: DragUnit,
+): { readonly anchor: number; readonly head: number } {
+  if (sameParagraph) return gestureOffsets(anchorText, anchorOffset, headOffset, unit)
+  if (unit === 'char') {
+    return {
+      anchor: clampOffset(anchorOffset, anchorText.length),
+      head: clampOffset(headOffset, headText.length),
+    }
+  }
+  const from = unitRange(anchorText, anchorOffset, unit)
+  const to = unitRange(headText, headOffset, unit)
+  if (headBeforeAnchor) return { anchor: from.end, head: to.start }
+  return { anchor: from.start, head: to.end }
+}
+
+const VERTICAL: ReadonlySet<VisualMotion> = new Set(['lineUp', 'lineDown', 'pageUp', 'pageDown'])
+
+export function isVerticalMotion(motion: VisualMotion): boolean {
+  return VERTICAL.has(motion)
+}
+
+/**
+ * The goal column survives only consecutive vertical motions. `caretX` is the column measured when a run starts
+ * (`kept` is null); later moves in the run ignore a new measurement.
+ */
+export function trackGoal(kept: number | null, action: Action, caretX: number | null): number | null {
+  if (action.kind !== 'visual' || !isVerticalMotion(action.motion)) return null
+  return kept ?? caretX
+}
+
+export type BeforeInputPlan =
+  | { readonly kind: 'run'; readonly command: Command }
+  | { readonly kind: 'compose' }
+  | { readonly kind: 'ignore' }
+
+const COMPOSITION_INPUT: ReadonlySet<string> = new Set([
+  'insertCompositionText',
+  'deleteCompositionText',
+  'insertFromComposition',
+  'deleteByComposition',
+])
+
+/**
+ * What a `beforeinput` should do. Composition is left to the composition events, including when a commit's
+ * `insertText` arrives after `compositionend` has already been classified as a composition type.
+ * While `composing` is true every type is left alone, so the textarea can hold the preedit.
+ */
+export function planBeforeInput(inputType: string, data: string | null, composing: boolean): BeforeInputPlan {
+  if (composing || COMPOSITION_INPUT.has(inputType)) return { kind: 'compose' }
+  switch (inputType) {
+    case 'insertText':
+      return data !== null && data.length > 0 ? { kind: 'run', command: insertText(data) } : { kind: 'ignore' }
+    case 'insertLineBreak':
+      return { kind: 'run', command: insertLineBreak }
+    case 'insertParagraph':
+      return { kind: 'run', command: splitParagraph }
+    case 'deleteContentBackward':
+      return { kind: 'run', command: deleteBackward('char') }
+    case 'deleteContentForward':
+      return { kind: 'run', command: deleteForward('char') }
+    default:
+      return { kind: 'ignore' }
+  }
+}
+
+/** `MacIntel` and a Macintosh user agent are mac; Dopame OS reports a Linux platform and is `other`. */
+export function detectPlatform(platform: string, userAgent = ''): Platform {
+  return /mac/i.test(platform) || /mac/i.test(userAgent) ? 'mac' : 'other'
 }
