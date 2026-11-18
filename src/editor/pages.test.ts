@@ -294,3 +294,20 @@ test('a header taller than the top margin pushes the body down', () => {
   assert.equal(layout.pages[0]?.bodyTopPx, 90)
   assert.deepEqual(sig(layout), ['a:0-50'])
 })
+
+test('a paragraph taller than a page splits on a line bottom inside the body', () => {
+  const linePx = 19.32
+  const lines = Array.from({ length: 55 }, (_, index) => (index + 1) * linePx)
+  const textPx = 1043
+  const paddingPx = 10.67
+  const body = 864
+  const layout = layoutOf([para('a')], new Map([['a', pm(textPx + paddingPx, lines)]]), body)
+  assert.equal(layout.complete, true)
+  const first = layout.pages[0]?.slices[0]
+  const next = layout.pages[1]?.slices[0]
+  assert.ok(first && next, 'the paragraph occupies two pages')
+  assert.ok(first.y1 <= body, 'page 0 ends at or under the body')
+  const bottoms = Float32Array.from(lines)
+  assert.ok(Array.from(bottoms).some((bottom) => bottom === first.y1), 'page 0 ends on a line bottom')
+  assert.equal(next.y0, first.y1, 'page 1 starts at that line')
+})

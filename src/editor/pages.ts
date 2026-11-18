@@ -71,18 +71,28 @@ function groupLineRects(rects: readonly DOMRect[]): LineRect[] {
 }
 
 function contentLineRects(el: HTMLElement): LineRect[] {
-  const kids = [...el.children].filter((child) => child instanceof HTMLElement && !child.classList.contains('marker'))
-  const first = kids[0]
-  const last = kids[kids.length - 1]
-  if (!(first instanceof HTMLElement) || !(last instanceof HTMLElement)) {
+  const rects: DOMRect[] = []
+  let saw = false
+  // One range around the children makes acdert return each child's whole box, so each child is measured alone.
+  for (const child of el.children) {
+    if (!(child instanceof HTMLElement) || child.classList.contains('marker')) continue
+    saw = true
+    const boxes = childContentRects(child)
+    if (boxes.length > 0) rects.push(...boxes)
+    else if (child.classList.contains('atom')) rects.push(child.getBoundingClientRect())
+  }
+  if (!saw) {
     const range = document.createRange()
     range.selectNodeContents(el)
     return groupLineRects([...range.getClientRects()])
   }
+  return groupLineRects(rects)
+}
+
+function childContentRects(child: HTMLElement): DOMRect[] {
   const range = document.createRange()
-  range.setStartBefore(first)
-  range.setEndAfter(last)
-  return groupLineRects([...range.getClientRects()])
+  range.selectNodeContents(child)
+  return [...range.getClientRects()]
 }
 
 /** Reads a mounted or hidden block element: offsetHeight, plus line bottoms grouped from Range.getClientRects(). */
@@ -993,11 +1003,40 @@ export class PageView {
         x = Math.min(Math.max(clientX, best.rect.left + 1), Math.max(best.rect.left + 1, best.rect.right - 1))
         y = Math.min(Math.max(clientY, best.rect.top + 1), Math.max(best.rect.top + 1, best.rect.bottom - 1))
       }
-      const hit = caretFromPoint(x, y) ?? caretFromPoint(x, y + 1) ?? caretFromPoint(x + 0.5, y)
-      if (!hit) return null
-      const pos = posFromDom(hit.node, hit.offset)
-      if (!pos) return null
-      return this.adjustAtom(hit.node, pos, x)
+      const hidden: HTMLElement[] = []
+      try {
+        // acdert hit testing ignores the clip, so another page's shifted copy can take the hit.
+        for (let i = 0; i < this.pageEls.length; i++) {
+          if (i === pageIndex) continue
+          const other = this.pageEls[i]
+          if (!other || other.dataset.mounted !== '1') continue
+          const body = other.querySelector('.page-body')
+          if (body instanceof HTMLElement && body.style.visibility !== 'hidden') {
+            body.style.visibility = 'hidden'
+            hidden.push(body)
+          }
+        }
+        const probe = (px: number, py: number): { node: Node; offset: number } | null => {
+          const next = caretFromPoint(px, py)
+          if (!next) return null
+          const el = next.node instanceof Element ? next.node : next.node.parentElement
+          // A repeated header sits in the slice, above the clip. It is not the shifted copy.
+          if (el?.closest('.repeat-head')) return next
+          const slice = el?.closest('.slice')
+          if (!(slice instanceof HTMLElement) || !pageEl.contains(slice)) return next
+          const clip = slice.querySelector(':scope > .clip')
+          if (!(clip instanceof HTMLElement)) return next
+          const box = clip.getBoundingClientRect()
+          return py < box.top || py > box.bottom ? null : next
+        }
+        const hit = probe(x, y) ?? probe(x, y + 1) ?? probe(x + 0.5, y)
+        if (!hit) return null
+        const pos = posFromDom(hit.node, hit.offset)
+        if (!pos) return null
+        return this.adjustAtom(hit.node, pos, x)
+      } finally {
+        for (const el of hidden) el.style.visibility = ''
+      }
     })
   }
 
@@ -1740,9 +1779,7 @@ export class PageView {
         const rects: DOMRect[] = []
         for (const child of para.children) {
           if (!(child instanceof HTMLElement) || child.classList.contains('marker')) continue
-          const range = document.createRange()
-          range.selectNodeContents(child)
-          rects.push(...range.getClientRects())
+          rects.push(...childContentRects(child))
         }
         for (const line of groupLineRects(rects)) {
           const visTop = clipRect ? Math.max(line.top, clipRect.top) : line.top
