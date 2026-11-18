@@ -927,6 +927,15 @@ export class PageView {
     const origin = pageEl.getBoundingClientRect()
     const z = this.zoom
     if (!paraEl) return { page: pageIndex, x: 0, top: 0, height: 16 }
+    const preedit = this.preeditEnd(paraEl, pos)
+    if (preedit) {
+      return {
+        page: pageIndex,
+        x: (preedit.right - origin.left) / z,
+        top: (preedit.top - origin.top) / z,
+        height: Math.max(preedit.height / z, 1),
+      }
+    }
     const range = rangeIn(paraEl, pos.o, pos.o)
     const slice = paraEl.closest('.slice')
     const sliceRect = slice instanceof HTMLElement ? slice.getBoundingClientRect() : null
@@ -944,6 +953,16 @@ export class PageView {
       top: (rect.top - origin.top) / z,
       height: Math.max(rect.height / z, 1),
     }
+  }
+
+  /** The model caret stays where the composition started. The IME window anchors at the end of the preedit. */
+  private preeditEnd(paraEl: HTMLElement, pos: Pos): DOMRect | null {
+    const deco = this.deco
+    if (!deco || deco.text.length === 0 || deco.pos.p !== pos.p || deco.pos.o !== pos.o) return null
+    const span = paraEl.querySelector('.preedit')
+    if (!(span instanceof HTMLElement)) return null
+    const rects = [...span.getClientRects()].filter((rect) => rect.width > 0 || rect.height > 0)
+    return rects[rects.length - 1] ?? null
   }
 
   /**
@@ -1829,7 +1848,11 @@ export class PageView {
   }
 
   private paintNow(sel: Selection, sink: HTMLTextAreaElement): void {
-    for (const el of this.pageEls) el.querySelector('.overlay')?.replaceChildren()
+    // Clearing an empty overlay still costs a mutation per page in acdert, on every keystroke.
+    for (const el of this.pageEls) {
+      const overlay = el.querySelector('.overlay')
+      if (overlay && overlay.firstChild) overlay.replaceChildren()
+    }
     if (sel.kind === 'cells') {
       this.paintCells(sel, sink)
       return
