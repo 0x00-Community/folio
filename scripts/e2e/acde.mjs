@@ -51,6 +51,20 @@ export function ref(selector) {
   return match[1]
 }
 
+export function namedRef(name) {
+  let out = ''
+  try {
+    out = execFileSync('acde', ['inspect', '--find', name], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (error) {
+    const stdout = error && error.stdout ? String(error.stdout) : ''
+    const stderr = error && error.stderr ? String(error.stderr) : ''
+    out = `${stdout}\n${stderr}`
+  }
+  const match = out.match(/\[(w\d+\.[\w.]+)\]/)
+  if (!match) throw new Error(`no element named ${JSON.stringify(name)}: ${out.trim()}`)
+  return match[1]
+}
+
 export function act(target, action, arg) {
   const args = ['act', target.startsWith('w') ? target : ref(target), action]
   if (arg !== undefined) args.push(arg)
