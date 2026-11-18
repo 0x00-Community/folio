@@ -1,7 +1,11 @@
-import { mkdirSync } from 'node:fs'
-import { ensureDev, evaluate, until, shot, consoleErrors, check, assert, summary } from './acde.mjs'
+import { copyFileSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { root, ensureDev, evaluate, until, shot, consoleErrors, check, assert, summary } from './acde.mjs'
 
 await ensureDev()
+
+// acde dev reloads the page when a project file changes, so the screenshot is copied in after the last check.
+const straddleShot = `${mkdtempSync(`${tmpdir()}/view-demo-`)}/straddle.png`
 
 async function loadDemo() {
   try {
@@ -72,8 +76,7 @@ await check('a straddling paragraph is clipped across two pages', async () => {
   )
   const copies = evaluate(`document.querySelectorAll('.blk[data-id="${straddle.id}"]').length`)
   assert(copies >= 2, `mounted copies ${copies}`)
-  mkdirSync('docs/design/evidence/view', { recursive: true })
-  shot('docs/design/evidence/view/straddle.png')
+  shot(straddleShot)
 })
 
 await check('editing one paragraph stays under 8ms and moves later pages', async () => {
@@ -93,5 +96,8 @@ await check('console has no errors', async () => {
   const errors = consoleErrors()
   assert(errors.length === 0, errors.join('\n'))
 })
+
+mkdirSync(`${root}docs/design/evidence/view`, { recursive: true })
+copyFileSync(straddleShot, `${root}docs/design/evidence/view/straddle.png`)
 
 summary()
