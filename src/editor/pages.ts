@@ -1440,6 +1440,7 @@ export class PageView {
     }
     el.dataset.mounted = '1'
     this.mountedSig.set(i, this.signature(page))
+    this.hideExtraCopies()
   }
 
   private fillStory(
@@ -1486,6 +1487,7 @@ export class PageView {
         node.replaceWith(renderBlock(located.block, ctx, this.decoFor(located.block)))
       }
     }
+    this.hideExtraCopies()
   }
 
   private clearPage(i: number): void {
@@ -1498,6 +1500,24 @@ export class PageView {
     delete el.dataset.mounted
     el.dataset.mounted = '0'
     this.mountedSig.delete(i)
+    this.hideExtraCopies()
+  }
+
+  // A straddling block is mounted twice. The later copy is the clipped remainder, so hiding it keeps the paragraph from being read twice.
+  private hideExtraCopies(): void {
+    const seen = new Set<string>()
+    for (const pageEl of this.pageEls) {
+      if (pageEl.dataset.mounted !== '1') continue
+      for (const blockEl of pageEl.querySelectorAll<HTMLElement>('.page-body .shift > .blk')) {
+        const id = blockEl.dataset.id
+        if (!id) continue
+        if (seen.has(id)) blockEl.setAttribute('aria-hidden', 'true')
+        else {
+          blockEl.removeAttribute('aria-hidden')
+          seen.add(id)
+        }
+      }
+    }
   }
 
   private ctxFor(pageNumber: number): RenderContext {

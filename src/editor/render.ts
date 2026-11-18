@@ -1,3 +1,4 @@
+import { flatText } from '../model.ts'
 import type {
   Atom,
   AtomKind,
@@ -342,7 +343,7 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
     applyRun(span, ctx, para, run, run.fonts.eastAsia, {})
     if (active && active.pos.o === 0) appendPreedit(el, ctx, para, active)
     el.append(span)
-    return el
+    return finishParagraph(el, para)
   }
   let preeditDone = false
   const emitPreedit = (at: number): void => {
@@ -369,6 +370,13 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
     appendText(el, ctx, para, piece)
   }
   if (active && !preeditDone) appendPreedit(el, ctx, para, active)
+  return finishParagraph(el, para)
+}
+
+function finishParagraph(el: HTMLElement, para: Paragraph): HTMLElement {
+  // One accessible name for the whole paragraph. Hidden children stop a span per run from being read as its own line.
+  el.setAttribute('aria-label', flatText(para))
+  for (const child of el.children) child.setAttribute('aria-hidden', 'true')
   return el
 }
 
