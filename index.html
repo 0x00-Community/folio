@@ -5,13 +5,12 @@
     <meta name="color-scheme" content="light dark" />
     <title>Word</title>
     <style>
-      :root { color-scheme: light dark }
-      body { margin: 0; font: 16px/1.4 system-ui, sans-serif }
-      #status { margin: 24px }
+      html, body, #pages { height: 100% }
+      body { margin: 0 }
     </style>
   </head>
   <body>
-    <p id="status" role="status"></p>
+    <div id="pages"></div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

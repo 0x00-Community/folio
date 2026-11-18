@@ -1,8 +1,11 @@
-import { window } from 'acde:window'
-import { t, translate } from './i18n.ts'
+import { window as appWindow } from 'acde:window'
+import type { Editor } from './editor/editor.ts'
+import type { Engine } from './engine/engine.ts'
+import { locale, t, translate } from './i18n.ts'
+import './editor/view.css'
 
 translate()
-window.setTitle(t('title'))
+appWindow.setTitle(t('title'))
 
 if (location.hash === '#view-demo') {
   const { startViewDemo } = await import('./editor/demo.ts')
@@ -12,13 +15,49 @@ if (location.hash === '#view-demo') {
 }
 
 async function bootEditor(): Promise<void> {
-  const { default: init, Session } = await import('./engine/pkg/engine.js')
-  const status = document.querySelector('#status')
-  if (status === null) throw new Error('missing #status')
-  const response = await fetch('/engine.wasm')
-  if (!response.ok) throw new Error(`engine.wasm: ${response.status}`)
-  const bytes = await response.arrayBuffer()
-  await init({ module_or_path: bytes })
-  const session = Session.blank()
-  status.textContent = `${t('title')} — ${t('engineReady', { count: session.paragraph_count() })}`
+  const host = document.querySelector('#pages')
+  if (!(host instanceof HTMLElement)) throw new Error('missing #pages')
+  const { loadEngine } = await import('./engine/engine.ts')
+  const { Editor } = await import('./editor/editor.ts')
+  const engine = await loadEngine()
+  const editor = Editor.mount(host, engine.blank(), { locale: locale === 'zh' ? 'zh' : 'en' })
+  // acde dev serves a production build, so there is no dev flag to gate the e2e hook on.
+  installHook(engine, editor)
+}
+
+function installHook(engine: Engine, editor: Editor): void {
+  window.__word = {
+    editor,
+    openBytes(base64) {
+      const opened = engine.open(bytesFromBase64(base64))
+      editor.load(opened)
+      return whenLaidOut(editor)
+    },
+  }
+}
+
+function whenLaidOut(editor: Editor): Promise<void> {
+  return new Promise((resolve) => {
+    const tick = (): void => {
+      if (editor.status().pagesFinal) resolve()
+      else requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  })
+}
+
+function bytesFromBase64(base64: string): Uint8Array {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+declare global {
+  interface Window {
+    __word?: {
+      editor: Editor
+      openBytes(base64: string): Promise<void>
+    }
+  }
 }

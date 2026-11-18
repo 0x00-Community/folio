@@ -1,0 +1,320 @@
+// The only editor module the app imports. Holds one EditorState, runs commands, and drives PageView.
+import type { Opened, Source } from '../engine/engine.ts'
+import { cssStack, fetchMetrics } from '../fonts.ts'
+import type { FontMetrics } from '../fonts.ts'
+import { indexOf } from '../model.ts'
+import type { Block, Doc, Paragraph, ParaId, Pos, Table } from '../model.ts'
+import { apply, initialState, redo as redoState, toolbarState, undo as undoState, wordCount } from './edit.ts'
+import type { Command, EditorState, ToolbarState } from './edit.ts'
+import {
+  cssGeneric,
+  documentGridPitch,
+  lineHeightPx,
+  listMarkers,
+  withCaretParagraph,
+} from './derive.ts'
+import { PageView } from './pages.ts'
+import type { Decoration, RenderContext } from './render.ts'
+
+export interface EditorOptions {
+  readonly locale: 'zh' | 'en'
+}
+
+export interface Status {
+  /** 1-based page holding the caret. */
+  readonly page: number
+  readonly pages: number
+  /**
+   * False while a large document is still being measured, and while this load is still resolving font metrics.
+   * A non-empty metrics result lays the document out again, so the first pass is not final.
+   */
+  readonly pagesFinal: boolean
+  readonly words: number
+  /** Section index holding the caret, for page setup. */
+  readonly section: number
+}
+
+const EMPTY_IMAGE =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+
+export class Editor {
+  private readonly host: HTMLElement
+  private readonly view: PageView
+  private readonly sink: HTMLTextAreaElement
+  private readonly listeners = new Set<() => void>()
+  private session: Source
+  private current: EditorState
+  private markers: ReadonlyMap<ParaId, string>
+  private metrics: ReadonlyMap<string, FontMetrics> = new Map()
+  private metricsSettled = false
+  private generation = 0
+  private changeFrame = 0
+  private destroyed = false
+
+  /** Creates the page view inside `host` and shows the opened document. Input listeners belong to the input layer. */
+  static mount(host: HTMLElement, opened: Opened, options: EditorOptions): Editor {
+    return new Editor(host, opened, options)
+  }
+
+  private constructor(host: HTMLElement, opened: Opened, options: EditorOptions) {
+    const doc = withCaretParagraph(opened.doc)
+    const state = initialState(doc)
+    this.host = host
+    this.session = opened.source
+    this.current = state
+    this.markers = listMarkers(doc)
+    const sink = document.createElement('textarea')
+    sink.className = 'ime-sink'
+    sink.lang = options.locale
+    sink.autocomplete = 'off'
+    sink.spellcheck = false
+    this.sink = sink
+    this.view = new PageView(host, () => this.renderContext())
+    this.view.show(doc)
+    this.paintSelection(true)
+    this.scheduleChange()
+    void this.applyMetrics(this.generation)
+  }
+
+  /** Replaces the document and the rdocx session; frees the previous session; resets history and selection. */
+  load(opened: Opened): void {
+    if (this.destroyed) {
+      opened.source.free()
+      return
+    }
+    this.generation += 1
+    const generation = this.generation
+    const doc = withCaretParagraph(opened.doc)
+    const state = initialState(doc)
+    const previous = this.session
+    this.session = opened.source
+    this.current = state
+    this.markers = listMarkers(doc)
+    this.metrics = new Map()
+    this.metricsSettled = false
+    this.view.show(doc)
+    this.paintSelection(true)
+    if (previous !== opened.source) previous.free()
+    this.scheduleChange()
+    void this.applyMetrics(generation)
+  }
+
+  get state(): EditorState {
+    return this.current
+  }
+
+  /** The rdocx session the current document came from: save, export, fonts, media. */
+  get source(): Source {
+    return this.session
+  }
+
+  /**
+   * Runs a command. On a transaction: apply() with history, PageView.update when the document changed, paint the
+   * caret, scroll it into view, schedule 'change' for the next animation frame. Returns false when the command did
+   * not apply.
+   */
+  run(command: Command): boolean {
+    if (this.destroyed) return false
+    const tr = command(this.current)
+    if (!tr) return false
+    this.commit(apply(this.current, tr, Date.now()), true)
+    return true
+  }
+
+  undo(): boolean {
+    if (this.destroyed) return false
+    const next = undoState(this.current)
+    if (!next) return false
+    this.commit(next, true)
+    return true
+  }
+
+  redo(): boolean {
+    if (this.destroyed) return false
+    const next = redoState(this.current)
+    if (!next) return false
+    this.commit(next, true)
+    return true
+  }
+
+  /** IME preedit from input.ts. View-only; never enters state or history. */
+  setPreedit(deco: Decoration | null): void {
+    if (this.destroyed) return
+    this.view.decorate(deco)
+    this.paintSelection(true)
+    this.scheduleChange()
+  }
+
+  /** Called once per animation frame after changes, never per keystroke synchronously. */
+  on(event: 'change', listener: () => void): () => void {
+    void event
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  toolbar(): ToolbarState {
+    return toolbarState(this.current, (para, marks) => this.session.look(para, marks))
+  }
+
+  status(): Status {
+    const pages = this.view.layout.pages.length
+    const pos = caretPos(this.current)
+    const page = pos !== null && pages > 0 ? this.view.pageOf(pos) + 1 : 1
+    return {
+      page,
+      pages,
+      pagesFinal: this.metricsSettled && this.view.layout.complete,
+      words: wordCount(this.current.doc),
+      section: pos !== null ? sectionIndex(this.current.doc, pos) : 0,
+    }
+  }
+
+  setZoom(zoom: number): void {
+    if (this.destroyed) return
+    this.view.setZoom(zoom)
+    this.scheduleChange()
+  }
+
+  focus(): void {
+    if (this.destroyed) return
+    if (!this.sink.isConnected) this.host.append(this.sink)
+    this.sink.focus()
+  }
+
+  destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
+    this.generation += 1
+    if (this.changeFrame !== 0) cancelAnimationFrame(this.changeFrame)
+    this.changeFrame = 0
+    this.listeners.clear()
+    this.view.destroy()
+    this.sink.remove()
+    this.session.free()
+  }
+
+  private commit(next: EditorState, scroll: boolean): void {
+    const previous = this.current.doc
+    this.current = next
+    if (next.doc !== previous) {
+      this.markers = listMarkers(next.doc)
+      // update() cancels the in-progress measure. A selection-only transaction keeps the pump running.
+      this.view.update(previous, next.doc)
+    }
+    this.paintSelection(scroll)
+    this.scheduleChange()
+  }
+
+  private paintSelection(scroll: boolean): void {
+    const sel = this.current.sel
+    this.view.paint(sel, this.sink)
+    if (scroll && sel.kind === 'text') this.view.scrollIntoView(sel.head)
+  }
+
+  private scheduleChange(): void {
+    if (this.changeFrame !== 0 || this.destroyed) return
+    this.changeFrame = requestAnimationFrame(() => {
+      this.changeFrame = 0
+      if (this.destroyed) return
+      for (const listener of [...this.listeners]) listener()
+    })
+  }
+
+  private renderContext(): RenderContext {
+    return {
+      look: (para, marks) => this.session.look(para, marks),
+      paraLook: (para) => this.session.paraLook(para),
+      fontStack: (family) => cssStack(family, cssGeneric(family)),
+      lineHeightPx: (family, sizePt, rule) => lineHeightPx(this.metrics.get(family), sizePt, rule),
+      marker: (id) => this.markers.get(id) ?? null,
+      imageUrl: (key) => {
+        try {
+          return this.session.imageUrl(key)
+        } catch {
+          return EMPTY_IMAGE
+        }
+      },
+      gridPitchPx: documentGridPitch(this.current.doc),
+    }
+  }
+
+  private async applyMetrics(generation: number): Promise<void> {
+    let metrics: ReadonlyMap<string, FontMetrics> = new Map()
+    try {
+      metrics = await fetchMetrics(this.session.fontsUsed(this.current.doc))
+    } catch {
+      metrics = new Map()
+    }
+    if (this.destroyed || generation !== this.generation) return
+    this.metrics = metrics
+    this.metricsSettled = true
+    if (metrics.size > 0) {
+      // The first paint used the 1.3 em fallback. A resolved face changes the line heights, so measure again.
+      this.view.show(this.current.doc)
+      this.paintSelection(false)
+    }
+    this.scheduleChange()
+  }
+}
+
+export type { Doc, Pos }
+
+function caretPos(state: EditorState): Pos | null {
+  const sel = state.sel
+  if (sel.kind === 'text') return sel.head
+  const table = findTable(state.doc.body, sel.table)
+  const cell = table?.rows[sel.anchor.row]?.cells[sel.anchor.cell]
+  const para = cell ? firstParagraph(cell.blocks) : null
+  if (!para) return null
+  return { p: para.id, o: 0 }
+}
+
+function findTable(blocks: readonly Block[], id: Table['id']): Table | null {
+  for (const block of blocks) {
+    if (block.kind !== 'table') continue
+    if (block.id === id) return block
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        const found = findTable(cell.blocks, id)
+        if (found) return found
+      }
+    }
+  }
+  return null
+}
+
+function firstParagraph(blocks: readonly Block[]): Paragraph | null {
+  for (const block of blocks) {
+    if (block.kind === 'p') return block
+    if (block.kind === 'table') {
+      for (const row of block.rows) {
+        for (const cell of row.cells) {
+          const found = firstParagraph(cell.blocks)
+          if (found) return found
+        }
+      }
+    } else if (block.preview[0]) return block.preview[0]
+  }
+  return null
+}
+
+function sectionIndex(doc: Doc, pos: Pos): number {
+  let index = 0
+  try {
+    const loc = indexOf(doc).get(pos.p)
+    if (loc.story !== 'body') return 0
+    index = loc.path[0] ?? 0
+  } catch {
+    return 0
+  }
+  let section = 0
+  for (let i = 0; i < index; i++) {
+    const block = doc.body[i]
+    if (block?.kind === 'p' && block.sectionEnd !== null) section = block.sectionEnd + 1
+  }
+  const count = doc.sections.length
+  if (count === 0) return 0
+  return section < count ? section : count - 1
+}
