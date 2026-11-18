@@ -306,4 +306,123 @@ await check('console has no errors after the long document', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
+await check('a point on the toolbar hits the button when the document is scrolled', async () => {
+  const hit = evaluate(`(() => {
+    const view = document.querySelector('.page-view')
+    const toolbar = document.querySelector('.toolbar')
+    const button = toolbar && toolbar.querySelector('button')
+    if (!view || !toolbar || !button) return { error: 'missing toolbar or page view' }
+    view.scrollTop = 20000
+    const box = button.getBoundingClientRect()
+    const x = (box.left + box.right) / 2
+    const y = (box.top + box.bottom) / 2
+    const target = document.elementFromPoint(x, y)
+    return {
+      scrollTop: view.scrollTop,
+      inside: !!(target && toolbar.contains(target)),
+      name: target && target.tagName,
+    }
+  })()`)
+  assert(!hit.error, String(hit.error))
+  assert(hit.scrollTop >= 20000, `scrollTop ${hit.scrollTop}`)
+  assert(hit.inside, `hit ${hit.name} at scrollTop ${hit.scrollTop}`)
+})
+
+await check('a point on a tall paragraph hits the line under the pointer', async () => {
+  const errors = []
+  let opened = false
+  for (const name of ['New', '新建']) {
+    try {
+      act(namedRef(name), 'click')
+      opened = true
+      break
+    } catch (error) {
+      errors.push(String(error.message || error))
+    }
+  }
+  assert(opened, `new document: ${errors.join('\n')}`)
+  sink = inputRef()
+  act(sink, 'focus')
+  const text = '改了一个技能，用户的使用方式就变了；'.repeat(120)
+  assert(text.length === 2160, `fixture length ${text.length}`)
+  act(sink, 'type', text)
+  const typed = evaluate(`(() => {
+    const body = window.__word.editor.state.doc.body
+    const block = body.find((item) => item.kind === 'p')
+    let chars = 0
+    if (block) {
+      for (const inline of block.inlines) chars += inline.kind === 'text' ? inline.text.length : 1
+    }
+    return { paras: body.length, chars }
+  })()`)
+  assert(typed.paras === 1 && typed.chars === 2160, `typed ${JSON.stringify(typed)}`)
+  // Font metrics repaginate after the first paint. Wait until that settles so the two pages stay put.
+  await until(
+    `window.__word.editor.view.layout.pages.length >= 2 && window.__word.editor.status().pagesFinal`,
+    { timeout: 20000, label: 'two pages' },
+  )
+  evaluate(`(() => {
+    const view = document.querySelector('.page-view')
+    if (!view) throw new Error('missing page view')
+    view.scrollTop = 300
+    return view.scrollTop
+  })()`)
+  await until(`document.querySelectorAll('.page[data-mounted="1"]').length >= 2`, {
+    timeout: 8000,
+    label: 'both pages mounted',
+  })
+  const hits = evaluate(`(() => {
+    const editor = window.__word.editor
+    const page = document.querySelector('.page')
+    const body = document.querySelector('.page-body')
+    if (!page || !body) return { error: 'missing page' }
+    const box = body.getBoundingClientRect()
+    const x = (box.left + box.right) / 2
+    const stack = document.querySelector('.page-stack')
+    const transform = stack ? getComputedStyle(stack).transform : 'none'
+    const zoom = transform && transform !== 'none' ? new DOMMatrix(transform).a || 1 : 1
+    const rows = []
+    for (const y of [250, 400, 550]) {
+      const pos = editor.positionAtPoint(x, y)
+      if (!pos) {
+        rows.push({ y, pos: null })
+        continue
+      }
+      const caret = editor.view.caretRect(pos)
+      // caretRect.top and height are page-local px at zoom 1. The page border box is already in client px.
+      const pageTop = page.getBoundingClientRect().top
+      const top = pageTop + caret.top * zoom
+      const height = caret.height * zoom
+      rows.push({ y, pos, page: caret.page, top, height })
+    }
+    return {
+      x,
+      zoom,
+      pages: editor.view.layout.pages.length,
+      bodyTop: box.top,
+      bodyBottom: box.bottom,
+      rows,
+    }
+  })()`)
+  assert(!hits.error, String(hits.error))
+  const failures = []
+  for (const row of hits.rows) {
+    if (!row.pos) {
+      failures.push(`y=${row.y} missed`)
+      continue
+    }
+    const low = row.top - 2
+    const high = row.top + row.height + 2
+    if (row.page !== 0 || row.y < low || row.y > high) {
+      failures.push(
+        `y=${row.y} page=${row.page} offset=${row.pos.o} top=${row.top} height=${row.height} band=[${low}, ${high}]`,
+      )
+    }
+  }
+  assert(
+    failures.length === 0,
+    `x=${hits.x} zoom=${hits.zoom} pages=${hits.pages} body=${hits.bodyTop}..${hits.bodyBottom} ${failures.join('; ')}`,
+  )
+})
+
 summary()

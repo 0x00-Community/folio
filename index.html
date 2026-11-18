@@ -25,6 +25,9 @@
         font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
       }
       .toolbar {
+        /* acdert hit testing ignores the scroller clip, so content scrolled above the box covers this bar. */
+        position: relative;
+        z-index: 1;
         display: flex;
         flex-wrap: wrap;
         gap: 4px;
@@ -71,6 +74,9 @@
         color: #333;
       }
       .open-error {
+        /* This band sits above the scroller, so the same clip-blind hit testing would cover it. */
+        position: relative;
+        z-index: 1;
         margin: 0;
         padding: 6px 10px;
         background: #fde8e8;
