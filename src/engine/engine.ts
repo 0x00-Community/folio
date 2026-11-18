@@ -10,6 +10,7 @@ import type {
   LineSpacing,
   ListDef,
   ListLevel,
+  ListTable,
   Lock,
   Marks,
   MediaKey,
@@ -87,8 +88,8 @@ export type Source = {
   imageUrl(key: MediaKey): string
   /** Resolved run look for the paragraph's styles, with these direct marks overlaid. */
   look(para: Paragraph, marks: Marks): RunLook
-  /** Resolved paragraph look: the style, then the list level's left and hanging indent, then direct props. */
-  paraLook(para: Paragraph): ParaLook
+  /** Resolved paragraph look: the style, then the level's left and hanging indent from the given list table, then direct props. */
+  paraLook(para: Paragraph, lists: ListTable): ParaLook
   free(): void
 }
 
@@ -191,8 +192,8 @@ function bindSource(session: Session, doc: Doc, looks: LookTables, importedFonts
     look(para, marks) {
       return overlayRun(runLookFor(looks, doc, para, marks.charStyle), marks)
     },
-    paraLook(para) {
-      return overlayPara(paraLookFor(looks, doc, para), para.props, doc)
+    paraLook(para, lists) {
+      return overlayPara(paraLookFor(looks, doc, para), para.props, lists)
     },
     free() {
       for (const url of urls.values()) URL.revokeObjectURL(url)
@@ -250,13 +251,13 @@ function overlayRun(base: RunLook, marks: Marks): RunLook {
   }
 }
 
-function overlayPara(base: ParaLook, props: ParaProps, doc: Doc): ParaLook {
+function overlayPara(base: ParaLook, props: ParaProps, lists: ListTable): ParaLook {
   const indent = props.indent
   const spacing = props.spacing
   const numbering = props.numbering === undefined ? base.numbering : props.numbering
   // Direct fields are still optional here. A list level's left and hanging sit under them and over the style,
   // which is what keeps a bullet off the first letter when the paragraph itself stores no indent.
-  const level = numbering === null ? undefined : doc.lists.byNum.get(numbering.num)?.levels[numbering.level]
+  const level = numbering === null ? undefined : lists.byNum.get(numbering.num)?.levels[numbering.level]
   return {
     align: props.align ?? base.align,
     indent: {

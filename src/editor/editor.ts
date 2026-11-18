@@ -291,7 +291,7 @@ export class Editor implements EditingSurface {
   private renderContext(): RenderContext {
     return {
       look: (para, marks) => this.session.look(para, marks),
-      paraLook: (para) => this.session.paraLook(para),
+      paraLook: (para) => this.session.paraLook(para, this.current.doc.lists),
       fontStack: (family) => cssStack(family, cssGeneric(family)),
       lineHeightPx: (family, sizePt, rule) => lineHeightPx(this.metrics.get(family), sizePt, rule),
       marker: (id) => this.markers.get(id) ?? null,
