@@ -5,12 +5,84 @@
     <meta name="color-scheme" content="light dark" />
     <title>Word</title>
     <style>
-      html, body, #pages { height: 100% }
-      body { margin: 0 }
+      html, body { height: 100%; margin: 0 }
+      #pages { height: 100% }
+      body.shell {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        overflow: hidden;
+        color: #222;
+        background: #fff;
+      }
+      body.shell #pages {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: auto;
+      }
+      .toolbar, .status, .open-error {
+        flex: none;
+        font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        align-items: center;
+        padding: 6px 8px;
+        background: #f6f6f6;
+        border-bottom: 1px solid #d0d0d0;
+      }
+      .toolbar .group {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      .toolbar .group + .group {
+        margin-left: 6px;
+        padding-left: 6px;
+        border-left: 1px solid #ddd;
+      }
+      .toolbar button, .toolbar select {
+        font: inherit;
+        color: #222;
+        background: #fff;
+        border: 1px solid #c8c8c8;
+        border-radius: 4px;
+        padding: 3px 8px;
+      }
+      .toolbar button { white-space: nowrap; user-select: none }
+      .toolbar button[aria-pressed="true"] {
+        background: #d6e6f8;
+        border-color: #7aa2d4;
+      }
+      .toolbar button:disabled { color: #999; background: #f3f3f3 }
+      .toolbar select.style { max-width: 11em }
+      .toolbar select.zoom { max-width: 6em }
+      .status {
+        min-height: 28px;
+        padding: 4px 10px;
+        line-height: 20px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        background: #f6f6f6;
+        border-top: 1px solid #d0d0d0;
+        color: #333;
+      }
+      .open-error {
+        margin: 0;
+        padding: 6px 10px;
+        background: #fde8e8;
+        color: #6b1d1d;
+      }
     </style>
   </head>
   <body>
+    <div id="toolbar" class="toolbar" role="toolbar"></div>
+    <p id="open-error" class="open-error" role="alert" hidden></p>
     <div id="pages"></div>
+    <div id="status" class="status" role="status"></div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>
