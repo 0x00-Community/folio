@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { checkDoc, type Block, type Doc, type Paragraph } from '../model.ts'
+import { checkDoc, type Block, type Doc, type Paragraph, type Pt } from '../model.ts'
 import { createEngine, type Opened } from './engine.ts'
 import { initSync } from './pkg/engine.js'
 
@@ -97,6 +97,63 @@ test('open parses basic.docx into a document', () => {
       assert.equal(opened.source.look(plain, { bold: true }).bold, true, 'look overlays a direct bold mark')
     }
     assertCheckDoc(opened.doc)
+  } finally {
+    opened.source.free()
+  }
+})
+
+function pt(value: number): Pt {
+  return value as Pt
+}
+
+test('a list level supplies left and hanging indent, and a paragraph indent overrides it', () => {
+  const opened = engine.open(fixture('basic.docx'))
+  try {
+    const body = paragraphs(opened.doc.body)
+    const bullet = body.find((para) => textOf(para) === 'First bullet')
+    const nested = body.find((para) => textOf(para) === 'Nested bullet')
+    const step = body.find((para) => textOf(para) === 'Step one')
+    const plain = body.find((para) => textOf(para).startsWith('Plain, '))
+    assert.ok(bullet && nested && step && plain)
+    if (!bullet || !nested || !step || !plain) return
+    const look = opened.source.paraLook(bullet)
+    const numbering = look.numbering
+    assert.ok(numbering, 'the bullet is numbered')
+    if (!numbering) return
+    const level = opened.doc.lists.byNum.get(numbering.num)?.levels[numbering.level]
+    assert.ok(level)
+    if (!level) return
+    assert.equal(Number(level.indentLeft), 36)
+    assert.equal(Number(level.hanging), 18)
+    assert.equal(look.indent.left, level.indentLeft, 'the bullet takes the level left indent')
+    assert.equal(look.indent.hanging, level.hanging, 'the bullet takes the level hanging indent')
+    assert.ok(Number(look.indent.hanging) > 0, 'a hanging indent gives the marker a column of its own')
+    const nestedLook = opened.source.paraLook(nested)
+    assert.equal(Number(nestedLook.indent.left), 72)
+    assert.equal(Number(nestedLook.indent.hanging), 18)
+    const stepLook = opened.source.paraLook(step)
+    assert.equal(Number(stepLook.indent.left), 36)
+    assert.equal(Number(stepLook.indent.hanging), 18)
+    assert.equal(Number(opened.source.paraLook(plain).indent.left), 0)
+    assert.equal(Number(opened.source.paraLook(plain).indent.hanging), 0, 'a paragraph outside a list keeps the style indent')
+    const own = opened.source.paraLook({
+      ...bullet,
+      props: { ...bullet.props, indent: { left: pt(12), hanging: pt(0) } },
+    })
+    assert.equal(Number(own.indent.left), 12, 'a direct left indent wins')
+    assert.equal(Number(own.indent.hanging), 0, 'a direct hanging indent wins, including zero')
+    const leftOnly = opened.source.paraLook({
+      ...bullet,
+      props: { ...bullet.props, indent: { left: pt(10) } },
+    })
+    assert.equal(Number(leftOnly.indent.left), 10)
+    assert.equal(leftOnly.indent.hanging, level.hanging, 'an unset hanging indent still comes from the level')
+    const cleared = opened.source.paraLook({
+      ...bullet,
+      props: { ...bullet.props, numbering: null },
+    })
+    assert.equal(Number(cleared.indent.left), 0)
+    assert.equal(Number(cleared.indent.hanging), 0, 'leaving the list drops the level indent')
   } finally {
     opened.source.free()
   }

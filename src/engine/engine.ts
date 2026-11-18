@@ -87,7 +87,7 @@ export type Source = {
   imageUrl(key: MediaKey): string
   /** Resolved run look for the paragraph's styles, with these direct marks overlaid. */
   look(para: Paragraph, marks: Marks): RunLook
-  /** Resolved paragraph look for the paragraph's style, with its direct props overlaid. */
+  /** Resolved paragraph look: the style, then the list level's left and hanging indent, then direct props. */
   paraLook(para: Paragraph): ParaLook
   free(): void
 }
@@ -192,7 +192,7 @@ function bindSource(session: Session, doc: Doc, looks: LookTables, importedFonts
       return overlayRun(runLookFor(looks, doc, para, marks.charStyle), marks)
     },
     paraLook(para) {
-      return overlayPara(paraLookFor(looks, doc, para), para.props)
+      return overlayPara(paraLookFor(looks, doc, para), para.props, doc)
     },
     free() {
       for (const url of urls.values()) URL.revokeObjectURL(url)
@@ -250,16 +250,20 @@ function overlayRun(base: RunLook, marks: Marks): RunLook {
   }
 }
 
-function overlayPara(base: ParaLook, props: ParaProps): ParaLook {
+function overlayPara(base: ParaLook, props: ParaProps, doc: Doc): ParaLook {
   const indent = props.indent
   const spacing = props.spacing
+  const numbering = props.numbering === undefined ? base.numbering : props.numbering
+  // Direct fields are still optional here. A list level's left and hanging sit under them and over the style,
+  // which is what keeps a bullet off the first letter when the paragraph itself stores no indent.
+  const level = numbering === null ? undefined : doc.lists.byNum.get(numbering.num)?.levels[numbering.level]
   return {
     align: props.align ?? base.align,
     indent: {
-      left: indent?.left ?? base.indent.left,
+      left: indent?.left ?? level?.indentLeft ?? base.indent.left,
       right: indent?.right ?? base.indent.right,
       firstLine: indent?.firstLine ?? base.indent.firstLine,
-      hanging: indent?.hanging ?? base.indent.hanging,
+      hanging: indent?.hanging ?? level?.hanging ?? base.indent.hanging,
       firstLineChars: indent?.firstLineChars ?? base.indent.firstLineChars,
     },
     spacing: {
@@ -268,7 +272,7 @@ function overlayPara(base: ParaLook, props: ParaProps): ParaLook {
       line: spacing?.line ?? base.spacing.line,
       contextual: base.spacing.contextual,
     },
-    numbering: props.numbering === undefined ? base.numbering : props.numbering,
+    numbering,
     keepNext: props.keepNext ?? base.keepNext,
     keepLines: props.keepLines ?? base.keepLines,
     pageBreakBefore: props.pageBreakBefore ?? base.pageBreakBefore,
