@@ -15,6 +15,7 @@ import {
   IDLE,
   paragraphRange,
   planBeforeInput,
+  shortcutChord,
   trackGoal,
   transition,
   wordRange,
@@ -159,6 +160,16 @@ test('the keymap reaches every visual motion, with and without Shift, plus undo,
     assert.deepEqual([...new Set(steps)].sort(), ['redo', 'undo'], `history on ${platform}`)
     const ops = actions.flatMap(action => action.kind === 'clipboard' ? [action.op] : [])
     assert.deepEqual([...new Set(ops)].sort(), ['copy', 'cut', 'paste'], `clipboard on ${platform}`)
+  }
+})
+
+test('shortcutChord reads the chord the keymap bound', () => {
+  for (const platform of PLATFORMS) {
+    assert.equal(shortcutChord(platform, 'bold'), 'mod+b', platform)
+    assert.equal(shortcutChord(platform, 'italic'), 'mod+i', platform)
+    assert.equal(shortcutChord(platform, 'underline'), 'mod+u', platform)
+    assert.equal(shortcutChord(platform, 'undo'), 'mod+z', platform)
+    assert.equal(shortcutChord(platform, 'redo'), 'mod+y', platform)
   }
 })
 

@@ -122,6 +122,28 @@ function run(command: Command): Action {
   return { kind: 'command', command }
 }
 
+// One command instance per mark, shared with the keymap, so a toolbar title can find the chord by identity.
+const markCommand = {
+  bold: toggleMark('bold'),
+  italic: toggleMark('italic'),
+  underline: toggleMark('underline'),
+} as const
+
+export type ShortcutName = 'bold' | 'italic' | 'underline' | 'undo' | 'redo'
+
+/** The chord `defaultKeymap` binds for a toolbar command, or null when the keymap has none. Redo is the first binding. */
+export function shortcutChord(platform: Platform, name: ShortcutName): string | null {
+  for (const [chord, action] of defaultKeymap(platform)) {
+    if (action.kind === 'history' && action.step === name) return chord
+    if (
+      action.kind === 'command'
+      && (name === 'bold' || name === 'italic' || name === 'underline')
+      && action.command === markCommand[name]
+    ) return chord
+  }
+  return null
+}
+
 function step(direction: 'backward' | 'forward', unit: LogicalUnit): (extend: boolean) => Action {
   return (extend) => run(move(direction, unit, extend))
 }
@@ -164,9 +186,9 @@ export function defaultKeymap(platform: Platform): Keymap {
     [`${word}+backspace`, run(deleteBackward('word'))],
     [`${word}+delete`, run(deleteForward('word'))],
     ['mod+a', run(selectAll)],
-    ['mod+b', run(toggleMark('bold'))],
-    ['mod+i', run(toggleMark('italic'))],
-    ['mod+u', run(toggleMark('underline'))],
+    ['mod+b', run(markCommand.bold)],
+    ['mod+i', run(markCommand.italic)],
+    ['mod+u', run(markCommand.underline)],
     ['mod+z', { kind: 'history', step: 'undo' }],
     ['mod+y', { kind: 'history', step: 'redo' }],
     ['mod+shift+z', { kind: 'history', step: 'redo' }],
