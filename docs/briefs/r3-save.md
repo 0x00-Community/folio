@@ -1,6 +1,10 @@
 # Round 3 brief: save
 
-Status: not started. Unit 1 (the rdocx editing kit) runs first, in the rdocx worktree, from its own brief.
+Status: all four units pass their checks on `r3/save` (2026-11-19). The rdocx kit is on the local branch
+`work/editing-kit-grok` of `/Users/user/code/rdocx-editing-kit`. Not verified: a saved file opened in Microsoft Word,
+and the kit's split-then-join property on a real thesis (it ran on the three fixtures only). Writing through a handle
+the system opened the app with was not exercised. `Source.save` refuses the out-of-scope edits listed below with a
+`write` error instead of writing them.
 
 ## Goal
 

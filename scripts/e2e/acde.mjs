@@ -71,6 +71,45 @@ export function act(target, action, arg) {
   return acde(args)
 }
 
+// A button whose accessible name is exactly `name`. The dialog's own name contains its button labels,
+// so the first inspect hit is not always the button.
+export function buttonNamed(name) {
+  let out = ''
+  try {
+    out = execFileSync('acde', ['inspect', '--find', name], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (error) {
+    const stdout = error && error.stdout ? String(error.stdout) : ''
+    const stderr = error && error.stderr ? String(error.stderr) : ''
+    out = `${stdout}\n${stderr}`
+  }
+  const line = out.split('\n').find((item) => {
+    const quoted = item.match(/button "([^"]*)"/)
+    return !!(quoted && quoted[1] === name)
+  })
+  if (!line) throw new Error(`no button ${JSON.stringify(name)}: ${out.trim()}`)
+  const match = line.match(/\[(w\d+\.[\w.]+)\]/)
+  if (!match) throw new Error(line)
+  return match[1]
+}
+
+// The click may close the window and drop the connection. That is the expected end: wait until
+// `acde webs` no longer lists the app, so the next ensureDev starts a session instead of returning early.
+export async function actClosing(target, action, arg) {
+  let failure = null
+  try {
+    act(target, action, arg)
+  } catch (error) {
+    failure = error
+  }
+  for (let i = 0; i < 80; i++) {
+    const listed = acde(['webs'], { allowFail: true })
+    if (!listed || !listed.includes(APP)) return
+    await sleep(150)
+  }
+  if (failure) throw failure
+  throw new Error('acde webs still lists the app')
+}
+
 export function shot(path) {
   acde(['shot', APP, '-o', path])
   return path

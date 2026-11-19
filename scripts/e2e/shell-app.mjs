@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { act, assert, check, consoleErrors, ensureDev, evaluate, namedRef, root, shot, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, namedRef, root, shot, summary, until } from './acde.mjs'
 
 // Strings mirror src/locales. The page's lang, set from ?lang= or the system language, picks the table.
 const STRINGS = {
@@ -28,6 +28,8 @@ const STRINGS = {
     number: 'Numbered list',
     zoom: 'Zoom',
     untitled: 'Untitled.docx',
+    discard: "Don't save",
+    ask: 'Save changes to {name}?',
     statusPage: 'Page {page} of {pages}',
     statusWords: '{words} words',
     statusZoom: '{zoom}%',
@@ -55,6 +57,8 @@ const STRINGS = {
     number: '编号',
     zoom: '缩放',
     untitled: '未命名.docx',
+    discard: '不保存',
+    ask: '是否保存对 {name} 的更改？',
     statusPage: '第 {page} 页，共 {pages} 页',
     statusWords: '{words} 个字',
     statusZoom: '{zoom}%',
@@ -205,6 +209,20 @@ function selectionFact() {
 
 function fill(template, values) {
   return template.replace(/\{(\w+)\}/g, (all, name) => (values[name] === undefined ? all : String(values[name])))
+}
+
+function dialogInfo() {
+  return evaluate(`(() => {
+    const dialog = document.querySelector('[role="dialog"]')
+    if (!dialog) return null
+    const id = dialog.getAttribute('aria-labelledby')
+    const label = id ? document.getElementById(id) : null
+    const backdrop = dialog.closest('.unsaved')
+    return {
+      name: label ? label.textContent : '',
+      hidden: !backdrop || backdrop.hidden === true,
+    }
+  })()`)
 }
 
 function bodyText() {
@@ -364,6 +382,10 @@ await check('the window title carries the dirty mark after an edit', async () =>
 
 await check('new document clears the file and the dirty mark', async () => {
   act(namedRef(ui.new), 'click')
+  const asked = dialogInfo()
+  assert(asked && asked.hidden === false, 'New on a dirty document asks')
+  assert(asked.name === fill(ui.ask, { name: 'basic.docx' }), `dialog name ${asked.name}`)
+  act(buttonNamed(ui.discard), 'click')
   const title = evaluate('document.title')
   const text = bodyText()
   console.log(`  new title ${JSON.stringify(title)} text ${JSON.stringify(text)}`)

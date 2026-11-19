@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { act, assert, check, consoleErrors, ensureDev, evaluate, namedRef, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, namedRef, summary, until } from './acde.mjs'
 
 // acde eval puts the expression on the command line. A long fixture is staged on the page instead.
 const ARG_LIMIT = 100 * 1024
@@ -80,6 +80,34 @@ function readModel() {
 
 function paraById(model, id) {
   return model.paras.find((para) => para.id === id)
+}
+
+function dialogInfo() {
+  return evaluate(`(() => {
+    const dialog = document.querySelector('[role="dialog"]')
+    if (!dialog) return null
+    const id = dialog.getAttribute('aria-labelledby')
+    const label = id ? document.getElementById(id) : null
+    const backdrop = dialog.closest('.unsaved')
+    return {
+      name: label ? label.textContent : '',
+      hidden: !backdrop || backdrop.hidden === true,
+    }
+  })()`)
+}
+
+function discardUnsaved() {
+  const lang = evaluate('document.documentElement.lang')
+  const title = evaluate('document.title')
+  const named = /^• (.+) - Word$/.exec(title)
+  assert(named, `dirty title ${title}`)
+  const fileName = named[1]
+  const ask = lang === 'zh' ? `是否保存对 ${fileName} 的更改？` : `Save changes to ${fileName}?`
+  const discard = lang === 'zh' ? '不保存' : "Don't save"
+  const info = dialogInfo()
+  assert(info && info.hidden === false, 'New on a dirty document asks')
+  assert(info.name === ask, `dialog name ${info.name}`)
+  act(buttonNamed(discard), 'click')
 }
 
 function inputRef() {
@@ -430,6 +458,7 @@ await check('a point on a tall paragraph hits the line under the pointer', async
     }
   }
   assert(opened, `new document: ${errors.join('\n')}`)
+  discardUnsaved()
   sink = inputRef()
   act(sink, 'focus')
   const text = '改了一个技能，用户的使用方式就变了；'.repeat(120)
