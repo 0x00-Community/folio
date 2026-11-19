@@ -14,6 +14,10 @@ const STRINGS = {
     italic: 'Italic',
     underline: 'Underline',
     strike: 'Strikethrough',
+    font: 'Font',
+    size: 'Font size',
+    mixed: 'Mixed',
+    input: 'Document text',
     style: 'Paragraph style',
     heading1: 'Heading 1',
     alignLeft: 'Align left',
@@ -37,6 +41,10 @@ const STRINGS = {
     italic: '倾斜',
     underline: '下划线',
     strike: '删除线',
+    font: '字体',
+    size: '字号',
+    mixed: '混合',
+    input: '文档正文',
     style: '段落样式',
     heading1: '标题 1',
     alignLeft: '左对齐',
@@ -132,14 +140,15 @@ function labeled(name) {
     const want = ${JSON.stringify(name)}
     const el = [...document.querySelectorAll('button, select')].find((node) => node.getAttribute('aria-label') === want)
     if (!el) return null
-    const selected = el.selectedOptions && el.selectedOptions.length ? el.selectedOptions[0].textContent : null
+    const option = el.selectedOptions && el.selectedOptions.length ? el.selectedOptions[0] : null
     return {
       tag: el.tagName,
       pressed: el.getAttribute('aria-pressed'),
       disabled: el.disabled === true,
       value: 'value' in el ? el.value : null,
       title: el.getAttribute('title'),
-      selected,
+      selected: option ? option.textContent : null,
+      hidden: !!(option && option.hidden),
     }
   })()`)
 }
@@ -251,6 +260,8 @@ await check('every toolbar control is found by its accessible name', async () =>
     'alignLeft', 'alignCenter', 'alignRight', 'alignJustify', 'bullet', 'number',
   ]
   for (const key of buttons) requireControl(ui[key], 'BUTTON')
+  requireControl(ui.font, 'SELECT')
+  requireControl(ui.size, 'SELECT')
   requireControl(ui.style, 'SELECT')
   requireControl(ui.zoom, 'SELECT')
   const bold = labeled(ui.bold)
@@ -372,6 +383,216 @@ await check('open by picker loads the chosen document', async () => {
   const title = evaluate('document.title')
   assert(title.includes('basic.docx'), `title ${title}`)
   assert(!title.includes('•'), `title ${title}`)
+})
+
+function fontProbe() {
+  return evaluate(`(() => {
+    const editor = window.__word.editor
+    const bar = editor.toolbar()
+    const sel = editor.state.sel
+    if (!sel || sel.kind !== 'text') return { kind: sel ? sel.kind : 'none' }
+    const paras = []
+    for (const block of editor.state.doc.body) if (block.kind === 'p') paras.push(block)
+    const ai = paras.findIndex((para) => para.id === sel.anchor.p)
+    const hi = paras.findIndex((para) => para.id === sel.head.p)
+    if (ai < 0 || hi < 0) return { kind: 'text', missing: true }
+    const forward = ai < hi || (ai === hi && sel.anchor.o <= sel.head.o)
+    const start = forward ? sel.anchor : sel.head
+    const end = forward ? sel.head : sel.anchor
+    const lo = Math.min(ai, hi)
+    const hiIndex = Math.max(ai, hi)
+    const runs = []
+    let covered = ''
+    const home = paras[lo]
+    let homeText = ''
+    for (const inline of home.inlines) {
+      if (inline.kind === 'text') homeText += inline.text
+    }
+    for (let i = lo; i <= hiIndex; i++) {
+      const para = paras[i]
+      let paraLength = 0
+      for (const inline of para.inlines) paraLength += inline.kind === 'text' ? inline.text.length : 1
+      const from = i === lo ? start.o : 0
+      const to = i === hiIndex ? end.o : paraLength
+      let offset = 0
+      for (const inline of para.inlines) {
+        const chunk = inline.kind === 'text' ? inline.text : '\\uFFFC'
+        const runStart = offset
+        const runEnd = offset + chunk.length
+        offset = runEnd
+        if (inline.kind !== 'text' || runEnd <= from || runStart >= to) continue
+        const marks = inline.marks || {}
+        const text = chunk.slice(Math.max(from, runStart) - runStart, Math.min(to, runEnd) - runStart)
+        covered += text
+        runs.push({
+          text,
+          font: marks.font || null,
+          sizePt: typeof marks.sizePt === 'number' ? marks.sizePt : null,
+        })
+      }
+    }
+    return {
+      kind: 'text',
+      font: bar.font,
+      sizePt: bar.sizePt,
+      covered,
+      runs,
+      id: home.id,
+      text: homeText,
+    }
+  })()`)
+}
+
+function paragraphMarks(id) {
+  return evaluate(`(() => {
+    const id = ${JSON.stringify(id)}
+    const para = window.__word.editor.state.doc.body.find((block) => block.kind === 'p' && block.id === id)
+    if (!para) return null
+    const runs = []
+    for (const inline of para.inlines) {
+      if (inline.kind !== 'text') continue
+      const marks = inline.marks || {}
+      runs.push({
+        text: inline.text,
+        font: marks.font || null,
+        sizePt: typeof marks.sizePt === 'number' ? marks.sizePt : null,
+      })
+    }
+    return runs
+  })()`)
+}
+
+function spanOf(text) {
+  return evaluate(`(() => {
+    const want = ${JSON.stringify(text)}
+    for (const para of document.querySelectorAll('.blk.p')) {
+      if (para.getAttribute('aria-hidden') === 'true') continue
+      for (const span of para.children) {
+        if (span.textContent !== want) continue
+        const style = getComputedStyle(span)
+        return { family: style.fontFamily, size: style.fontSize }
+      }
+    }
+    return null
+  })()`)
+}
+
+function px(size) {
+  const value = Number.parseFloat(size)
+  assert(Number.isFinite(value), `font-size ${size}`)
+  return value
+}
+
+let shapedWord = ''
+let shapedSize = 0
+let shapedPara = ''
+let shapedMarks = ''
+let shapedFont = ''
+let shapedPoint = 0
+
+await check('the font and size selects show the title at the caret', async () => {
+  await openDocument(basic, 'basic.docx')
+  evaluate(`(() => { const view = document.querySelector('.page-view'); if (view) view.scrollTop = 0; return 1 })()`)
+  requireControl(ui.font, 'SELECT')
+  requireControl(ui.size, 'SELECT')
+  act(namedRef('Quarterly report'), 'click')
+  await until(`(() => {
+    const editor = window.__word.editor
+    const sel = editor.state.sel
+    if (!sel || sel.kind !== 'text') return false
+    const para = editor.state.doc.body.find((block) => block.kind === 'p' && block.id === sel.head.p)
+    if (!para) return false
+    let text = ''
+    for (const inline of para.inlines) if (inline.kind === 'text') text += inline.text
+    if (text !== 'Quarterly report') return false
+    const bar = editor.toolbar()
+    const read = (name) => [...document.querySelectorAll('select')].find((node) => node.getAttribute('aria-label') === name)
+    const font = read(${JSON.stringify(ui.font)})
+    const size = read(${JSON.stringify(ui.size)})
+    if (!font || !size) return false
+    const fontValue = bar.font === 'mixed' ? '' : String(bar.font)
+    const sizeValue = bar.sizePt === 'mixed' ? '' : String(bar.sizePt)
+    return font.value === fontValue && size.value === sizeValue && fontValue !== '' && sizeValue !== ''
+  })()`, { timeout: 5000, label: 'title font and size' })
+  const font = labeled(ui.font)
+  const size = labeled(ui.size)
+  const bar = evaluate(`window.__word.editor.toolbar()`)
+  console.log(`  title font ${JSON.stringify(font)} size ${JSON.stringify(size)} bar ${JSON.stringify(bar)}`)
+  assert(font.value === bar.font, `font select ${font.value} toolbar ${bar.font}`)
+  assert(size.value === String(bar.sizePt), `size select ${size.value} toolbar ${bar.sizePt}`)
+})
+
+await check('choosing Arial sets the selected word and the font select', async () => {
+  evaluate(`(() => {
+    const el = [...document.querySelectorAll('.blk.p')].find((node) => node.getAttribute('aria-label') === 'Centered paragraph.' && node.getAttribute('aria-hidden') !== 'true')
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' })
+    return !!el
+  })()`)
+  act(namedRef('Centered paragraph.'), 'double')
+  const selected = fontProbe()
+  console.log(`  word ${JSON.stringify(selected)}`)
+  assert(selected.kind === 'text' && selected.text === 'Centered paragraph.', `paragraph ${JSON.stringify(selected)}`)
+  assert(selected.covered.length > 0, `selection ${JSON.stringify(selected.covered)}`)
+  shapedWord = selected.covered
+  shapedPara = selected.id
+  shapedMarks = JSON.stringify(paragraphMarks(shapedPara))
+  shapedFont = selected.font
+  shapedPoint = selected.sizePt
+  act(namedRef(ui.font), 'select', 'Arial')
+  const styled = fontProbe()
+  const shown = labeled(ui.font)
+  const box = spanOf(shapedWord)
+  console.log(`  arial ${JSON.stringify(styled.runs)} shown ${JSON.stringify(shown)} box ${JSON.stringify(box)}`)
+  assert(styled.runs.length > 0 && styled.runs.every((run) => run.font === 'Arial'), `marks ${JSON.stringify(styled.runs)}`)
+  assert(shown.value === 'Arial' && shown.selected === 'Arial', `select ${JSON.stringify(shown)}`)
+  assert(box && box.family.replace(/^["']+/, '').startsWith('Arial'), `font-family ${box && box.family}`)
+  shapedSize = px(box.size)
+})
+
+await check('choosing 20 grows the selected word to that size', async () => {
+  act(namedRef(ui.size), 'select', '20')
+  const sized = fontProbe()
+  const shown = labeled(ui.size)
+  const box = spanOf(shapedWord)
+  console.log(`  size ${JSON.stringify(sized.runs)} shown ${JSON.stringify(shown)} box ${JSON.stringify(box)}`)
+  assert(sized.runs.length > 0 && sized.runs.every((run) => run.sizePt === 20), `marks ${JSON.stringify(sized.runs)}`)
+  assert(shown.value === '20' && shown.selected === '20', `select ${JSON.stringify(shown)}`)
+  const grown = px(box && box.size)
+  assert(grown > shapedSize + 0.5, `font-size ${shapedSize} -> ${box && box.size}`)
+  assert(Math.abs(grown - 20 * 4 / 3) < 0.35, `font-size ${box && box.size}`)
+})
+
+await check('a selection across the Arial word and its neighbor shows mixed', async () => {
+  const sink = namedRef(ui.input)
+  act(sink, 'focus')
+  act(sink, 'key', 'shift+right')
+  const spanned = fontProbe()
+  console.log(`  mixed runs ${JSON.stringify(spanned.runs)} toolbar ${spanned.font}`)
+  assert(spanned.runs.some((run) => run.font === 'Arial'), `no Arial run ${JSON.stringify(spanned.runs)}`)
+  assert(spanned.runs.some((run) => run.font !== 'Arial'), `no neighbor ${JSON.stringify(spanned.runs)}`)
+  assert(spanned.font === 'mixed', `toolbar ${spanned.font}`)
+  await until(`(() => {
+    const el = [...document.querySelectorAll('select')].find((node) => node.getAttribute('aria-label') === ${JSON.stringify(ui.font)})
+    const option = el && el.selectedOptions && el.selectedOptions[0]
+    return !!(el && el.value === '' && option && option.hidden)
+  })()`, { timeout: 5000, label: 'mixed font' })
+  const shown = labeled(ui.font)
+  assert(shown.hidden === true && shown.value === '' && shown.selected === ui.mixed, `mixed select ${JSON.stringify(shown)}`)
+})
+
+await check('undo twice restores the original font and size', async () => {
+  act(namedRef(ui.undo), 'click')
+  act(namedRef(ui.undo), 'click')
+  const marks = JSON.stringify(paragraphMarks(shapedPara))
+  const font = labeled(ui.font)
+  const size = labeled(ui.size)
+  const bar = evaluate(`window.__word.editor.toolbar()`)
+  console.log(`  restored marks ${marks} bar ${JSON.stringify(bar)} font ${JSON.stringify(font)} size ${JSON.stringify(size)}`)
+  assert(marks === shapedMarks, `marks ${marks} expected ${shapedMarks}`)
+  assert(bar.font === shapedFont, `toolbar font ${bar.font} expected ${shapedFont}`)
+  assert(bar.sizePt === shapedPoint, `toolbar size ${bar.sizePt} expected ${shapedPoint}`)
+  assert(font.value === shapedFont, `font select ${font.value}`)
+  assert(size.value === String(shapedPoint), `size select ${size.value}`)
 })
 
 await check('console has no errors', async () => {

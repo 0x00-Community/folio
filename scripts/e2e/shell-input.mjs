@@ -306,6 +306,95 @@ await check('console has no errors after the long document', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
+await check('a font change on long.docx keeps the selection where it was', async () => {
+  await openDocument(long)
+  const opened = evaluate(`window.__wordError || ''`)
+  assert(!opened, opened)
+  const placed = evaluate(`(() => {
+    const editor = window.__word.editor
+    const paras = editor.state.doc.body.filter((block) => block.kind === 'p')
+    const para = paras[Math.floor(paras.length / 2)]
+    if (!para) return { error: 'no paragraph' }
+    let length = 0
+    for (const inline of para.inlines) length += inline.kind === 'text' ? inline.text.length : 1
+    if (length < 30) return { error: 'paragraph is shorter than 30', length }
+    editor.run(window.__word.setSelection({ kind: 'text', anchor: { p: para.id, o: 10 }, head: { p: para.id, o: 30 } }))
+    window.__fontPara = para.id
+    return { id: para.id, length }
+  })()`)
+  assert(!placed.error, String(placed.error || JSON.stringify(placed)))
+  await until(`!!document.querySelector('.page[data-mounted="1"] .blk[data-id="' + window.__fontPara + '"]')`, {
+    timeout: 8000,
+    label: 'selected paragraph mounted',
+  })
+  const before = evaluate(`(() => {
+    const pages = document.querySelector('#pages')
+    const host = pages && pages.getBoundingClientRect()
+    const blocks = [...document.querySelectorAll('.page[data-mounted="1"] .blk[data-id="' + window.__fontPara + '"]')]
+    if (!host) return { error: 'missing pages' }
+    let block = null
+    for (const el of blocks) {
+      const clip = el.closest('.clip')
+      const box = clip ? clip.getBoundingClientRect() : el.getBoundingClientRect()
+      if (box.bottom > host.top + 0.5 && box.top < host.bottom - 0.5) {
+        block = el
+        break
+      }
+    }
+    if (!block) return { error: 'block is not in view', count: blocks.length }
+    return { top: block.getBoundingClientRect().top - host.top }
+  })()`)
+  assert(typeof before.top === 'number', String(before.error || JSON.stringify(before)))
+  await until(`(() => {
+    const want = ['Georgia', 'Verdana', 'Helvetica', 'Menlo']
+    const select = document.querySelector('select.font')
+    if (!select) return false
+    return [...select.options].some((option) => want.includes(option.value))
+  })()`, { timeout: 20000, label: 'probe font' })
+  evaluate(`(() => { window.__fontArmed = 0; requestAnimationFrame(() => requestAnimationFrame(() => { window.__fontArmed = 1 })); return 1 })()`)
+  await until(`window.__fontArmed === 1`, { timeout: 2000, label: 'font select ready' })
+  const picked = evaluate(`(() => {
+    const want = ['Georgia', 'Verdana', 'Helvetica', 'Menlo']
+    const select = document.querySelector('select.font')
+    if (!select) return { error: 'no font select' }
+    const family = want.find((name) => [...select.options].some((option) => option.value === name))
+    if (!family) return { error: 'none of the probe fonts are installed' }
+    select.value = family
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    return { family }
+  })()`)
+  assert(!picked.error, String(picked.error))
+  await until(`(() => {
+    const editor = window.__word.editor
+    return editor.status().pagesFinal === true && editor.toolbar().font === ${JSON.stringify(picked.family)}
+  })()`, { timeout: 20000, label: 'font settled' })
+  evaluate(`(() => { window.__fontFrames = 0; requestAnimationFrame(() => requestAnimationFrame(() => { window.__fontFrames = 1 })); return 1 })()`)
+  await until(`window.__fontFrames === 1`, { timeout: 2000, label: 'two frames' })
+  const after = evaluate(`(() => {
+    const pages = document.querySelector('#pages')
+    const host = pages && pages.getBoundingClientRect()
+    const blocks = [...document.querySelectorAll('.page[data-mounted="1"] .blk[data-id="' + window.__fontPara + '"]')]
+    if (!host) return { error: 'missing pages' }
+    let block = null
+    for (const el of blocks) {
+      if (!el.isConnected) continue
+      const clip = el.closest('.clip')
+      const box = clip ? clip.getBoundingClientRect() : el.getBoundingClientRect()
+      if (box.bottom > host.top + 0.5 && box.top < host.bottom - 0.5) {
+        block = el
+        break
+      }
+    }
+    if (!block) return { error: 'block is not mounted', count: blocks.length }
+    return { top: block.getBoundingClientRect().top - host.top, mounted: true }
+  })()`)
+  console.log(`  ${picked.family} top ${before.top} -> ${after.top}`)
+  assert(after.mounted === true, String(after.error || JSON.stringify(after)))
+  assert(Math.abs(after.top - before.top) <= 2, `block top ${before.top} -> ${after.top}`)
+  const errors = consoleErrors()
+  assert(errors.length === 0, errors.join('\n'))
+})
+
 await check('a point on the toolbar hits the button when the document is scrolled', async () => {
   const hit = evaluate(`(() => {
     const view = document.querySelector('.page-view')
