@@ -554,11 +554,26 @@ export function domPoint(blockEl: HTMLElement, o: number): { node: Node; offset:
   return pointAfter(last)
 }
 
-/** A DOM Range over [from, to) in one rendered paragraph element; collapsed when from === to. */
+let shared: Range | null = null
+
+/**
+ * The one Range every measurement reuses. acdert updates each live Range on every DOM mutation and collects them
+ * late, so a Range per measurement makes each keystroke slower with every document opened. Read it before the next
+ * call takes it.
+ */
+export function scratchRange(): Range {
+  shared ??= document.createRange()
+  return shared
+}
+
+/**
+ * The shared Range set over [from, to) in one rendered paragraph element; collapsed when from === to. Read it before
+ * the next call takes it.
+ */
 export function rangeIn(blockEl: HTMLElement, from: number, to: number): Range {
   const start = domPoint(blockEl, Math.min(from, to))
   const end = domPoint(blockEl, Math.max(from, to))
-  const range = document.createRange()
+  const range = scratchRange()
   range.setStart(start.node, start.offset)
   range.setEnd(end.node, end.offset)
   return range

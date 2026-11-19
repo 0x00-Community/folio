@@ -19,6 +19,7 @@ import {
   PT_TO_PX,
   rangeIn,
   renderBlock,
+  scratchRange,
 } from './render.ts'
 import type { Decoration, RenderContext } from './render.ts'
 
@@ -82,7 +83,7 @@ function contentLineRects(el: HTMLElement): LineRect[] {
     else if (child.classList.contains('atom')) rects.push(child.getBoundingClientRect())
   }
   if (!saw) {
-    const range = document.createRange()
+    const range = scratchRange()
     range.selectNodeContents(el)
     return groupLineRects([...range.getClientRects()])
   }
@@ -90,7 +91,7 @@ function contentLineRects(el: HTMLElement): LineRect[] {
 }
 
 function childContentRects(child: HTMLElement): DOMRect[] {
-  const range = document.createRange()
+  const range = scratchRange()
   range.selectNodeContents(child)
   return [...range.getClientRects()]
 }
@@ -785,7 +786,7 @@ function extractHeader(blockEl: HTMLElement, rows: number): HTMLTableElement | n
 
 function caretClientTop(el: HTMLElement, offset: number): number {
   const point = domPoint(el, offset)
-  const range = document.createRange()
+  const range = scratchRange()
   range.setStart(point.node, point.offset)
   range.collapse(true)
   const rect = range.getClientRects()[0]
