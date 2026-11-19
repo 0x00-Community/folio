@@ -24,6 +24,7 @@ export type Action =
   | { readonly kind: 'visual'; readonly motion: VisualMotion; readonly extend: boolean }
   | { readonly kind: 'history'; readonly step: 'undo' | 'redo' }
   | { readonly kind: 'clipboard'; readonly op: 'copy' | 'cut' | 'paste' }
+  | { readonly kind: 'file'; readonly op: 'save' | 'saveAs' }
 
 export type Binding = readonly [chord: string, action: Action]
 
@@ -129,12 +130,13 @@ const markCommand = {
   underline: toggleMark('underline'),
 } as const
 
-export type ShortcutName = 'bold' | 'italic' | 'underline' | 'undo' | 'redo'
+export type ShortcutName = 'bold' | 'italic' | 'underline' | 'undo' | 'redo' | 'save' | 'saveAs'
 
 /** The chord `defaultKeymap` binds for a toolbar command, or null when the keymap has none. Redo is the first binding. */
 export function shortcutChord(platform: Platform, name: ShortcutName): string | null {
   for (const [chord, action] of defaultKeymap(platform)) {
     if (action.kind === 'history' && action.step === name) return chord
+    if (action.kind === 'file' && action.op === name) return chord
     if (
       action.kind === 'command'
       && (name === 'bold' || name === 'italic' || name === 'underline')
@@ -192,6 +194,8 @@ export function defaultKeymap(platform: Platform): Keymap {
     ['mod+z', { kind: 'history', step: 'undo' }],
     ['mod+y', { kind: 'history', step: 'redo' }],
     ['mod+shift+z', { kind: 'history', step: 'redo' }],
+    ['mod+s', { kind: 'file', op: 'save' }],
+    ['mod+shift+s', { kind: 'file', op: 'saveAs' }],
     ['mod+c', { kind: 'clipboard', op: 'copy' }],
     ['mod+x', { kind: 'clipboard', op: 'cut' }],
     ['mod+v', { kind: 'clipboard', op: 'paste' }],

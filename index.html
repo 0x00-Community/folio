@@ -209,6 +209,53 @@
         background: var(--error-bg);
         color: var(--error-text);
       }
+      .unsaved {
+        position: fixed;
+        inset: 0;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: color-mix(in srgb, var(--text) 35%, transparent);
+      }
+      .unsaved[hidden] { display: none }
+      .unsaved-panel {
+        box-sizing: border-box;
+        width: min(420px, calc(100% - 32px));
+        margin: 16px;
+        padding: 16px 18px;
+        color: var(--text);
+        background: var(--chrome-bg);
+        border: 1px solid var(--chrome-border);
+        border-radius: 8px;
+        box-shadow: var(--page-shadow);
+      }
+      .unsaved-panel p { margin: 0 0 14px }
+      .unsaved-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      .unsaved-actions button {
+        height: 28px;
+        padding: 0 12px;
+        color: var(--text);
+        background: var(--field-bg);
+        border: 1px solid var(--chrome-border);
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .unsaved-actions button:hover { background: var(--control-hover) }
+      .unsaved-actions button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .unsaved-actions button.primary {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
     </style>
   </head>
   <body>

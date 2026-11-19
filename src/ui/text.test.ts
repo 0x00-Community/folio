@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  canSave,
   commandTitle,
   fileHandleFromRequest,
   fontOptions,
@@ -33,6 +34,16 @@ test('isDirty compares the document object with the saved snapshot', () => {
   assert.equal(isDirty(saved, null), false, 'no open file')
   assert.equal(isDirty(saved, { saved }), false, 'the snapshot is the document')
   assert.equal(isDirty(edited, { saved }), true, 'a later document object is dirty')
+})
+
+test('canSave is off only for a clean document that already has a file', () => {
+  const saved = { body: [] }
+  const edited = { body: [] }
+  const handle = { kind: 'file' }
+  assert.equal(canSave(saved, null), true, 'no open file still offers Save')
+  assert.equal(canSave(saved, { handle: null, saved }), true, 'no handle falls through to Save As')
+  assert.equal(canSave(saved, { handle, saved }), false, 'a clean file has nothing to write')
+  assert.equal(canSave(edited, { handle, saved }), true, 'edits can be written')
 })
 
 test('formatTitle puts the dirty mark before the file name', () => {

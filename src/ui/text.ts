@@ -22,6 +22,18 @@ export function isDirty(doc: object, file: { readonly saved: object } | null): b
   return file !== null && doc !== file.saved
 }
 
+/**
+ * Save has something to write. A clean document that already has a file handle does not.
+ * No handle (untitled, or bytes opened without a file) still offers Save, which asks for a place.
+ */
+export function canSave(
+  doc: object,
+  file: { readonly handle: object | null; readonly saved: object } | null,
+): boolean {
+  if (file === null || file.handle === null) return true
+  return doc !== file.saved
+}
+
 /** File name, a leading bullet while dirty, then the app name. The bullet is the dirty mark in the window title. */
 export function formatTitle(name: string, dirty: boolean, appName: string): string {
   return `${dirty ? '• ' : ''}${name} - ${appName}`

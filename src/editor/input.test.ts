@@ -118,7 +118,8 @@ test('a chord bound twice is refused, including one that collides with a default
   const noop: Action = { kind: 'history', step: 'undo' }
   assert.throws(() => buildKeymap([['mod+q', noop], ['mod+q', noop]]), RangeError)
   assert.throws(() => buildKeymap([...defaultKeymap('other'), ['mod+b', noop]]), RangeError, 'an app binding cannot shadow bold')
-  const extended = buildKeymap([...defaultKeymap('other'), ['mod+s', noop]])
+  assert.throws(() => buildKeymap([...defaultKeymap('other'), ['mod+s', noop]]), RangeError, 'an app binding cannot shadow save')
+  const extended = buildKeymap([...defaultKeymap('other'), ['mod+q', noop]])
   assert.equal(extended.size, defaultKeymap('other').size + 1, 'a free chord is added')
 })
 
@@ -160,6 +161,8 @@ test('the keymap reaches every visual motion, with and without Shift, plus undo,
     assert.deepEqual([...new Set(steps)].sort(), ['redo', 'undo'], `history on ${platform}`)
     const ops = actions.flatMap(action => action.kind === 'clipboard' ? [action.op] : [])
     assert.deepEqual([...new Set(ops)].sort(), ['copy', 'cut', 'paste'], `clipboard on ${platform}`)
+    const files = actions.flatMap(action => action.kind === 'file' ? [action.op] : [])
+    assert.deepEqual([...new Set(files)].sort(), ['save', 'saveAs'], `file on ${platform}`)
   }
 })
 
@@ -170,6 +173,8 @@ test('shortcutChord reads the chord the keymap bound', () => {
     assert.equal(shortcutChord(platform, 'underline'), 'mod+u', platform)
     assert.equal(shortcutChord(platform, 'undo'), 'mod+z', platform)
     assert.equal(shortcutChord(platform, 'redo'), 'mod+y', platform)
+    assert.equal(shortcutChord(platform, 'save'), 'mod+s', platform)
+    assert.equal(shortcutChord(platform, 'saveAs'), 'mod+shift+s', platform)
   }
 })
 
@@ -181,6 +186,8 @@ test('undo, redo and the clipboard sit on mod on both platforms, with redo on Sh
     assert.deepEqual(bound(platform, keyEvent('c', held)), { kind: 'clipboard', op: 'copy' })
     assert.deepEqual(bound(platform, keyEvent('x', held)), { kind: 'clipboard', op: 'cut' })
     assert.deepEqual(bound(platform, keyEvent('v', held)), { kind: 'clipboard', op: 'paste' })
+    assert.deepEqual(bound(platform, keyEvent('s', held)), { kind: 'file', op: 'save' })
+    assert.deepEqual(bound(platform, keyEvent('S', { ...held, ...shift })), { kind: 'file', op: 'saveAs' })
   }
 })
 

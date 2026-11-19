@@ -48,6 +48,7 @@ export class Editor implements EditingSurface {
   private readonly sink: HTMLTextAreaElement
   private input: InputBinding | null = null
   private readonly listeners = new Set<() => void>()
+  private readonly fileListeners = new Set<(op: 'save' | 'saveAs') => void>()
   private session: Source
   private current: EditorState
   private markers: ReadonlyMap<ParaId, string>
@@ -173,6 +174,19 @@ export class Editor implements EditingSurface {
     return () => {
       this.listeners.delete(listener)
     }
+  }
+
+  /** Save and Save As from the keymap. The app owns the file; this only delivers the request. */
+  onFile(listener: (op: 'save' | 'saveAs') => void): () => void {
+    this.fileListeners.add(listener)
+    return () => {
+      this.fileListeners.delete(listener)
+    }
+  }
+
+  fileCommand(op: 'save' | 'saveAs'): void {
+    if (this.destroyed) return
+    for (const listener of this.fileListeners) listener(op)
   }
 
   toolbar(): ToolbarState {

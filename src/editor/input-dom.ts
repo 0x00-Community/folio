@@ -34,6 +34,7 @@ export interface EditingSurface {
   movePage(direction: 'up' | 'down', extend: boolean, goalX: number | null): number | null
   moveToLineEdge(edge: 'start' | 'end', extend: boolean): void
   setTextSelection(anchor: Pos, head: Pos): void
+  fileCommand(op: 'save' | 'saveAs'): void
 }
 
 export interface InputBinding {
@@ -88,6 +89,9 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
         return
       case 'clipboard':
         applyClipboard(action.op)
+        return
+      case 'file':
+        editor.fileCommand(action.op)
         return
       case 'visual':
         applyVisual(action, column)

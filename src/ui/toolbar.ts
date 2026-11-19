@@ -15,6 +15,8 @@ export type Align = 'left' | 'center' | 'right' | 'justify'
 export interface ToolbarHandlers {
   onNew(): void
   onOpen(): void
+  onSave(): void
+  onSaveAs(): void
   onUndo(): void
   onRedo(): void
   onMark(mark: ToggleMark): void
@@ -27,7 +29,7 @@ export interface ToolbarHandlers {
 }
 
 export interface ToolbarView {
-  render(state: ToolbarState, doc: Doc, usedFonts: readonly string[]): void
+  render(state: ToolbarState, doc: Doc, usedFonts: readonly string[], canSave: boolean): void
   zoom(): number
 }
 
@@ -52,9 +54,12 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   const sizeGuard = { n: 0, ignore: false }
 
   const file = group(root)
+  const saveButton = iconButton(t('save'), 'save', platform, () => handlers.onSave(), 'save')
   file.append(
     textButton(t('new'), platform, () => handlers.onNew(), 'doc'),
     textButton(t('open'), platform, () => handlers.onOpen(), 'folder'),
+    saveButton,
+    textButton(t('saveAs'), platform, () => handlers.onSaveAs(), 'save-as', 'saveAs'),
   )
   const undo = iconButton(t('undo'), 'undo', platform, () => handlers.onUndo(), 'undo')
   const redo = iconButton(t('redo'), 'redo', platform, () => handlers.onRedo(), 'redo')
@@ -186,10 +191,11 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
 
   return {
     zoom: () => zoom,
-    render(state, doc, used) {
+    render(state, doc, used, canSave) {
       painting = true
       fontReady = true
       try {
+        if (saveButton.disabled !== !canSave) saveButton.disabled = !canSave
         if (undo.disabled !== !state.canUndo) undo.disabled = !state.canUndo
         if (redo.disabled !== !state.canRedo) redo.disabled = !state.canRedo
         setPressed(marks.bold, pressedOf(state.bold))
@@ -235,8 +241,9 @@ function textButton(
   platform: Platform,
   onClick: () => void,
   graphic: IconName,
+  shortcut: ShortcutName | null = null,
 ): HTMLButtonElement {
-  return commandButton(label, null, platform, onClick, graphic, true)
+  return commandButton(label, shortcut, platform, onClick, graphic, true)
 }
 
 function iconButton(

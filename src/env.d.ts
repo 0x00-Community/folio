@@ -10,6 +10,13 @@ interface OpenFilePickerOptions {
   }>
 }
 
+interface SaveFilePickerOptions {
+  suggestedName?: string
+  excludeAcceptAllOption?: boolean
+  types?: OpenFilePickerOptions['types']
+}
+
 interface Window {
   showOpenFilePicker(options?: OpenFilePickerOptions): Promise<FileSystemFileHandle[]>
+  showSaveFilePicker(options?: SaveFilePickerOptions): Promise<FileSystemFileHandle>
 }

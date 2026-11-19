@@ -23,7 +23,13 @@ if (location.hash === '#view-demo') {
 function installHook(app: {
   readonly editor: Editor
   openBytes(bytes: Uint8Array, name?: string): Promise<void>
+  save(): { base64: string; ms: number }
+  saveTampered(): string
+  requestClose(): boolean
 }): void {
+  // There is no production build flag. These hooks are how the e2e reaches save, a forced verify
+  // failure, and beforeclose. `acde act w1 close` waits until the window is gone, so a handler that
+  // returns false cannot be driven from the CLI and still continue the test.
   window.__word = {
     editor: app.editor,
     platform: app.editor.platform,
@@ -32,6 +38,15 @@ function installHook(app: {
     },
     insertText,
     setSelection,
+    save() {
+      return app.save()
+    },
+    saveTampered() {
+      return app.saveTampered()
+    },
+    requestClose() {
+      return app.requestClose()
+    },
   }
 }
 
@@ -50,6 +65,9 @@ declare global {
       openBytes(base64: string, name?: string): Promise<void>
       insertText(text: string): Command
       setSelection(sel: Selection): Command
+      save(): { base64: string; ms: number }
+      saveTampered(): string
+      requestClose(): boolean
     }
   }
 }

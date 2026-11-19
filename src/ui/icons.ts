@@ -15,6 +15,8 @@ export type IconName =
   | 'align-justify'
   | 'list-bullet'
   | 'list-number'
+  | 'save'
+  | 'save-as'
 
 type MarkIcon = 'bold' | 'italic' | 'underline' | 'strike'
 
@@ -62,6 +64,10 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return listBullet(svg)
     case 'list-number':
       return listNumber(svg)
+    case 'save':
+      return drawSave(svg)
+    case 'save-as':
+      return drawSaveAs(svg)
     default: {
       const unexpected: never = name
       throw new Error(`unknown icon ${unexpected}`)
@@ -76,6 +82,20 @@ function drawDoc(svg: SVGSVGElement): void {
 
 function drawFolder(svg: SVGSVGElement): void {
   path(svg, 'M2.2 6.6 V4.5 H7.3 L8.8 6.6 H15.8 V14.7 H2.2 Z')
+}
+
+function drawSave(svg: SVGSVGElement): void {
+  path(svg, 'M4 2.6 H11.2 L15 6.4 V15.4 H4 Z')
+  path(svg, 'M6.2 2.6 V6.4 H10.6')
+  path(svg, 'M6.2 15.4 V10.2 H12.6 V15.4')
+}
+
+function drawSaveAs(svg: SVGSVGElement): void {
+  path(svg, 'M2.2 3.2 H7.4 L10.2 6 V12.6 H2.2 Z')
+  path(svg, 'M4 3.2 V6 H7.2')
+  path(svg, 'M4 12.6 V9.2 H8.4 V12.6')
+  path(svg, 'M11.4 10.4 L15.6 14.6')
+  path(svg, 'M12.4 14.6 H15.6 V11.4')
 }
 
 function drawUndo(svg: SVGSVGElement): void {
