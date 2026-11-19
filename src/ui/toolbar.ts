@@ -5,6 +5,8 @@ import { shortcutChord } from '../editor/input.ts'
 import { installedFamilies } from '../fonts.ts'
 import { t } from '../i18n.ts'
 import type { Doc } from '../model.ts'
+import { icon } from './icons.ts'
+import type { IconName } from './icons.ts'
 import { commandTitle, fontOptions, sizeOptions, styleOptions } from './text.ts'
 import type { StyleOption } from './text.ts'
 
@@ -51,20 +53,20 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
 
   const file = group(root)
   file.append(
-    commandButton(t('new'), null, platform, () => handlers.onNew()),
-    commandButton(t('open'), null, platform, () => handlers.onOpen()),
+    textButton(t('new'), platform, () => handlers.onNew(), 'doc'),
+    textButton(t('open'), platform, () => handlers.onOpen(), 'folder'),
   )
-  const undo = commandButton(t('undo'), 'undo', platform, () => handlers.onUndo())
-  const redo = commandButton(t('redo'), 'redo', platform, () => handlers.onRedo())
+  const undo = iconButton(t('undo'), 'undo', platform, () => handlers.onUndo(), 'undo')
+  const redo = iconButton(t('redo'), 'redo', platform, () => handlers.onRedo(), 'redo')
   undo.disabled = true
   redo.disabled = true
   group(root).append(undo, redo)
 
   const marks = {
-    bold: toggleButton(t('bold'), 'bold', platform, () => handlers.onMark('bold')),
-    italic: toggleButton(t('italic'), 'italic', platform, () => handlers.onMark('italic')),
-    underline: toggleButton(t('underline'), 'underline', platform, () => handlers.onMark('underline')),
-    strike: toggleButton(t('strike'), null, platform, () => handlers.onMark('strike')),
+    bold: toggleButton(t('bold'), 'bold', platform, () => handlers.onMark('bold'), 'bold'),
+    italic: toggleButton(t('italic'), 'italic', platform, () => handlers.onMark('italic'), 'italic'),
+    underline: toggleButton(t('underline'), 'underline', platform, () => handlers.onMark('underline'), 'underline'),
+    strike: toggleButton(t('strike'), null, platform, () => handlers.onMark('strike'), 'strike'),
   }
   group(root).append(marks.bold, marks.italic, marks.underline, marks.strike)
 
@@ -100,15 +102,15 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   })
 
   const alignButtons = {
-    left: toggleButton(t('align.left'), null, platform, () => handlers.onAlign('left')),
-    center: toggleButton(t('align.center'), null, platform, () => handlers.onAlign('center')),
-    right: toggleButton(t('align.right'), null, platform, () => handlers.onAlign('right')),
-    justify: toggleButton(t('align.justify'), null, platform, () => handlers.onAlign('justify')),
+    left: toggleButton(t('align.left'), null, platform, () => handlers.onAlign('left'), 'align-left'),
+    center: toggleButton(t('align.center'), null, platform, () => handlers.onAlign('center'), 'align-center'),
+    right: toggleButton(t('align.right'), null, platform, () => handlers.onAlign('right'), 'align-right'),
+    justify: toggleButton(t('align.justify'), null, platform, () => handlers.onAlign('justify'), 'align-justify'),
   }
   group(root).append(alignButtons.left, alignButtons.center, alignButtons.right, alignButtons.justify)
 
-  const bullet = toggleButton(t('list.bullet'), null, platform, () => handlers.onList('bullet'))
-  const numbered = toggleButton(t('list.number'), null, platform, () => handlers.onList('decimal'))
+  const bullet = toggleButton(t('list.bullet'), null, platform, () => handlers.onList('bullet'), 'list-bullet')
+  const numbered = toggleButton(t('list.number'), null, platform, () => handlers.onList('decimal'), 'list-number')
   group(root).append(bullet, numbered)
 
   const zoomSelect = labeledSelect(t('zoom'), 'zoom')
@@ -128,7 +130,7 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
     zoom = next
     handlers.onZoom(zoom)
   })
-  group(root).append(zoomSelect)
+  group(root, true).append(zoomSelect)
 
   function optionsFor(doc: Doc): readonly StyleOption[] {
     const styles = doc.styles.paragraph
@@ -212,11 +214,39 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   }
 }
 
-function group(root: HTMLElement): HTMLElement {
+function group(root: HTMLElement, atEnd = false): HTMLElement {
   const el = document.createElement('div')
-  el.className = 'group'
+  el.className = atEnd ? 'group zoom' : 'group'
+  const leading = root.childElementCount > 0
   root.append(el)
+  if (leading) el.append(divider())
   return el
+}
+
+function divider(): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'divider'
+  el.setAttribute('aria-hidden', 'true')
+  return el
+}
+
+function textButton(
+  label: string,
+  platform: Platform,
+  onClick: () => void,
+  graphic: IconName,
+): HTMLButtonElement {
+  return commandButton(label, null, platform, onClick, graphic, true)
+}
+
+function iconButton(
+  label: string,
+  shortcut: ShortcutName | null,
+  platform: Platform,
+  onClick: () => void,
+  graphic: IconName,
+): HTMLButtonElement {
+  return commandButton(label, shortcut, platform, onClick, graphic, false)
 }
 
 function commandButton(
@@ -224,15 +254,17 @@ function commandButton(
   shortcut: ShortcutName | null,
   platform: Platform,
   onClick: () => void,
+  graphic: IconName,
+  withLabel: boolean,
 ): HTMLButtonElement {
   const el = document.createElement('button')
   el.type = 'button'
-  el.textContent = label
+  if (withLabel) el.className = 'labeled'
   el.setAttribute('aria-label', label)
-  if (shortcut) {
-    const chord = shortcutChord(platform, shortcut)
-    if (chord) el.title = commandTitle(label, chord, platform)
-  }
+  el.append(icon(graphic))
+  if (withLabel) el.append(label)
+  const chord = shortcut === null ? null : shortcutChord(platform, shortcut)
+  if (!withLabel || chord) el.title = commandTitle(label, chord, platform)
   el.addEventListener('click', onClick)
   return el
 }
@@ -242,8 +274,9 @@ function toggleButton(
   shortcut: ShortcutName | null,
   platform: Platform,
   onClick: () => void,
+  graphic: IconName,
 ): HTMLButtonElement {
-  const el = commandButton(label, shortcut, platform, onClick)
+  const el = iconButton(label, shortcut, platform, onClick, graphic)
   el.setAttribute('aria-pressed', 'false')
   return el
 }

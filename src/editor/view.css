@@ -2,7 +2,7 @@
   position: relative;
   height: 100%;
   overflow: auto;
-  background: #d4d4d4;
+  background: var(--canvas-bg);
   color: #222;
 }
 
@@ -24,7 +24,7 @@
   margin: 0 0 16px;
   background: #fff;
   color: #222;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--page-shadow);
   overflow: hidden;
 }
 

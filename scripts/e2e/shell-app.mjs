@@ -274,7 +274,7 @@ await check('every toolbar control is found by its accessible name', async () =>
   assert(underline.title && (underline.title.includes('Ctrl+U') || underline.title.includes('⌘U')), `underline title ${underline.title}`)
   assert(undo.title && (undo.title.includes('Ctrl+Z') || undo.title.includes('⌘Z')), `undo title ${undo.title}`)
   assert(redo.title && (redo.title.includes('Ctrl+Y') || redo.title.includes('⌘Y')), `redo title ${redo.title}`)
-  assert(labeled(ui.strike).title === null, 'strike has no keymap chord')
+  assert(labeled(ui.strike).title === ui.strike, 'strike has no keymap chord')
   assert(labeled(ui.new).title === null, 'new has no keymap chord')
 })
 
