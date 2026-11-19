@@ -1,5 +1,7 @@
 pub mod import;
+pub mod verify;
 pub mod wire;
+pub mod write;
 
 use std::collections::BTreeMap;
 
@@ -35,6 +37,7 @@ pub struct Session {
     imported: wire::Imported,
     sources: import::SourceMap,
     media: BTreeMap<String, StoredMedia>,
+    ledger: verify::Ledger,
 }
 
 impl Session {
@@ -63,11 +66,60 @@ impl Session {
             imported: imported.imported,
             sources: imported.sources,
             media,
+            ledger: imported.ledger,
         }
     }
 
     pub fn block_sources(&self) -> usize {
         self.sources.blocks.len()
+    }
+
+    /// The unmodeled-item ledger counted at import.
+    pub fn ledger(&self) -> &verify::Ledger {
+        &self.ledger
+    }
+
+    /// Write `patch_json` onto a fresh copy of the opened document.
+    ///
+    /// The session's document is left untouched. A write or verify failure returns before bytes.
+    pub fn save_result(&self, patch_json: &str) -> Result<Vec<u8>, wire::BridgeError> {
+        self.save_result_tampered(patch_json, |_| {})
+    }
+
+    /// `save_result`, then `tamper` the written document before verification.
+    ///
+    /// Tests use this to drop a bookmark and check that verify names it. A save never calls it.
+    pub fn save_result_tampered(
+        &self,
+        patch_json: &str,
+        tamper: impl FnOnce(&mut rdocx::Document),
+    ) -> Result<Vec<u8>, wire::BridgeError> {
+        let patch: wire::Patch =
+            serde_json::from_str(patch_json).map_err(|error| wire::BridgeError::Write {
+                detail: error.to_string(),
+            })?;
+        let mut written =
+            write::write(&self.doc, &self.sources, &self.imported, &patch).map_err(|error| {
+                wire::BridgeError::Write {
+                    detail: error.detail(),
+                }
+            })?;
+        tamper(&mut written.document);
+        verify::verify(
+            &written.document,
+            &patch,
+            &self.imported,
+            &self.ledger,
+            &written.removed,
+            &written.list_ids,
+        )
+        .map_err(|first_difference| wire::BridgeError::Verify { first_difference })?;
+        written
+            .document
+            .to_bytes()
+            .map_err(|error| wire::BridgeError::Write {
+                detail: error.to_string(),
+            })
     }
 }
 
@@ -91,6 +143,13 @@ impl Session {
 
     pub fn import(&self) -> String {
         serde_json::to_string(&self.imported).expect("imported document is JSON")
+    }
+
+    /// Save the patch onto a fresh copy of the opened document and return docx bytes.
+    pub fn save(&self, patch_json: &str) -> Result<Vec<u8>, JsValue> {
+        self.save_result(patch_json).map_err(|error| {
+            JsValue::from_str(&serde_json::to_string(&error).expect("bridge error is JSON"))
+        })
     }
 
     /// Image bytes and content type for one media key. The sketch's `image` returns bytes only.

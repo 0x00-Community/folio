@@ -391,3 +391,35 @@ pub struct ParaLook {
     pub page_break_before: bool,
     pub widow_control: bool,
 }
+
+/// What the editor sends to save: the final document, with untouched blocks named by source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Patch {
+    pub body: Vec<PatchBlock>,
+    pub sections: Vec<Section>,
+    /// Lists created this session, keyed by their negative numId.
+    #[serde(default)]
+    pub new_lists: Vec<(i32, ListDef)>,
+    /// Built-in roles applied but missing from the pristine styles.
+    #[serde(default)]
+    pub added_styles: Vec<String>,
+}
+
+/// A body block in a patch. `Keep` is the block import produced; `Changed` is the full block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
+pub enum PatchBlock {
+    Keep { keep: BlockSrc },
+    Changed(Block),
+}
+
+/// Save failure. `Open` is produced by `Session::open`; save returns `Write` or `Verify`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum BridgeError {
+    Open { reason: String, detail: String },
+    Write { detail: String },
+    Verify { first_difference: String },
+}

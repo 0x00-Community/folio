@@ -80,6 +80,8 @@ pub struct Import {
     pub imported: wire::Imported,
     pub sources: SourceMap,
     pub media_bytes: BTreeMap<String, (String, Vec<u8>)>,
+    /// Unmodeled items of this document, counted once for save verification.
+    pub ledger: crate::verify::Ledger,
 }
 
 struct Ctx {
@@ -146,6 +148,7 @@ pub fn import(doc: &Document) -> Import {
         .collect();
     let media_bytes = ctx.media;
     let fonts = ctx.fonts.into_iter().collect();
+    let ledger = crate::verify::ledger(doc);
     Import {
         imported: wire::Imported {
             body,
@@ -160,6 +163,7 @@ pub fn import(doc: &Document) -> Import {
         },
         sources: ctx.sources,
         media_bytes,
+        ledger,
     }
 }
 
@@ -451,10 +455,11 @@ fn paragraph_text(xml: &[u8]) -> String {
         let parent_run = frames
             .last()
             .is_some_and(|frame| frame.word && frame.local == "r");
-        if visible && tag.local == "fldChar" {
-            if let Some(mark) = tag.fld {
-                fields.mark(mark);
-            }
+        if visible
+            && tag.local == "fldChar"
+            && let Some(mark) = tag.fld
+        {
+            fields.mark(mark);
         }
         let opened_text = visible && tag.local == "t";
         if opened_text {
@@ -1007,6 +1012,7 @@ fn import_paragraph(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_items(
     doc: &Document,
     ctx: &mut Ctx,
@@ -1112,6 +1118,7 @@ fn walk_items(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn note_revision(
     doc: &Document,
     ctx: &mut Ctx,
@@ -1143,6 +1150,7 @@ fn note_revision(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_run(
     doc: &Document,
     ctx: &mut Ctx,
@@ -1303,7 +1311,7 @@ fn remember_media(doc: &Document, ctx: &mut Ctx, key: &str) {
     }
 }
 
-fn direct_marks(run: &RunRef<'_>) -> Marks {
+pub(crate) fn direct_marks(run: &RunRef<'_>) -> Marks {
     let mut marks = Marks {
         bold: run.bold_value(),
         italic: run.italic_value(),
@@ -1331,7 +1339,7 @@ fn direct_marks(run: &RunRef<'_>) -> Marks {
     marks
 }
 
-fn direct_props(paragraph: &ParagraphRef<'_>) -> ParaProps {
+pub(crate) fn direct_props(paragraph: &ParagraphRef<'_>) -> ParaProps {
     let (first_line, hanging) = match paragraph.first_line_indent().map(Length::to_pt) {
         Some(value) if value < 0.0 => (None, Some(-value)),
         Some(value) => (Some(value), None),
