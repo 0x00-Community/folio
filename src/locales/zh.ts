@@ -33,6 +33,7 @@ const messages: Record<string, string> = {
   'status.words': '{words} 个字',
   'status.zoom': '{zoom}%',
   'file.docx': 'Word 文档',
+  'open.error.unreadable': '无法读取这个文件。请确认 Word 有权访问它所在的文件夹。',
   'open.error.notDocx': '这个文件不是 Word 文档。',
   'open.error.encrypted': '这个文档已加密，无法打开。',
   'open.error.corrupt': '这个文档已损坏，无法打开。',

@@ -114,13 +114,22 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   }
 
   async function openHandle(handle: FileSystemFileHandle): Promise<void> {
-    const blob = await handle.getFile()
-    const bytes = new Uint8Array(await blob.arrayBuffer())
+    let bytes: Uint8Array
+    let name: string
     try {
-      adopt(engine.open(bytes), handle, blob.name || handle.name)
+      const blob = await handle.getFile()
+      bytes = new Uint8Array(await blob.arrayBuffer())
+      name = blob.name || handle.name
+    } catch {
+      // The system can refuse the read after the pick, for example a folder the runtime has no permission for.
+      showOpenError('unreadable')
+      return
+    }
+    try {
+      adopt(engine.open(bytes), handle, name)
     } catch (error) {
       if (error instanceof OpenError) {
-        showOpenError(error)
+        showOpenError(error.reason)
         return
       }
       throw error
@@ -147,7 +156,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     try {
       adopt(engine.open(bytes), null, name && name.length > 0 ? name : t('openedName'))
     } catch (error) {
-      if (error instanceof OpenError) showOpenError(error)
+      if (error instanceof OpenError) showOpenError(error.reason)
       throw error
     }
     return whenLaidOut(current())
@@ -173,10 +182,10 @@ function required(selector: string): HTMLElement {
   return el
 }
 
-function showOpenError(error: OpenError): void {
+function showOpenError(reason: OpenError['reason'] | 'unreadable'): void {
   const el = document.querySelector('#open-error')
   if (!(el instanceof HTMLElement)) return
-  const message = t(`open.error.${error.reason}`)
+  const message = t(`open.error.${reason}`)
   if (el.textContent !== message) el.textContent = message
   if (el.hidden) el.hidden = false
 }

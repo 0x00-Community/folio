@@ -33,6 +33,7 @@ const messages: Record<string, string> = {
   'status.words': '{words} words',
   'status.zoom': '{zoom}%',
   'file.docx': 'Word document',
+  'open.error.unreadable': 'This file could not be read. Check that Word may access its folder.',
   'open.error.notDocx': 'This file is not a Word document.',
   'open.error.encrypted': 'This document is encrypted and cannot be opened.',
   'open.error.corrupt': 'This document is damaged and cannot be opened.',
