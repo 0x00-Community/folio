@@ -29,7 +29,7 @@ export interface Status {
   readonly page: number
   readonly pages: number
   /**
-   * False while a large document is still being measured, and while this load is still resolving font metrics.
+   * False while a large document is still being measured, and while this generation is still resolving font metrics.
    * A non-empty metrics result lays the document out again, so the first pass is not final.
    */
   readonly pagesFinal: boolean
@@ -53,7 +53,15 @@ export class Editor implements EditingSurface {
   private markers: ReadonlyMap<ParaId, string>
   private metrics: ReadonlyMap<string, FontMetrics> = new Map()
   private metricsSettled = false
+  /** Families already resolved, including ones the index does not have. A later edit does not ask again. */
+  private knownFonts = new Set<string>()
+  /** Families with a metrics request in flight. */
+  private pendingFonts = new Set<string>()
   private generation = 0
+  /** The generation of the last mount or load. An edit does not advance it. */
+  private loadGeneration = 0
+  /** An edit since that load changed the document, so the metrics pass keeps the viewport. */
+  private editedSinceLoad = false
   private changeFrame = 0
   private destroyed = false
 
@@ -93,6 +101,8 @@ export class Editor implements EditingSurface {
     this.input?.reset()
     this.generation += 1
     const generation = this.generation
+    this.loadGeneration = generation
+    this.editedSinceLoad = false
     const doc = withCaretParagraph(opened.doc)
     const state = initialState(doc)
     const previous = this.session
@@ -101,6 +111,8 @@ export class Editor implements EditingSurface {
     this.markers = listMarkers(doc)
     this.metrics = new Map()
     this.metricsSettled = false
+    this.knownFonts.clear()
+    this.pendingFonts.clear()
     this.view.show(doc)
     this.paintSelection(true)
     if (previous !== opened.source) previous.free()
@@ -265,9 +277,11 @@ export class Editor implements EditingSurface {
     const previous = this.current.doc
     this.current = next
     if (next.doc !== previous) {
+      this.editedSinceLoad = true
       this.markers = listMarkers(next.doc)
       // update() cancels the in-progress measure. A selection-only transaction keeps the pump running.
       this.view.update(previous, next.doc)
+      void this.applyMetrics(this.generation)
     }
     this.paintSelection(scroll)
     this.scheduleChange()
@@ -307,20 +321,47 @@ export class Editor implements EditingSurface {
   }
 
   private async applyMetrics(generation: number): Promise<void> {
-    let metrics: ReadonlyMap<string, FontMetrics> = new Map()
-    try {
-      metrics = await fetchMetrics(this.session.fontsUsed(this.current.doc))
-    } catch {
-      metrics = new Map()
-    }
     if (this.destroyed || generation !== this.generation) return
-    this.metrics = metrics
-    this.metricsSettled = true
-    if (metrics.size > 0) {
-      // The first paint used the 1.3 em fallback. A resolved face changes the line heights, so measure again.
-      this.view.show(this.current.doc)
-      this.paintSelection(false)
+    const missing: string[] = []
+    for (const family of this.session.fontsUsed(this.current.doc)) {
+      if (this.knownFonts.has(family) || this.pendingFonts.has(family)) continue
+      this.pendingFonts.add(family)
+      missing.push(family)
     }
+    if (missing.length === 0) {
+      if (!this.metricsSettled && this.pendingFonts.size === 0) {
+        this.metricsSettled = true
+        this.scheduleChange()
+      }
+      return
+    }
+    this.metricsSettled = false
+    this.scheduleChange()
+    let fetched: ReadonlyMap<string, FontMetrics> = new Map()
+    let failed = false
+    try {
+      fetched = await fetchMetrics(missing)
+    } catch {
+      failed = true
+    }
+    // A load() that started while this was in flight cleared the sets and owns them now.
+    if (this.destroyed || generation !== this.generation) return
+    for (const family of missing) this.pendingFonts.delete(family)
+    if (!failed) {
+      for (const family of missing) this.knownFonts.add(family)
+      if (fetched.size > 0) {
+        const merged = new Map(this.metrics)
+        for (const [family, value] of fetched) merged.set(family, value)
+        this.metrics = merged
+        // The paint before this fetch used the fallback line box. A resolved face changes the line heights.
+        // The load's own fetch starts at the top. A fetch for a family an edit introduced keeps the viewport.
+        const keepPlace = this.editedSinceLoad && generation === this.loadGeneration
+        if (keepPlace) this.view.relayout(this.current.doc)
+        else this.view.show(this.current.doc)
+        this.paintSelection(false)
+      }
+    }
+    this.metricsSettled = true
     this.scheduleChange()
   }
 }

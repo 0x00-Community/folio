@@ -812,6 +812,12 @@ function startsFromElement(el: HTMLElement, bottoms: Float32Array, length: numbe
   return starts
 }
 
+/** Top of one block, in CSS pixels from the top of the scroller. */
+interface ViewportHold {
+  readonly id: string
+  readonly offset: number
+}
+
 /**
  * Owns the pages container. Mounts the visible pages plus one on each side (IntersectionObserver); every other page
  * is an empty box of its exact size, so scroll geometry is exact without contents. All coordinates it returns are
@@ -847,6 +853,11 @@ export class PageView {
   private decoOwner: Block | null = null
   private sink: HTMLTextAreaElement | null = null
   private lastPaint: { sel: Selection; sink: HTMLTextAreaElement } | null = null
+  /** Set while a metrics pass remeasures in place. Pages above the hold are still estimates until it finishes. */
+  private rewriting = false
+  private hold: ViewportHold | null = null
+  /** scrollTop captured with the hold, so a short intermediate layout cannot clamp it away. */
+  private holdScroll = 0
 
   constructor(host: HTMLElement, ctx: () => RenderContext) {
     this.host = host
@@ -854,12 +865,14 @@ export class PageView {
   }
 
   get layout(): Layout {
+    if (this.rewriting && this._layout.complete) return { pages: this._layout.pages, complete: false }
     return this._layout
   }
 
   /** Full rebuild: measure every block in chunks of about 200 per task, mount pages as they fill. */
   show(doc: Doc): void {
     this.cancelChunk()
+    this.finishRewrite()
     this.doc = doc
     this.measures = new WeakMap()
     this.lineStartCache = new WeakMap()
@@ -878,11 +891,41 @@ export class PageView {
   }
 
   /**
+   * Measures again after font metrics arrive for an edit. The block that contains the selection head stays at the
+   * same offset from the top of the scroller when that head was visible; otherwise the block at the top of the
+   * viewport does. Each chunk puts that block back, because the pages above it are still the previous estimate.
+   */
+  relayout(doc: Doc): void {
+    if (!this.doc || !this.stack?.isConnected || this.pageEls.length === 0) {
+      this.show(doc)
+      return
+    }
+    this.cancelChunk()
+    this.hold = this.captureHold()
+    this.holdScroll = this.host.scrollTop
+    this.doc = doc
+    this.lineStartCache = new WeakMap()
+    this.indexDoc = null
+    this.indexMap = null
+    this.deco = null
+    this.decoMeasure = null
+    this.decoOwner = null
+    this.cursor = 0
+    this.dead = false
+    this.rewriting = true
+    this.host.style.overflowAnchor = 'none'
+    this.ensureChrome()
+    this.measureStories()
+    this.pump()
+  }
+
+  /**
    * After a transaction. Finds changed blocks by identity, re-renders their mounted copies, re-measures them,
    * repaginates incrementally, and moves slices between mounted pages. Unmounted pages only get new slice lists.
    */
   update(previous: Doc, next: Doc): void {
     this.cancelChunk()
+    this.finishRewrite()
     const changed = diffIds(previous.body, next.body)
     this.doc = next
     this.indexDoc = null
@@ -1127,12 +1170,125 @@ export class PageView {
     else if (bottom > host.bottom) this.host.scrollTop += bottom - host.bottom + 8
   }
 
-  /** Changes the container transform only. Measures and pagination stay valid. */
+  /** Changes the container transform only. Measures and pagination stay valid. The held block keeps its offset. */
   setZoom(zoom: number): void {
     if (!(zoom > 0)) return
+    const hold = zoom === this.zoom ? null : this.captureHold()
+    const suppressAnchor = hold !== null && this.host.style.overflowAnchor !== 'none'
+    if (suppressAnchor) this.host.style.overflowAnchor = 'none'
     this.zoom = zoom
     this.updateSizer()
+    this.restoreHold(hold)
+    if (suppressAnchor) this.clearOverflowAnchor()
     this.syncFromGeometry()
+  }
+
+  /**
+   * The selection head's block when that head is inside the scroller; otherwise the block at the top of the viewport.
+   * Zoom and a metrics relayout both read this, then put the same top back after the heights change.
+   */
+  private captureHold(): ViewportHold | null {
+    const host = this.host.getBoundingClientRect()
+    if (host.height < 1) return null
+    const sel = this.lastPaint?.sel
+    if (sel?.kind === 'text') {
+      const held = this.holdCaret(sel.head, host)
+      if (held) return held
+    }
+    return this.blockAtViewportTop(host)
+  }
+
+  private holdCaret(pos: Pos, host: DOMRect): ViewportHold | null {
+    if (!this.index().has(pos.p) || this._layout.pages.length === 0) return null
+    const caret = this.caretRect(pos)
+    const pageEl = this.pageEls[caret.page]
+    if (!pageEl) return null
+    const origin = pageEl.getBoundingClientRect()
+    const top = origin.top + caret.top * this.zoom
+    const bottom = top + Math.max(caret.height, 1) * this.zoom
+    if (bottom <= host.top + 0.5 || top >= host.bottom - 0.5) return null
+    const paraEl = this.paraElement(pageEl, pos)
+    if (!paraEl) return null
+    return { id: pos.p, offset: paraEl.getBoundingClientRect().top - host.top }
+  }
+
+  private blockAtViewportTop(host: DOMRect): ViewportHold | null {
+    const edge = host.top + 1
+    let hit: { id: string; top: number; span: number } | null = null
+    let nearest: { id: string; top: number; distance: number } | null = null
+    for (const pageEl of this.pageEls) {
+      if (pageEl.dataset.mounted !== '1') continue
+      const pageBox = pageEl.getBoundingClientRect()
+      if (pageBox.bottom <= host.top + 0.5 || pageBox.top >= host.bottom - 0.5) continue
+      for (const el of pageEl.querySelectorAll<HTMLElement>('.blk')) {
+        if (el.closest('.repeat-head') || el.getAttribute('aria-hidden') === 'true') continue
+        const id = el.dataset.id
+        if (!id) continue
+        const clip = el.closest('.clip')
+        const visible = clip instanceof HTMLElement ? clip.getBoundingClientRect() : el.getBoundingClientRect()
+        if (visible.bottom <= host.top + 0.5 || visible.top >= host.bottom - 0.5) continue
+        const top = el.getBoundingClientRect().top
+        if (visible.top <= edge && visible.bottom > edge) {
+          const span = visible.height
+          if (!hit || span < hit.span) hit = { id, top, span }
+          continue
+        }
+        if (visible.top > edge) {
+          const distance = visible.top - host.top
+          if (!nearest || distance < nearest.distance) nearest = { id, top, distance }
+        }
+      }
+    }
+    const found = hit ?? nearest
+    if (!found) return null
+    return { id: found.id, offset: found.top - host.top }
+  }
+
+  /** Moves scrollTop so the held block's top matches the captured offset. Returns false when nothing moved. */
+  private restoreHold(hold: ViewportHold | null): boolean {
+    if (!hold || !this.doc || this.dead) return false
+    const top = this.blockClientTop(hold.id, hold.offset)
+    if (top === null) return false
+    const delta = top - this.host.getBoundingClientRect().top - hold.offset
+    if (Math.abs(delta) < 0.5) return false
+    this.host.scrollTop += delta
+    this.seenScroll = this.host.scrollTop
+    return true
+  }
+
+  private blockClientTop(id: string, offset: number): number | null {
+    const owner = this.locateOwner(id)
+    if (owner) {
+      for (const spot of this.spots(owner.block.id)) this.mountPage(spot.page)
+    }
+    const desired = this.host.getBoundingClientRect().top + offset
+    let best: number | null = null
+    let bestDist = Infinity
+    for (const pageEl of this.pageEls) {
+      if (pageEl.dataset.mounted !== '1') continue
+      for (const el of blockElements(pageEl, id)) {
+        if (el.closest('.repeat-head')) continue
+        const rect = el.getBoundingClientRect()
+        if (rect.width < 0.5 && rect.height < 0.5) continue
+        const dist = Math.abs(rect.top - desired)
+        if (dist < bestDist) {
+          bestDist = dist
+          best = rect.top
+        }
+      }
+    }
+    return best
+  }
+
+  private finishRewrite(): void {
+    this.rewriting = false
+    this.hold = null
+    this.holdScroll = 0
+    this.clearOverflowAnchor()
+  }
+
+  private clearOverflowAnchor(): void {
+    if (this.host.style.overflowAnchor === 'none') this.host.style.overflowAnchor = ''
   }
 
   /** Page index (0-based) holding a position, from the layout, without touching the DOM. */
@@ -1153,6 +1309,7 @@ export class PageView {
   destroy(): void {
     this.dead = true
     this.cancelChunk()
+    this.finishRewrite()
     this.observer?.disconnect()
     this.observer = null
     if (this.watch !== 0) cancelAnimationFrame(this.watch)
@@ -1186,8 +1343,27 @@ export class PageView {
     const previous = this._layout.pages.length > 0 ? this._layout : null
     this._layout = paginate(this.doc, (block) => this.measures.get(block), previous, previous ? changed : [])
     this.cursor = end
+    if (this.rewriting) this.changedIds = new Set(changed)
     this.syncPages()
-    if (this.cursor < body.length) this.chunk = requestAnimationFrame(() => this.pump())
+    this.changedIds = null
+    if (this.restoreHold(this.hold)) {
+      this.syncFromGeometry()
+      this.holdScroll = this.host.scrollTop
+    }
+    if (this.rewriting && this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
+    if (this.cursor < body.length) {
+      this.chunk = requestAnimationFrame(() => this.pump())
+      return
+    }
+    if (!this.rewriting) return
+    const hold = this.hold
+    this.rewriting = false
+    this.hold = null
+    this.holdScroll = 0
+    this.syncPages()
+    if (this.restoreHold(hold)) this.syncFromGeometry()
+    if (hold && this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
+    this.clearOverflowAnchor()
   }
 
   private measureStories(): void {
@@ -1207,7 +1383,7 @@ export class PageView {
     const pending: { block: Block; el: HTMLElement }[] = []
     const frag = document.createDocumentFragment()
     for (const item of items) {
-      if (this.measures.has(item.block)) continue
+      if (this.measures.has(item.block) && !this.rewriting) continue
       const el = renderBlock(item.block, this.ctxFor(1))
       el.style.width = `${contentWidthOf(item.section)}px`
       frag.append(el)
@@ -1215,7 +1391,10 @@ export class PageView {
     }
     if (pending.length === 0) return
     host.append(frag)
-    for (const item of pending) this.measures.set(item.block, measureElement(item.el, 1))
+    for (const item of pending) {
+      this.lineStartCache.delete(item.block)
+      this.measures.set(item.block, measureElement(item.el, 1))
+    }
     host.replaceChildren()
   }
 
@@ -1402,7 +1581,11 @@ export class PageView {
     const stack = this.stack
     if (!sizer || !stack) return
     const width = Math.max(1, this.maxPaper())
-    const height = this.stackHeight()
+    let height = this.stackHeight()
+    if (this.rewriting && this.zoom > 0) {
+      const minHeight = (this.holdScroll + this.host.clientHeight) / this.zoom
+      if (height < minHeight) height = minHeight
+    }
     assignStyle(sizer, 'width', `${width * this.zoom}px`)
     assignStyle(sizer, 'height', `${height * this.zoom}px`)
     assignStyle(stack, 'width', `${width}px`)
