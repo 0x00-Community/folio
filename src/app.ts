@@ -1,13 +1,13 @@
 // Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
 import { Editor } from './editor/editor.ts'
-import { setAlign, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { setAlign, setMark, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, loadEngine } from './engine/engine.ts'
 import type { Opened } from './engine/engine.ts'
 import { locale, t } from './i18n.ts'
-import type { Doc, StyleId } from './model.ts'
+import type { Doc, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
 import { createToolbar } from './ui/toolbar.ts'
 import { fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
@@ -51,6 +51,12 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     onMark(mark: ToggleMark) {
       edit(() => { current().run(toggleMark(mark)) })
     },
+    onFont(family: string) {
+      edit(() => { current().run(setMark({ mark: 'font', value: family })) })
+    },
+    onSize(sizePt: number) {
+      edit(() => { current().run(setMark({ mark: 'sizePt', value: sizePt as Pt })) })
+    },
     onStyle(id: string) {
       edit(() => { current().run(setParaStyle(id as StyleId)) })
     },
@@ -80,7 +86,11 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       document.title = title
       appWindow.setTitle(title)
     }
-    toolbar.render(currentEditor.toolbar(), currentEditor.state.doc)
+    toolbar.render(
+      currentEditor.toolbar(),
+      currentEditor.state.doc,
+      currentEditor.source.fontsUsed(currentEditor.state.doc),
+    )
     status.render(currentEditor.status(), toolbar.zoom())
   }
 

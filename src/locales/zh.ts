@@ -13,6 +13,8 @@ const messages: Record<string, string> = {
   italic: '倾斜',
   underline: '下划线',
   strike: '删除线',
+  font: '字体',
+  size: '字号',
   style: '段落样式',
   'style.mixed': '混合',
   'style.normal': '正文',

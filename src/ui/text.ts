@@ -88,6 +88,47 @@ function roleRank(role: string | null): number {
   return index === -1 ? ROLE_ORDER.length : index
 }
 
+const FONT_SIZES: readonly number[] = [8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
+
+/**
+ * Families for the font menu: the ones the document uses, then the installed ones.
+ * Comparison is case-insensitive and the first spelling wins. A current value in neither list is appended.
+ * `'mixed'` adds nothing.
+ */
+export function fontOptions(
+  used: readonly string[],
+  installed: readonly string[],
+  current: string | 'mixed',
+): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  const add = (name: string): void => {
+    const trimmed = name.trim()
+    if (trimmed === '') return
+    const key = trimmed.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(trimmed)
+  }
+  for (const name of used) add(name)
+  for (const name of installed) add(name)
+  if (current !== 'mixed') add(current)
+  return out
+}
+
+/**
+ * The fixed point sizes, with `current` inserted in order when it is not already there.
+ * `'mixed'` leaves the list as it is.
+ */
+export function sizeOptions(current: number | 'mixed'): number[] {
+  const sizes = [...FONT_SIZES]
+  if (current === 'mixed' || !Number.isFinite(current) || sizes.some((size) => size === current)) return sizes
+  const index = sizes.findIndex((size) => size > current)
+  if (index === -1) sizes.push(current)
+  else sizes.splice(index, 0, current)
+  return sizes
+}
+
 export function isFileHandle(handle: { readonly kind: string } | undefined): handle is FileSystemFileHandle {
   return handle !== undefined && handle.kind === 'file'
 }

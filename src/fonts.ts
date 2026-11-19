@@ -177,27 +177,61 @@ function listed(family: string, names: ReadonlySet<string>): boolean {
   return aliasChain(family).some((name) => names.has(name.toLowerCase()))
 }
 
-async function installedNames(): Promise<ReadonlySet<string> | null> {
-  let response: Response
+let catalogPromise: Promise<unknown> | null = null
+
+/** One read of `GET /api/fonts`. `installedNames` and `installedFamilies` both wait on it. */
+function fontCatalog(): Promise<unknown> {
+  if (catalogPromise === null) catalogPromise = readFontCatalog()
+  return catalogPromise
+}
+
+async function readFontCatalog(): Promise<unknown> {
   try {
-    response = await fetch('/api/fonts')
+    const response = await fetch('/api/fonts')
+    if (!response.ok) return null
+    return await response.json()
   } catch {
     return null
   }
-  if (!response.ok) return null
-  let body: unknown
-  try {
-    body = await response.json()
-  } catch {
-    return null
-  }
-  if (!Array.isArray(body)) return null
-  const names = new Set<string>()
+}
+
+function walkFamilies(body: unknown, visit: (name: string) => void): boolean {
+  if (!Array.isArray(body)) return false
   for (const item of body) {
     if (!isRecord(item) || !Array.isArray(item.families)) continue
     for (const name of item.families) {
-      if (typeof name === 'string' && name.trim() !== '') names.add(name.toLowerCase())
+      if (typeof name !== 'string' || name.trim() === '') continue
+      visit(name)
     }
   }
+  return true
+}
+
+/**
+ * Family names for the font menu. A name that starts with "." is a system-private face and is left out.
+ * The same name in another case keeps the first spelling. The rest is sorted with localeCompare.
+ */
+export async function installedFamilies(): Promise<readonly string[]> {
+  const seen = new Set<string>()
+  const names: string[] = []
+  const ok = walkFamilies(await fontCatalog(), (name) => {
+    const trimmed = name.trim()
+    if (trimmed.startsWith('.')) return
+    const key = trimmed.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    names.push(trimmed)
+  })
+  if (!ok) return []
+  names.sort((a, b) => a.localeCompare(b))
+  return names
+}
+
+async function installedNames(): Promise<ReadonlySet<string> | null> {
+  const names = new Set<string>()
+  const ok = walkFamilies(await fontCatalog(), (name) => {
+    names.add(name.toLowerCase())
+  })
+  if (!ok) return null
   return names
 }

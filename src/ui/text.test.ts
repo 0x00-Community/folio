@@ -3,10 +3,12 @@ import { test } from 'node:test'
 import {
   commandTitle,
   fileHandleFromRequest,
+  fontOptions,
   formatChord,
   formatTitle,
   isAbort,
   isDirty,
+  sizeOptions,
   statusText,
   styleOptions,
 } from './text.ts'
@@ -98,4 +100,32 @@ test('styleOptions lists the five roles first and localizes only those', () => {
     'Alpha',
     'Quote',
   ])
+})
+
+const FONT_SIZES = [8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
+
+test('fontOptions lists document families, then installed ones, once each', () => {
+  const options = fontOptions(
+    ['宋体', 'Calibri', 'calibri', ''],
+    ['Arial', 'calibri', '宋体', 'Times New Roman', 'arial'],
+    'mixed',
+  )
+  assert.deepEqual(options, ['宋体', 'Calibri', 'Arial', 'Times New Roman'])
+  assert.ok(!options.includes('mixed'), 'mixed is not a family')
+})
+
+test('fontOptions appends a current family that is in neither list', () => {
+  const options = fontOptions(['Calibri'], ['Arial'], 'Consolas')
+  assert.deepEqual(options, ['Calibri', 'Arial', 'Consolas'])
+  const again = fontOptions(['Calibri'], ['Arial'], 'arial')
+  assert.deepEqual(again, ['Calibri', 'Arial'], 'a different case of a listed family is not added')
+})
+
+test('sizeOptions keeps the fixed list, and inserts another size in order', () => {
+  assert.deepEqual(sizeOptions('mixed'), FONT_SIZES)
+  assert.deepEqual(sizeOptions(11), FONT_SIZES)
+  assert.deepEqual(sizeOptions(10.5), FONT_SIZES)
+  assert.deepEqual(sizeOptions(13), [8, 9, 10, 10.5, 11, 12, 13, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72])
+  assert.deepEqual(sizeOptions(7), [7, ...FONT_SIZES])
+  assert.deepEqual(sizeOptions(80), [...FONT_SIZES, 80])
 })

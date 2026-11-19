@@ -13,6 +13,8 @@ const messages: Record<string, string> = {
   italic: 'Italic',
   underline: 'Underline',
   strike: 'Strikethrough',
+  font: 'Font',
+  size: 'Font size',
   style: 'Paragraph style',
   'style.mixed': 'Mixed',
   'style.normal': 'Normal',

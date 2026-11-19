@@ -2,9 +2,10 @@
 import type { ToggleMark, ToolbarState } from '../editor/edit.ts'
 import type { Platform, ShortcutName } from '../editor/input.ts'
 import { shortcutChord } from '../editor/input.ts'
+import { installedFamilies } from '../fonts.ts'
 import { t } from '../i18n.ts'
 import type { Doc } from '../model.ts'
-import { commandTitle, styleOptions } from './text.ts'
+import { commandTitle, fontOptions, sizeOptions, styleOptions } from './text.ts'
 import type { StyleOption } from './text.ts'
 
 export type Align = 'left' | 'center' | 'right' | 'justify'
@@ -15,6 +16,8 @@ export interface ToolbarHandlers {
   onUndo(): void
   onRedo(): void
   onMark(mark: ToggleMark): void
+  onFont(family: string): void
+  onSize(sizePt: number): void
   onStyle(id: string): void
   onAlign(align: Align): void
   onList(kind: 'bullet' | 'decimal'): void
@@ -22,7 +25,7 @@ export interface ToolbarHandlers {
 }
 
 export interface ToolbarView {
-  render(state: ToolbarState, doc: Doc): void
+  render(state: ToolbarState, doc: Doc, usedFonts: readonly string[]): void
   zoom(): number
 }
 
@@ -32,11 +35,19 @@ const ZOOMS = [50, 75, 100, 125, 150, 200] as const
 export function createToolbar(root: HTMLElement, platform: Platform, handlers: ToolbarHandlers): ToolbarView {
   root.setAttribute('aria-label', t('toolbar'))
   let painting = false
-  let ignoreStyle = false
   let zoom = 1
   let styleKey = ''
+  let fontKey = ''
+  let sizeKey = ''
   let seenStyles: object | null = null
   let cachedOptions: readonly StyleOption[] = []
+  let installed: readonly string[] = []
+  let usedFonts: readonly string[] = []
+  let fontNow: string | 'mixed' = 'mixed'
+  let fontReady = false
+  const styleGuard = { n: 0, ignore: false }
+  const fontGuard = { n: 0, ignore: false }
+  const sizeGuard = { n: 0, ignore: false }
 
   const file = group(root)
   file.append(
@@ -57,14 +68,36 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   }
   group(root).append(marks.bold, marks.italic, marks.underline, marks.strike)
 
+  const fontSelect = labeledSelect(t('font'), 'font')
+  watchSelect(fontSelect, () => {
+    if (painting || fontGuard.ignore) return
+    const value = fontSelect.value
+    if (value.length === 0) return
+    handlers.onFont(value)
+  })
+  const sizeSelect = labeledSelect(t('size'), 'size')
+  watchSelect(sizeSelect, () => {
+    if (painting || sizeGuard.ignore) return
+    const value = Number(sizeSelect.value)
+    if (!Number.isFinite(value) || value <= 0) return
+    handlers.onSize(value)
+  })
+  group(root).append(fontSelect, sizeSelect)
+
   const styleSelect = labeledSelect(t('style'), 'style')
   watchSelect(styleSelect, () => {
-    if (painting || ignoreStyle) return
+    if (painting || styleGuard.ignore) return
     const value = styleSelect.value
     if (value.length === 0) return
     handlers.onStyle(value)
   })
   group(root).append(styleSelect)
+
+  void installedFamilies().then((names) => {
+    installed = names
+    if (!fontReady) return
+    paintFont(usedFonts, fontNow)
+  })
 
   const alignButtons = {
     left: toggleButton(t('align.left'), null, platform, () => handlers.onAlign('left')),
@@ -113,31 +146,47 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
     const key = options.map(option => `${option.id}\t${option.label}`).join('\n')
     if (key !== styleKey) {
       styleKey = key
-      const fragment = document.createDocumentFragment()
-      const mixed = document.createElement('option')
-      mixed.value = ''
-      mixed.textContent = t('style.mixed')
-      mixed.hidden = true
-      fragment.append(mixed)
-      for (const option of options) {
-        const el = document.createElement('option')
-        el.value = option.id
-        el.textContent = option.label
-        fragment.append(el)
-      }
-      // Rebuilding the options can emit change. Ignore it until the next frame so an open does not edit the document.
-      ignoreStyle = true
-      styleSelect.replaceChildren(fragment)
-      requestAnimationFrame(() => { ignoreStyle = false })
+      replaceOptions(styleSelect, options.map((option) => ({ value: option.id, label: option.label })), styleGuard)
     }
     const value = current === 'mixed' ? '' : current
     if (styleSelect.value !== value) styleSelect.value = value
   }
 
+  function paintFont(used: readonly string[], current: string | 'mixed'): void {
+    usedFonts = used
+    fontNow = current
+    let options = fontOptions(used, installed, current)
+    // The helper folds case. The select value has to be the toolbar's spelling, so keep that string too.
+    if (current !== 'mixed' && current.trim() !== '' && !options.includes(current)) options = options.concat(current)
+    const key = JSON.stringify(options)
+    if (key !== fontKey) {
+      fontKey = key
+      replaceOptions(fontSelect, options.map((name) => ({ value: name, label: name })), fontGuard)
+    }
+    const value = current === 'mixed' ? '' : current
+    if (fontSelect.value !== value) fontSelect.value = value
+  }
+
+  function paintSize(current: ToolbarState['sizePt']): void {
+    const options = sizeOptions(current)
+    const key = JSON.stringify(options)
+    if (key !== sizeKey) {
+      sizeKey = key
+      replaceOptions(
+        sizeSelect,
+        options.map((size) => ({ value: String(size), label: String(size) })),
+        sizeGuard,
+      )
+    }
+    const value = current === 'mixed' ? '' : String(current)
+    if (sizeSelect.value !== value) sizeSelect.value = value
+  }
+
   return {
     zoom: () => zoom,
-    render(state, doc) {
+    render(state, doc, used) {
       painting = true
+      fontReady = true
       try {
         if (undo.disabled !== !state.canUndo) undo.disabled = !state.canUndo
         if (redo.disabled !== !state.canRedo) redo.disabled = !state.canRedo
@@ -152,6 +201,8 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
         setPressed(bullet, state.list === 'mixed' ? 'mixed' : state.list === 'bullet' ? 'true' : 'false')
         setPressed(numbered, state.list === 'mixed' ? 'mixed' : state.list === 'decimal' ? 'true' : 'false')
         paintStyles(doc, state.style)
+        paintFont(used, state.font)
+        paintSize(state.sizePt)
         const percent = String(Math.round(zoom * 100))
         if (zoomSelect.value !== percent) zoomSelect.value = percent
       } finally {
@@ -202,6 +253,33 @@ function labeledSelect(label: string, className: string): HTMLSelectElement {
   el.className = className
   el.setAttribute('aria-label', label)
   return el
+}
+
+function replaceOptions(
+  select: HTMLSelectElement,
+  entries: readonly { value: string, label: string }[],
+  guard: { n: number, ignore: boolean },
+): void {
+  const fragment = document.createDocumentFragment()
+  const mixed = document.createElement('option')
+  mixed.value = ''
+  mixed.textContent = t('style.mixed')
+  mixed.hidden = true
+  fragment.append(mixed)
+  for (const entry of entries) {
+    const option = document.createElement('option')
+    option.value = entry.value
+    option.textContent = entry.label
+    fragment.append(option)
+  }
+  // Rebuilding the options can emit change. Ignore it until the next frame so a rebuild does not edit the document.
+  guard.n += 1
+  const token = guard.n
+  guard.ignore = true
+  select.replaceChildren(fragment)
+  requestAnimationFrame(() => {
+    if (guard.n === token) guard.ignore = false
+  })
 }
 
 function watchSelect(select: HTMLSelectElement, apply: () => void): void {
