@@ -49,7 +49,7 @@ export class OpenError extends Error {
   }
 }
 
-/** The written document did not re-import to the model. Save is not implemented in this round. */
+/** The written document did not re-import to the model, or lost an unmodeled item. Nothing was written. */
 export class SaveVerifyError extends Error {
   readonly firstDifference: string
 
@@ -57,6 +57,17 @@ export class SaveVerifyError extends Error {
     super(firstDifference)
     this.name = 'SaveVerifyError'
     this.firstDifference = firstDifference
+  }
+}
+
+/** `write` refused the patch. `detail` is the contract or kit message, shown as-is. */
+export class SaveWriteError extends Error {
+  readonly detail: string
+
+  constructor(detail: string) {
+    super(detail)
+    this.name = 'SaveWriteError'
+    this.detail = detail
   }
 }
 
@@ -99,6 +110,15 @@ type LookTables = {
 }
 
 type HeldMedia = { bytes: Uint8Array; contentType: string }
+
+type SaveBaseline = {
+  readonly blocks: ReadonlyMap<number, Block>
+  readonly sections: readonly wire.Section[]
+  readonly sectionList: readonly Section[]
+}
+
+const baselines = new WeakMap<Source, SaveBaseline>()
+const tamperSaves = new WeakMap<Source, (doc: Doc) => Uint8Array>()
 
 export async function loadEngine(): Promise<Engine> {
   const response = await fetch('/engine.wasm')
@@ -144,17 +164,38 @@ function openSession(session: Session): Opened {
     throw new OpenError('corrupt', detail)
   }
   const built = toDoc(imported)
-  return { doc: built.doc, source: bindSource(session, built.doc, built.looks, imported.fonts) }
+  const blocks = new Map<number, Block>()
+  for (const block of built.doc.body) {
+    if (block.src !== null) blocks.set(block.src, block)
+  }
+  return {
+    doc: built.doc,
+    source: bindSource(session, built.doc, built.looks, imported.fonts, {
+      blocks,
+      sections: imported.sections,
+      sectionList: built.doc.sections,
+    }),
+  }
 }
 
-function bindSource(session: Session, doc: Doc, looks: LookTables, importedFonts: readonly string[]): Source {
+function bindSource(
+  session: Session,
+  opened: Doc,
+  looks: LookTables,
+  importedFonts: readonly string[],
+  baseline: SaveBaseline,
+): Source {
   const urls = new Map<string, string>()
   const added = new Map<string, HeldMedia>()
   const extraFonts: string[] = []
   let addedCount = 0
-  return {
-    save() {
-      throw new Error('not implemented')
+  const source: Source = {
+    save(doc) {
+      try {
+        return copyBytes(session.save(JSON.stringify(toPatch(doc, baseline))))
+      } catch (error) {
+        throw toSaveError(error)
+      }
     },
     exportPdf() {
       throw new Error('not implemented')
@@ -190,10 +231,10 @@ function bindSource(session: Session, doc: Doc, looks: LookTables, importedFonts
       return url
     },
     look(para, marks) {
-      return overlayRun(runLookFor(looks, doc, para, marks.charStyle), marks)
+      return overlayRun(runLookFor(looks, opened, para, marks.charStyle), marks)
     },
     paraLook(para, lists) {
-      return overlayPara(paraLookFor(looks, doc, para), para.props, lists)
+      return overlayPara(paraLookFor(looks, opened, para), para.props, lists)
     },
     free() {
       for (const url of urls.values()) URL.revokeObjectURL(url)
@@ -201,6 +242,32 @@ function bindSource(session: Session, doc: Doc, looks: LookTables, importedFonts
       session.free()
     },
   }
+  baselines.set(source, baseline)
+  tamperSaves.set(source, (doc) => {
+    try {
+      return copyBytes(session.save_tampered(JSON.stringify(toPatch(doc, baseline))))
+    } catch (error) {
+      throw toSaveError(error)
+    }
+  })
+  return source
+}
+
+/** The patch `source.save` would send. Tests check keep, src, new lists and added styles. */
+export function documentPatch(source: Source, doc: Doc): wire.Patch {
+  const baseline = baselines.get(source)
+  if (!baseline) throw new Error('save is not available')
+  return toPatch(doc, baseline)
+}
+
+/**
+ * `save`, then a bookmark is dropped before verification. The dev hook is the only caller.
+ * A document with no bookmark still fails verification.
+ */
+export function saveTampered(source: Source, doc: Doc): Uint8Array {
+  const run = tamperSaves.get(source)
+  if (!run) throw new Error('save is not available')
+  return run(doc)
 }
 
 function takeSessionMedia(session: Session, key: string): HeldMedia | undefined {
@@ -344,7 +411,7 @@ function collectFonts(doc: Doc, runLooks: ReadonlyMap<string, RunLook>, extra: r
 
 type Ids = { para: number; table: number; opaque: number }
 
-function toDoc(imported: wire.Imported): { doc: Doc; looks: LookTables } {
+export function toDoc(imported: wire.Imported): { doc: Doc; looks: LookTables } {
   const ids: Ids = { para: 0, table: 0, opaque: 0 }
   const paraLooks = new Map<string, ParaLook>()
   for (const entry of imported.paraLooks) paraLooks.set(entry.style, modelParaLook(entry.look))
@@ -384,6 +451,189 @@ function toDoc(imported: wire.Imported): { doc: Doc; looks: LookTables } {
     media: { byKey },
   }
   return { doc, looks: { run: runLooks, para: paraLooks } }
+}
+
+/**
+ * One model block as the import wire shape.
+ * `toDoc` then this is the identity on every block of a fixture import.
+ */
+export function toWireBlock(block: Block): wire.Block {
+  if (block.kind === 'p') return toWirePara(block)
+  if (block.kind === 'table') return toWireTable(block)
+  return toWireOpaque(block)
+}
+
+function toPatch(doc: Doc, baseline: SaveBaseline): wire.Patch {
+  const newLists: [number, wire.ListDef][] = []
+  for (const [id, def] of doc.lists.byNum) {
+    if (id < 0) newLists.push([id, toWireList(def)])
+  }
+  newLists.sort((left, right) => left[0] - right[0])
+  return {
+    body: doc.body.map((block) => toPatchBlock(block, baseline.blocks)),
+    sections: doc.sections === baseline.sectionList ? [...baseline.sections] : doc.sections.map(toWireSection),
+    newLists,
+    addedStyles: [...doc.styles.added],
+  }
+}
+
+function toPatchBlock(block: Block, kept: ReadonlyMap<number, Block>): wire.PatchBlock {
+  if (block.src !== null && kept.get(block.src) === block) return { keep: block.src }
+  return toWireBlock(block)
+}
+
+function toWirePara(para: Paragraph): wire.Para {
+  const out: wire.Para = { kind: 'p', props: toWireProps(para.props), inlines: para.inlines.map(toWireInline) }
+  if (para.src !== null) out.src = para.src
+  if (para.lock) out.lock = para.lock.reason
+  if (para.sectionEnd !== null) out.sectionEnd = para.sectionEnd
+  return out
+}
+
+function toWireInline(inline: Inline): wire.Inline {
+  if (inline.kind === 'text') {
+    const text: wire.Inline = { kind: 'text', text: inline.text, marks: toWireMarks(inline.marks) }
+    if (inline.src !== null) text.src = inline.src
+    return text
+  }
+  const atom: wire.Inline = { kind: 'atom', atom: toWireAtom(inline.atom) }
+  if (inline.src !== null) atom.src = inline.src
+  return atom
+}
+
+function toWireAtom(atom: Atom['atom']): wire.Atom {
+  switch (atom.type) {
+    case 'image':
+      return { type: 'image', media: atom.media, widthPt: atom.widthPt, heightPt: atom.heightPt }
+    case 'field':
+      return { type: 'field', field: atom.field, display: atom.display }
+    case 'pageBreak':
+      return { type: 'pageBreak' }
+    case 'columnBreak':
+      return { type: 'columnBreak' }
+    case 'opaque':
+      return { type: 'opaque', label: atom.label, display: atom.display, removable: atom.removable }
+  }
+}
+
+function toWireMarks(marks: Marks): wire.Marks {
+  const out: wire.Marks = {}
+  if (marks.bold !== undefined) out.bold = marks.bold
+  if (marks.italic !== undefined) out.italic = marks.italic
+  if (marks.underline !== undefined) out.underline = marks.underline
+  if (marks.strike !== undefined) out.strike = marks.strike
+  if (marks.font !== undefined) out.font = marks.font
+  if (marks.fontEastAsia !== undefined) out.fontEastAsia = marks.fontEastAsia
+  if (marks.sizePt !== undefined) out.sizePt = marks.sizePt
+  if (marks.color !== undefined) out.color = marks.color
+  if (marks.highlight !== undefined) out.highlight = marks.highlight
+  if (marks.vertAlign !== undefined) out.vertAlign = marks.vertAlign
+  if (marks.charStyle !== undefined) out.charStyle = marks.charStyle
+  if (marks.link !== undefined) out.link = marks.link
+  return out
+}
+
+function toWireProps(props: ParaProps): wire.ParaProps {
+  const out: wire.ParaProps = {}
+  if (props.style !== undefined) out.style = props.style
+  if (props.align !== undefined) out.align = props.align
+  const indent = props.indent
+  if (indent) {
+    if (indent.left !== undefined) out.indentLeft = indent.left
+    if (indent.right !== undefined) out.indentRight = indent.right
+    if (indent.firstLine !== undefined) out.firstLine = indent.firstLine
+    if (indent.hanging !== undefined) out.hanging = indent.hanging
+    if (indent.firstLineChars !== undefined) out.firstLineChars = indent.firstLineChars
+  }
+  const spacing = props.spacing
+  if (spacing) {
+    if (spacing.before !== undefined) out.spaceBefore = spacing.before
+    if (spacing.after !== undefined) out.spaceAfter = spacing.after
+    if (spacing.line !== undefined) out.line = toWireLine(spacing.line)
+  }
+  if (props.numbering === null) out.numbering = null
+  else if (props.numbering) out.numbering = [props.numbering.num, props.numbering.level]
+  if (props.keepNext !== undefined) out.keepNext = props.keepNext
+  if (props.keepLines !== undefined) out.keepLines = props.keepLines
+  if (props.pageBreakBefore !== undefined) out.pageBreakBefore = props.pageBreakBefore
+  if (props.widowControl !== undefined) out.widowControl = props.widowControl
+  return out
+}
+
+function toWireLine(line: LineSpacing): wire.LineSpacing {
+  if (line.rule === 'auto') return { rule: 'auto', multiple: line.multiple }
+  if (line.rule === 'exact') return { rule: 'exact', pt: line.pt }
+  return { rule: 'atLeast', pt: line.pt }
+}
+
+function toWireTable(table: Table): wire.Table {
+  const out: wire.Table = { kind: 'table', gridPt: [...table.grid], rows: table.rows.map(toWireRow) }
+  if (table.src !== null) out.src = table.src
+  return out
+}
+
+function toWireRow(row: Row): wire.Row {
+  const out: wire.Row = {
+    header: row.props.header === true,
+    cantSplit: row.props.cantSplit === true,
+    cells: row.cells.map(toWireCell),
+  }
+  if (row.src !== null) out.src = row.src
+  return out
+}
+
+function toWireCell(cell: Cell): wire.Cell {
+  const out: wire.Cell = { span: cell.span, blocks: cell.blocks.map(toWireBlock) }
+  if (cell.src !== null) out.src = cell.src
+  if (cell.vMerge) out.vMerge = cell.vMerge
+  return out
+}
+
+function toWireOpaque(block: OpaqueBlock): wire.Opaque {
+  return {
+    kind: 'opaque',
+    src: block.src,
+    label: block.label,
+    preview: block.preview.map(toWirePara),
+    removable: block.removable,
+  }
+}
+
+function toWireSection(section: Section): wire.Section {
+  const margin = section.page.margin
+  const out: wire.Section = {
+    widthPt: section.page.widthPt,
+    heightPt: section.page.heightPt,
+    marginsPt: [margin.top, margin.right, margin.bottom, margin.left, margin.header, margin.footer, margin.gutter],
+    breakType: section.breakType,
+    titlePage: section.titlePage,
+    headers: storyPairs(section.headers),
+    footers: storyPairs(section.footers),
+  }
+  if (section.src !== null) out.src = section.src
+  if (section.grid) out.grid = [section.grid.type, section.grid.linePitch, section.grid.charSpace ?? null]
+  return out
+}
+
+function storyPairs(refs: Section['headers']): [string, string][] {
+  const out: [string, string][] = []
+  if (refs.default) out.push(['default', refs.default])
+  if (refs.first) out.push(['first', refs.first])
+  if (refs.even) out.push(['even', refs.even])
+  return out
+}
+
+function toWireList(def: ListDef): wire.ListDef {
+  return {
+    fresh: def.fresh,
+    levels: def.levels.map((level) => ({
+      format: level.format,
+      text: level.text,
+      start: level.start,
+      indentLeftPt: level.indentLeft,
+      hangingPt: level.hanging,
+    })),
+  }
 }
 
 function modelBlock(block: wire.Block, ids: Ids): Block {
@@ -697,7 +947,7 @@ function modelLock(reason: string): Lock {
   fail('lock', `unknown lock ${reason}`)
 }
 
-function parseImported(value: unknown): wire.Imported {
+export function parseImported(value: unknown): wire.Imported {
   const record = rec(value, 'imported')
   return {
     body: arr(record.body, 'body').map((item, index) => parseBlock(item, `body[${index}]`)),
@@ -1123,6 +1373,30 @@ function styleRole(value: string | null | undefined): StyleRole | null {
 
 function fail(path: string, message: string): never {
   throw new Error(`${path}: ${message}`)
+}
+
+function toSaveError(error: unknown): SaveVerifyError | SaveWriteError {
+  const detail = error instanceof Error ? error.message : String(error)
+  try {
+    const parsed: unknown = JSON.parse(detail)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>
+      const difference = record.firstDifference ?? record.first_difference
+      if (record.kind === 'verify' && typeof difference === 'string') {
+        return new SaveVerifyError(difference)
+      }
+      if (record.kind === 'write' && typeof record.detail === 'string') {
+        return new SaveWriteError(record.detail)
+      }
+    }
+  } catch {
+    // The wasm layer sometimes throws plain text.
+  }
+  return new SaveWriteError(detail)
+}
+
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
 }
 
 function toOpenError(error: unknown): OpenError {
