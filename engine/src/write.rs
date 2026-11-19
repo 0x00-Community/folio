@@ -72,10 +72,15 @@ pub enum Step {
     Table { content_index: usize, table: Table },
 }
 
-/// Contiguous body content indexes. Every index in the range is a paragraph.
+/// Source paragraphs that become `finals`.
+///
+/// `paragraphs` are pristine body indexes. A deleted table or opaque block that
+/// sat between them is listed in `gaps` and removed before the paragraphs are
+/// joined, so the join sees a contiguous run of paragraphs.
 #[derive(Debug)]
 pub struct Region {
-    pub sources: std::ops::RangeInclusive<usize>,
+    pub paragraphs: Vec<usize>,
+    pub gaps: Vec<usize>,
     pub finals: Vec<Para>,
 }
 
@@ -108,7 +113,7 @@ pub fn write(
             Step::Region(region) => apply_region(&mut document, region, &mut ctx)?,
             Step::Insert { after, block } => apply_insert(&mut document, *after, block, &mut ctx)?,
             Step::Remove { content_index } => {
-                remove_content(&mut document, *content_index, ctx.removed)?;
+                remove_content(&mut document, *content_index, ctx.removed, ctx.list_ids)?;
             }
             Step::Table {
                 content_index,
@@ -226,8 +231,23 @@ pub fn plan(
     }
 
     let mut absorbed = vec![false; para_positions.len()];
+    // Consecutive paragraphs, or the same pair with only dropped tables and
+    // removable opaque blocks between them. A kept block still separates them.
     let adjacent = |left: usize, right: usize| {
-        slots[para_positions[right]].content_index == slots[para_positions[left]].content_index + 1
+        let left_index = slots[para_positions[left]].content_index;
+        let right_index = slots[para_positions[right]].content_index;
+        if right_index <= left_index {
+            return false;
+        }
+        slots
+            .iter()
+            .filter(|slot| slot.content_index > left_index && slot.content_index < right_index)
+            .all(|slot| match slot.kind {
+                SlotKind::Para => false,
+                SlotKind::Table => !seen_src.contains(&slot.src),
+                SlotKind::Opaque { removable: true } => !seen_src.contains(&slot.src),
+                SlotKind::Opaque { removable: false } => false,
+            })
     };
     for ordinal in 0..para_positions.len() {
         if referenced[ordinal] {
@@ -259,6 +279,7 @@ pub fn plan(
     }
 
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); para_positions.len()];
+    let mut gap_srcs = HashSet::new();
     for ordinal in 0..para_positions.len() {
         if referenced[ordinal] || absorbed[ordinal] {
             groups[uf.find(ordinal)].push(ordinal);
@@ -373,11 +394,28 @@ pub fn plan(
             return Err(contract("region src is not one of its paragraphs"));
         }
         check_kept_atoms(&slots, &para_positions, ordinals, src, group_finals)?;
-        let start = slots[para_positions[*ordinals.iter().min().expect("group")]].content_index;
-        let end = slots[para_positions[*ordinals.iter().max().expect("group")]].content_index;
-        if end - start + 1 != ordinals.len() {
-            return Err(contract("region crosses a non-paragraph"));
+        let (mut paragraphs, mut gaps) =
+            region_span(&slots, &para_positions, ordinals, &seen_src, &mut gap_srcs)?;
+        // A deleted paragraph that holds a drawing, a break, or a field is removed
+        // whole. Joining it first pulls that child into the survivor, and the kit
+        // then refuses to project the paragraph. Text paragraphs still join, so a
+        // bookmark in a deleted paragraph moves onto the survivor.
+        let used = referenced_paragraphs(group_finals, sources);
+        let mut kept = Vec::new();
+        for index in paragraphs.drain(..) {
+            let slot = slots
+                .iter()
+                .find(|slot| slot.content_index == index)
+                .expect("paragraph slot");
+            if used.contains(&slot.src) || !paragraph_holds_object(&slot.block) {
+                kept.push(index);
+            } else {
+                gaps.push(index);
+                gap_srcs.insert(slot.src);
+            }
         }
+        paragraphs = kept;
+        let start = *paragraphs.first().expect("region has a paragraph");
         for (para, _) in group_finals.iter().zip(flags) {
             reject_fresh_atoms(&para.inlines)?;
         }
@@ -388,7 +426,8 @@ pub fn plan(
                 seq,
             },
             Step::Region(Region {
-                sources: start..=end,
+                paragraphs,
+                gaps,
                 finals: group_finals.clone(),
             }),
         ));
@@ -396,7 +435,7 @@ pub fn plan(
     }
 
     for slot in &slots {
-        if seen_src.contains(&slot.src) {
+        if seen_src.contains(&slot.src) || gap_srcs.contains(&slot.src) {
             continue;
         }
         match slot.kind {
@@ -583,6 +622,44 @@ fn paragraph_links(
         return Err(contract("paragraph has no src"));
     }
     Ok(found)
+}
+
+/// Paragraphs whose `w:pPr` or runs appear in the finals. The rest of a region
+/// was deleted and exists only so the deletion has somewhere to land.
+fn referenced_paragraphs(finals: &[Para], sources: &SourceMap) -> HashSet<u32> {
+    let mut used = HashSet::new();
+    for para in finals {
+        if let Some(src) = para.src {
+            used.insert(src);
+        }
+        for inline in &para.inlines {
+            let Some(run) = inline_run_src(inline) else {
+                continue;
+            };
+            if let Some(origin) = sources.runs.get(run as usize) {
+                used.insert(origin.para);
+            }
+        }
+    }
+    used
+}
+
+fn paragraph_holds_object(block: &Block) -> bool {
+    let Block::P(para) = block else {
+        return false;
+    };
+    para.inlines.iter().any(|inline| {
+        matches!(
+            inline,
+            Inline::Atom {
+                atom: Atom::Image { .. }
+                    | Atom::PageBreak {}
+                    | Atom::ColumnBreak {}
+                    | Atom::Field { .. },
+                ..
+            }
+        )
+    })
 }
 
 fn group_end(ordinals: &[usize], para_positions: &[usize], slots: &[Slot]) -> usize {
@@ -855,14 +932,70 @@ fn apply_region(
     region: &Region,
     ctx: &mut Apply<'_>,
 ) -> Result<(), WriteError> {
+    // Higher indexes first, so removing a gap does not move a later gap.
+    let mut gaps = region.gaps.clone();
+    gaps.sort_unstable();
+    for index in gaps.iter().rev() {
+        remove_content(doc, *index, ctx.removed, ctx.list_ids)?;
+    }
     let mut indices = Vec::new();
     let mut srcs = Vec::new();
-    for index in region.sources.clone() {
-        srcs.push(body_para_src(ctx.sources, index)?);
-        indices.push(index);
+    for index in &region.paragraphs {
+        let shift = gaps.iter().filter(|gap| *gap < index).count();
+        indices.push(*index - shift);
+        srcs.push(body_para_src(ctx.sources, *index)?);
+    }
+    if indices.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Err(contract("region crosses a non-paragraph"));
     }
     let mut loc = BodyLoc { doc };
     apply_joined(&mut loc, &indices, &srcs, &region.finals, ctx)
+}
+
+/// The paragraphs of one region, plus the dropped blocks that sit between them.
+fn region_span(
+    slots: &[Slot],
+    para_positions: &[usize],
+    ordinals: &[usize],
+    seen_src: &HashSet<u32>,
+    gap_srcs: &mut HashSet<u32>,
+) -> Result<(Vec<usize>, Vec<usize>), WriteError> {
+    let start_ord = *ordinals.iter().min().expect("group");
+    let end_ord = *ordinals.iter().max().expect("group");
+    let start = slots[para_positions[start_ord]].content_index;
+    let end = slots[para_positions[end_ord]].content_index;
+    let members: HashSet<usize> = ordinals.iter().copied().collect();
+    let mut paragraphs = Vec::new();
+    for (ordinal, position) in para_positions.iter().enumerate() {
+        let index = slots[*position].content_index;
+        if index < start || index > end {
+            continue;
+        }
+        if !members.contains(&ordinal) {
+            return Err(contract("region crosses a non-paragraph"));
+        }
+        paragraphs.push(index);
+    }
+    let mut gaps = Vec::new();
+    for slot in slots {
+        if slot.content_index <= start || slot.content_index >= end {
+            continue;
+        }
+        match slot.kind {
+            SlotKind::Para => {}
+            SlotKind::Table | SlotKind::Opaque { removable: true } => {
+                if seen_src.contains(&slot.src) {
+                    return Err(contract("region crosses a non-paragraph"));
+                }
+                gaps.push(slot.content_index);
+                gap_srcs.insert(slot.src);
+            }
+            SlotKind::Opaque { removable: false } => {
+                return Err(contract("non-removable block"));
+            }
+        }
+    }
+    Ok((paragraphs, gaps))
 }
 
 fn apply_insert(
@@ -886,15 +1019,115 @@ fn remove_content(
     doc: &mut Document,
     index: usize,
     removed: &mut BTreeMap<String, usize>,
+    list_ids: &BTreeMap<i32, u32>,
 ) -> Result<(), WriteError> {
     let counts = verify::body_index_counts(doc, index);
-    match doc.try_remove_content(index)? {
+    // A fresh list that no paragraph references yet is dropped when removal
+    // reopens the package, and a later list's id slides down onto it. Point a
+    // surviving paragraph at each such list for the duration of the removal.
+    let pins = pin_unreferenced_lists(doc, index, list_ids)?;
+    let removed_it = doc.try_remove_content(index)?;
+    restore_numbering_pins(doc, &pins, removed_it.then_some(index))?;
+    match removed_it {
         true => {
             merge_counts(removed, counts);
             Ok(())
         }
         false => Err(contract(format!("content {index} was not removed"))),
     }
+}
+
+struct NumberingPin {
+    index: usize,
+    previous: Option<(u32, u32)>,
+}
+
+fn pin_unreferenced_lists(
+    doc: &mut Document,
+    removing: usize,
+    list_ids: &BTreeMap<i32, u32>,
+) -> Result<Vec<NumberingPin>, WriteError> {
+    let mut used = HashSet::new();
+    for item in doc.body_items() {
+        if let rdocx::BodyItemRef::Paragraph(para) = item
+            && let Some((id, _)) = para.numbering()
+        {
+            used.insert(id);
+        }
+    }
+    let missing: Vec<u32> = list_ids
+        .values()
+        .copied()
+        .filter(|id| !used.contains(id))
+        .collect();
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    let anchors: Vec<usize> = doc
+        .body_items()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(item, rdocx::BodyItemRef::Paragraph(_))
+                .then_some(index)
+                .filter(|index| *index != removing)
+        })
+        .take(missing.len())
+        .collect();
+    if anchors.len() < missing.len() {
+        return Err(contract("fresh list has nowhere to stay during removal"));
+    }
+    let mut pins = Vec::new();
+    for (anchor, id) in anchors.into_iter().zip(missing) {
+        let previous = body_numbering(doc, anchor)?;
+        set_body_numbering(doc, anchor, Some((id, 0)))?;
+        pins.push(NumberingPin {
+            index: anchor,
+            previous,
+        });
+    }
+    Ok(pins)
+}
+
+fn restore_numbering_pins(
+    doc: &mut Document,
+    pins: &[NumberingPin],
+    removed: Option<usize>,
+) -> Result<(), WriteError> {
+    for pin in pins {
+        let index = match removed {
+            Some(removed) if pin.index > removed => pin.index - 1,
+            _ => pin.index,
+        };
+        set_body_numbering(doc, index, pin.previous)?;
+    }
+    Ok(())
+}
+
+fn body_numbering(doc: &Document, index: usize) -> Result<Option<(u32, u32)>, WriteError> {
+    let paragraph_index = doc
+        .paragraph_index_of_content(index)
+        .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
+    let paragraph = doc
+        .paragraph(paragraph_index)
+        .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
+    Ok(paragraph.numbering())
+}
+
+fn set_body_numbering(
+    doc: &mut Document,
+    index: usize,
+    numbering: Option<(u32, u32)>,
+) -> Result<(), WriteError> {
+    let paragraph_index = doc
+        .paragraph_index_of_content(index)
+        .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
+    let mut paragraph = doc
+        .paragraph_mut(paragraph_index)
+        .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
+    if !paragraph.set_numbering_value(numbering) {
+        return Err(contract("numbering"));
+    }
+    Ok(())
 }
 
 fn find_table(blocks: &[Block], src: Option<u32>) -> Option<&Table> {
@@ -1020,7 +1253,16 @@ fn patch_cell(
                 .ok_or_else(|| contract("table cell paragraph has no src"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let owned: Vec<Para> = edited_paras.into_iter().cloned().collect();
+    let mut owned: Vec<Para> = edited_paras.into_iter().cloned().collect();
+    // Clearing a cell replaces its paragraphs with a new one that has no src.
+    // It is still that cell's text, so it takes the survivor paragraph's src.
+    if let Some(survivor) = pristine_paras.first().and_then(|para| para.src) {
+        for para in &mut owned {
+            if para.src.is_none() {
+                para.src = Some(survivor);
+            }
+        }
+    }
     if owned.iter().any(|para| para.src.is_none()) {
         return Err(contract("inserted paragraph"));
     }
@@ -1194,20 +1436,10 @@ fn apply_joined<S: Story>(
     for src in srcs {
         run_srcs.extend(runs_of(ctx.sources, *src));
     }
-    let lengths = loc.with_para(current, |paragraph| {
-        let mut lengths = Vec::new();
-        for index in 0..paragraph.run_count() {
-            let run = paragraph
-                .run(index)
-                .ok_or_else(|| contract("run index is out of range"))?;
-            lengths.push(literal_len(&run));
-        }
-        Ok(lengths)
-    })?;
-    if lengths.len() != run_srcs.len() {
+    let run_count = loc.with_para(current, |paragraph| Ok(paragraph.run_count()))?;
+    if run_count != run_srcs.len() {
         return Err(contract(format!(
-            "joined paragraph has {} runs but the source map has {}",
-            lengths.len(),
+            "joined paragraph has {run_count} runs but the source map has {}",
             run_srcs.len()
         )));
     }
@@ -1215,7 +1447,7 @@ fn apply_joined<S: Story>(
     let per_final = if finals.len() == 1 {
         vec![run_srcs]
     } else {
-        split_finals(loc, current, &run_srcs, &lengths, finals)?
+        split_finals(loc, current, &run_srcs, finals, ctx)?
     };
     for (offset, (para, runs)) in finals.iter().zip(per_final).enumerate() {
         patch_paragraph(loc, current + offset, &runs, para, ctx)?;
@@ -1226,93 +1458,87 @@ fn apply_joined<S: Story>(
 struct SimRun {
     src: u32,
     origin: usize,
-    start: usize,
-    end: usize,
 }
 
+/// Give each final paragraph the source runs its pieces use.
+///
+/// A piece's text is not a slice of the pristine run: it may be longer, shorter,
+/// empty, or entirely new, and the pieces of one run may sit in different
+/// paragraphs. Each piece becomes its own run. The text is written afterwards,
+/// so the offset used to clone the run does not matter.
 fn split_finals<S: Story>(
     loc: &mut S,
     paragraph_index: usize,
     run_srcs: &[u32],
-    lengths: &[usize],
     finals: &[Para],
+    ctx: &mut Apply<'_>,
 ) -> Result<Vec<Vec<u32>>, WriteError> {
-    let mut sim: Vec<SimRun> = run_srcs
+    let paragraphs = finals
         .iter()
-        .zip(lengths)
-        .enumerate()
-        .map(|(origin, (src, len))| SimRun {
-            src: *src,
-            origin,
-            start: 0,
-            end: *len,
-        })
-        .collect();
+        .map(|para| grouped_srcs(&para.inlines))
+        .collect::<Result<Vec<_>, _>>()?;
+    // A comment or bookmark marker sits on a run boundary. A split at 0 sends
+    // every run to the next paragraph and leaves only a marker that was already
+    // on that boundary. Runs no final uses are removed first, so a marker the
+    // model kept in an earlier paragraph is not carried off with the deleted text.
+    let mut run_srcs = run_srcs.to_vec();
+    drop_unused_runs(loc, paragraph_index, &mut run_srcs, &paragraphs, ctx)?;
+    let flat: Vec<u32> = paragraphs.iter().flatten().copied().collect();
     let mut cursor = 0usize;
-    let mut used = 0usize;
+    let mut opened = false;
+    let mut flat_index = 0usize;
+    let mut layout = Vec::new();
     let mut boundaries = Vec::new();
-    for (final_index, para) in finals.iter().enumerate() {
-        for take in grouped_takes(&para.inlines)? {
-            while cursor < sim.len() && sim[cursor].src != take.src {
-                if used != 0 {
+    for (para_index, takes) in paragraphs.iter().enumerate() {
+        for src in takes {
+            while cursor < run_srcs.len() && run_srcs[cursor] != *src {
+                if opened {
                     return Err(contract("source order"));
                 }
+                layout.push(SimRun {
+                    src: run_srcs[cursor],
+                    origin: cursor,
+                });
                 cursor += 1;
-                used = 0;
             }
-            if cursor >= sim.len() {
-                return Err(contract(format!(
-                    "run {} is not in the paragraph",
-                    take.src
-                )));
+            if cursor >= run_srcs.len() {
+                return Err(contract(format!("run {src} is not in the paragraph")));
             }
-            let room = sim[cursor].end - sim[cursor].start - used;
-            if take.literal > room {
-                return Err(contract(format!(
-                    "split point is past the end of run {}",
-                    take.src
-                )));
-            }
-            used += take.literal;
-            let finished =
-                used == sim[cursor].end - sim[cursor].start && (take.literal > 0 || room == 0);
-            if finished {
+            layout.push(SimRun {
+                src: *src,
+                origin: cursor,
+            });
+            let follows = flat.get(flat_index + 1).copied() == Some(*src);
+            flat_index += 1;
+            if follows {
+                opened = true;
+            } else {
                 cursor += 1;
-                used = 0;
+                opened = false;
             }
         }
-        if final_index + 1 != finals.len() {
-            if used > 0 {
-                let abs = sim[cursor].start + used;
-                let right = SimRun {
-                    src: sim[cursor].src,
-                    origin: sim[cursor].origin,
-                    start: abs,
-                    end: sim[cursor].end,
-                };
-                sim[cursor].end = abs;
-                sim.insert(cursor + 1, right);
-                cursor += 1;
-                used = 0;
-            }
-            boundaries.push(cursor);
+        if para_index + 1 != paragraphs.len() {
+            boundaries.push(layout.len());
         }
+    }
+    while cursor < run_srcs.len() {
+        if opened {
+            return Err(contract("source order"));
+        }
+        layout.push(SimRun {
+            src: run_srcs[cursor],
+            origin: cursor,
+        });
+        cursor += 1;
     }
 
-    let mut splits: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for run in &sim {
-        splits.entry(run.origin).or_default().push(run.end);
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for run in &layout {
+        *counts.entry(run.origin).or_default() += 1;
     }
-    for (origin, ends) in splits.iter().rev() {
-        if ends.len() <= 1 {
-            continue;
-        }
-        for offset in ends[..ends.len() - 1].iter().rev() {
-            loc.with_para(paragraph_index, |paragraph| {
-                paragraph.split_run(*origin, *offset)?;
-                Ok(())
-            })?;
-        }
+    // Higher origins stay put while a lower run grows, so expand from the right.
+    for (origin, count) in counts.into_iter().rev() {
+        expand_run(loc, paragraph_index, origin, count)?;
     }
     for boundary in boundaries.iter().rev() {
         loc.split_para(paragraph_index, *boundary)?;
@@ -1321,66 +1547,114 @@ fn split_finals<S: Story>(
     let mut slices = Vec::new();
     let mut from = 0usize;
     for boundary in boundaries {
-        slices.push(sim[from..boundary].iter().map(|run| run.src).collect());
+        slices.push(layout[from..boundary].iter().map(|run| run.src).collect());
         from = boundary;
     }
-    slices.push(sim[from..].iter().map(|run| run.src).collect());
+    slices.push(layout[from..].iter().map(|run| run.src).collect());
     Ok(slices)
 }
 
-struct Take {
-    src: u32,
-    literal: usize,
-}
-
-fn grouped_takes(inlines: &[Inline]) -> Result<Vec<Take>, WriteError> {
-    let mut takes: Vec<Take> = Vec::new();
-    for event in source_events(inlines)? {
-        if let Some(last) = takes.last_mut()
-            && last.src == event.src
-        {
-            last.literal += event.literal;
-        } else {
-            takes.push(Take {
-                src: event.src,
-                literal: event.literal,
-            });
+fn drop_unused_runs<S: Story>(
+    loc: &mut S,
+    paragraph_index: usize,
+    run_srcs: &mut Vec<u32>,
+    paragraphs: &[Vec<u32>],
+    ctx: &mut Apply<'_>,
+) -> Result<(), WriteError> {
+    let used: HashSet<u32> = paragraphs.iter().flatten().copied().collect();
+    if run_srcs.iter().all(|src| used.contains(src)) {
+        return Ok(());
+    }
+    let mut srcs: Vec<Option<u32>> = run_srcs.iter().copied().map(Some).collect();
+    let mut index = srcs.len();
+    while index > 0 {
+        index -= 1;
+        if srcs[index].is_some_and(|src| !used.contains(&src)) {
+            remove_at(loc, paragraph_index, &mut srcs, index, ctx.removed)?;
         }
     }
-    Ok(takes)
+    *run_srcs = srcs.into_iter().flatten().collect();
+    Ok(())
 }
 
-struct SourceEvent {
-    src: u32,
-    literal: usize,
+/// One source run becomes `count` runs that each carry a clone of its `w:rPr`.
+///
+/// `split_run` at offset 1 is the call that clones the run. Offset 0 and an
+/// offset equal to the literal length return the boundary and leave the
+/// paragraph unchanged, so the piece length is not a usable split point. Text
+/// is written onto each run afterwards. Non-text children have no literal
+/// width and stay on the side of this offset they already occupy; markers stay
+/// on their run boundaries. A run of fewer than two characters cannot be
+/// split, and the copies still required come from `insert_run_like`, which
+/// clones `w:rPr` and leaves the original run's children, and the markers
+/// immediately before the insertion, where they are. `split_run` goes first
+/// because it also works inside a hyperlink, where `insert_run_like` is refused.
+fn expand_run<S: Story>(
+    loc: &mut S,
+    paragraph_index: usize,
+    run_index: usize,
+    count: usize,
+) -> Result<(), WriteError> {
+    if count <= 1 {
+        return Ok(());
+    }
+    let mut made = 1usize;
+    let mut tail = run_index;
+    while made < count {
+        let len = loc.with_para(paragraph_index, |paragraph| {
+            let run = paragraph
+                .run(tail)
+                .ok_or_else(|| contract("run index is out of range"))?;
+            Ok(literal_len(&run))
+        })?;
+        if len >= 2 {
+            loc.with_para(paragraph_index, |paragraph| {
+                paragraph.split_run(tail, 1)?;
+                Ok(())
+            })?;
+            tail += 1;
+            made += 1;
+        } else {
+            let insert_at = run_index + made;
+            let like = tail;
+            loc.with_para(paragraph_index, |paragraph| {
+                paragraph.insert_run_like(insert_at, like, "")?;
+                Ok(())
+            })?;
+            made += 1;
+        }
+    }
+    Ok(())
 }
 
-fn source_events(inlines: &[Inline]) -> Result<Vec<SourceEvent>, WriteError> {
-    let mut events = Vec::new();
+fn grouped_srcs(inlines: &[Inline]) -> Result<Vec<u32>, WriteError> {
+    let mut srcs = Vec::new();
+    for src in source_srcs(inlines)? {
+        if srcs.last().copied() != Some(src) {
+            srcs.push(src);
+        }
+    }
+    Ok(srcs)
+}
+
+fn source_srcs(inlines: &[Inline]) -> Result<Vec<u32>, WriteError> {
+    let mut srcs = Vec::new();
     let mut index = 0;
     while index < inlines.len() {
-        if skipped_width(inlines, index) > 0 {
-            index += skipped_width(inlines, index);
+        let skip = skipped_width(inlines, index);
+        if skip > 0 {
+            index += skip;
             continue;
         }
         match &inlines[index] {
-            Inline::Text {
-                src: Some(src),
-                text,
-                ..
-            } => events.push(SourceEvent {
-                src: *src,
-                literal: model_literal_len(text),
-            }),
-            Inline::Atom { src: Some(src), .. } => events.push(SourceEvent {
-                src: *src,
-                literal: 0,
-            }),
+            Inline::Text { src: Some(src), .. } | Inline::Atom { src: Some(src), .. } => {
+                srcs.push(*src);
+            }
             _ => {}
         }
         index += 1;
     }
-    Ok(events)
+    Ok(srcs)
 }
 
 fn patch_paragraph<S: Story>(
@@ -1606,46 +1880,28 @@ fn apply_run<S: Story>(
             .items
             .iter()
             .any(|item| matches!(item, GroupItem::Fresh(_)));
-    let protected = if concat != imported || needs_split {
-        loc.with_para(paragraph_index, |paragraph| {
-            let run = paragraph
-                .run(cursor)
-                .ok_or_else(|| contract("run index is out of range"))?;
-            Ok(is_protected(&run))
-        })?
-    } else {
-        false
-    };
-    if concat != imported {
-        if protected || text_pieces.is_empty() {
-            return Err(contract(format!(
-                "run {} contains unmodeled content",
-                group.src
-            )));
-        }
-        loc.with_para(paragraph_index, |paragraph| {
-            with_run(paragraph, cursor, |run| write_text(run, &concat))
-        })?;
-    }
-    if needs_split && protected {
+    // set_text replaces every typed child, so a run that still mixes text with a
+    // non-text child is refused rather than rewritten.
+    let protected = loc.with_para(paragraph_index, |paragraph| {
+        let run = paragraph
+            .run(cursor)
+            .ok_or_else(|| contract("run index is out of range"))?;
+        Ok(is_protected(&run))
+    })?;
+    if protected && (concat != imported || needs_split) {
         return Err(contract(format!(
             "run {} contains unmodeled content",
             group.src
         )));
     }
     if text_pieces.len() > 1 {
-        let mut boundaries = Vec::new();
-        let mut offset = 0usize;
-        for (index, piece) in text_pieces.iter().enumerate() {
-            offset += piece.literal;
-            if index + 1 != text_pieces.len() {
-                boundaries.push(offset);
-            }
-        }
-        for boundary in boundaries.into_iter().rev() {
+        // Clone first. The piece lengths are not offsets into the pristine text.
+        expand_run(loc, paragraph_index, cursor, text_pieces.len())?;
+        for (offset, piece) in text_pieces.iter().enumerate() {
             loc.with_para(paragraph_index, |paragraph| {
-                paragraph.split_run(cursor, boundary)?;
-                Ok(())
+                with_run(paragraph, cursor + offset, |run| {
+                    write_text(run, &piece.text)
+                })
             })?;
         }
         let src = srcs[cursor];
@@ -1653,6 +1909,21 @@ fn apply_run<S: Story>(
             cursor..cursor + 1,
             std::iter::repeat_n(src, text_pieces.len()),
         );
+    } else if !protected {
+        // A paragraph split clones the run at an arbitrary interior offset, so the
+        // bytes in the run are not the piece even when the piece equals the
+        // pristine text. Compare the run, not the import.
+        let current = loc.with_para(paragraph_index, |paragraph| {
+            let run = paragraph
+                .run(cursor)
+                .ok_or_else(|| contract("run index is out of range"))?;
+            Ok(run.text())
+        })?;
+        if current != concat {
+            loc.with_para(paragraph_index, |paragraph| {
+                with_run(paragraph, cursor, |run| write_text(run, &concat))
+            })?;
+        }
     }
 
     let mut physical = cursor;

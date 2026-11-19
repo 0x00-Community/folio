@@ -7,7 +7,8 @@ use rdocx_word_engine::Session;
 use rdocx_word_engine::import::{self, Import};
 use rdocx_word_engine::verify;
 use rdocx_word_engine::wire::{
-    Atom, Block, BridgeError, Inline, ListDef, ListLevel, Marks, Para, Patch, PatchBlock, Table,
+    Atom, Block, BridgeError, Inline, ListDef, ListLevel, Marks, Para, ParaProps, Patch,
+    PatchBlock, Table,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -254,6 +255,277 @@ fn split_one_paragraph_into_three() {
 }
 
 #[test]
+fn enter_after_typing_splits_a_run_whose_pieces_are_not_slices() {
+    let (session, before) = opened("basic.docx");
+    let title = body_para(&before, 0).clone();
+    let blocks = vec![
+        changed_para(para_text(&title, &[(0, "Hello 你好")])),
+        changed_para(para_text(&title, &[(0, "Quarterly report")])),
+    ];
+    let written = save(&session, &patch_replacing(&before.imported, 0, blocks));
+    let after = reopen(&written);
+    assert_eq!(
+        paragraph_texts(&after, 0, 2),
+        vec!["Hello 你好", "Quarterly report"]
+    );
+    assert!(after.imported.body[..2].iter().all(|block| {
+        matches!(block, Block::P(para) if para.props.style.as_deref() == Some("Title"))
+    }));
+}
+
+#[test]
+fn first_piece_longer_than_the_source_run() {
+    let (session, before) = opened("basic.docx");
+    let title = body_para(&before, 0).clone();
+    let longer = "Hello 你好 and more text";
+    assert!(longer.chars().count() > "Quarterly report".chars().count());
+    let mut same = title.clone();
+    same.inlines = vec![piece(&title, 0, longer), piece(&title, 0, "!")];
+    let written = save(
+        &session,
+        &patch_replacing(&before.imported, 0, vec![changed_para(same)]),
+    );
+    assert_eq!(
+        text_of(para_by_src(&reopen(&written).imported.body, 0)),
+        format!("{longer}!")
+    );
+
+    let blocks = vec![
+        changed_para(para_text(&title, &[(0, longer)])),
+        changed_para(para_text(&title, &[(0, "tail")])),
+    ];
+    let written = save(&session, &patch_replacing(&before.imported, 0, blocks));
+    assert_eq!(
+        paragraph_texts(&reopen(&written), 0, 2),
+        vec![longer, "tail"]
+    );
+}
+
+#[test]
+fn empty_piece_of_a_source_run() {
+    let (session, before) = opened("basic.docx");
+    let title = body_para(&before, 0).clone();
+    for (first, second) in [("", "Quarterly report"), ("Hello 你好", "")] {
+        let blocks = vec![
+            changed_para(para_text(&title, &[(0, first)])),
+            changed_para(para_text(&title, &[(0, second)])),
+        ];
+        let written = save(&session, &patch_replacing(&before.imported, 0, blocks));
+        assert_eq!(
+            paragraph_texts(&reopen(&written), 0, 2),
+            vec![first, second]
+        );
+    }
+}
+
+#[test]
+fn replaced_pieces_of_a_source_run() {
+    let (session, before) = opened("basic.docx");
+    let title = body_para(&before, 0).clone();
+    let blocks = vec![
+        changed_para(para_text(&title, &[(0, "完全不同")])),
+        changed_para(para_text(&title, &[(0, "totally-replaced-body-text")])),
+    ];
+    let written = save(&session, &patch_replacing(&before.imported, 0, blocks));
+    assert_eq!(
+        paragraph_texts(&reopen(&written), 0, 2),
+        vec!["完全不同", "totally-replaced-body-text"]
+    );
+}
+
+#[test]
+fn three_pieces_of_one_run_in_three_paragraphs() {
+    let (session, before) = opened("basic.docx");
+    let title = body_para(&before, 0).clone();
+    let parts = [
+        "12345678901234567",
+        "abcdefghijklmnopq",
+        "ABCDEFGHIJKLMNOPQ",
+    ];
+    let blocks = parts
+        .iter()
+        .map(|text| changed_para(para_text(&title, &[(0, text)])))
+        .collect();
+    let written = save(&session, &patch_replacing(&before.imported, 0, blocks));
+    assert_eq!(
+        paragraph_texts(&reopen(&written), 0, 3),
+        parts.map(str::to_string).to_vec()
+    );
+}
+
+#[test]
+fn delete_across_a_table_joins_the_paragraphs() {
+    let (session, before) = opened("basic.docx");
+    let step = body_para(&before, 11).clone();
+    let picture = body_para(&before, 24).clone();
+    assert_eq!(text_of(&step), "Step two");
+    assert_eq!(text_of(&picture), "Picture");
+    let mut merged = step.clone();
+    merged.inlines = vec![
+        piece(&step, text_src(&step), "Step "),
+        piece(&picture, text_src(&picture), "icture"),
+    ];
+    let written = save(
+        &session,
+        &patch_swapping(&before.imported, 11, 24, vec![changed_para(merged)]),
+    );
+    let after = reopen(&written);
+    assert!(
+        after
+            .imported
+            .body
+            .iter()
+            .all(|block| !matches!(block, Block::Table(_)))
+    );
+    assert_eq!(paragraph_texts(&after, 11, 1), vec!["Step icture"]);
+    assert_eq!(after.imported.body.len(), before.imported.body.len() - 4);
+    assert!(matches!(
+        after.imported.body.get(12),
+        Some(Block::P(para))
+            if para.inlines.iter().any(|inline| matches!(inline, Inline::Atom { atom: Atom::Image { .. }, .. }))
+    ));
+}
+
+#[test]
+fn delete_across_an_image_and_a_page_break_joins_the_text() {
+    let (session, before) = opened("basic.docx");
+    let bullet = body_para(&before, 9).clone();
+    let prose = body_para(&before, 28).clone();
+    let mut merged = bullet.clone();
+    let mut inlines = vec![piece(&bullet, text_src(&bullet), "Second ")];
+    inlines.extend(prose.inlines.iter().cloned());
+    merged.inlines = inlines;
+    let written = save(
+        &session,
+        &patch_swapping(&before.imported, 9, 28, vec![changed_para(merged)]),
+    );
+    let after = reopen(&written);
+    assert!(
+        after
+            .imported
+            .body
+            .iter()
+            .all(|block| !matches!(block, Block::Table(_)))
+    );
+    assert!(after.imported.body.iter().all(|block| {
+        let Block::P(para) = block else {
+            return true;
+        };
+        para.inlines.iter().all(|inline| {
+            !matches!(
+                inline,
+                Inline::Atom {
+                    atom: Atom::PageBreak {},
+                    ..
+                }
+            )
+        })
+    }));
+    assert_eq!(
+        paragraph_texts(&after, 9, 1),
+        vec![
+            "Second 这是一段宋体正文，用来检查中文排版、换行和光标定位是否正确。这一句是黑体加粗。Mixed 中英文 text 混排。"
+        ]
+    );
+    assert_eq!(after.imported.body.len(), before.imported.body.len() - 10);
+}
+
+#[test]
+fn joined_piece_moves_into_the_neighbor_paragraph() {
+    let (session, before) = opened("basic.docx");
+    let title = body_para(&before, 0).clone();
+    let overview = body_para(&before, 1);
+    let mut merged = title.clone();
+    merged.inlines = vec![
+        piece(&title, 0, "Quarterly report"),
+        overview.inlines[0].clone(),
+    ];
+    let blocks = vec![
+        changed_para(para_text(&title, &[(0, "Hello 你好")])),
+        changed_para(merged),
+    ];
+    let written = save(&session, &patch_swapping(&before.imported, 0, 1, blocks));
+    let after = reopen(&written);
+    assert_eq!(
+        paragraph_texts(&after, 0, 2),
+        vec!["Hello 你好", "Quarterly reportOverview"]
+    );
+    assert_eq!(after.imported.body.len(), before.imported.body.len());
+}
+
+fn text_src(para: &Para) -> u32 {
+    para.inlines
+        .iter()
+        .find_map(|inline| match inline {
+            Inline::Text { src: Some(src), .. } => Some(*src),
+            _ => None,
+        })
+        .expect("text run")
+}
+
+fn piece(para: &Para, src: u32, text: &str) -> Inline {
+    let mut inline = para
+        .inlines
+        .iter()
+        .find(|inline| matches!(inline, Inline::Text { src: Some(run), .. } if *run == src))
+        .unwrap_or_else(|| panic!("run {src}"))
+        .clone();
+    let Inline::Text { text: slot, .. } = &mut inline else {
+        unreachable!("run {src} is text");
+    };
+    *slot = text.to_string();
+    inline
+}
+
+fn para_text(template: &Para, parts: &[(u32, &str)]) -> Para {
+    let mut para = template.clone();
+    para.inlines = parts
+        .iter()
+        .map(|(src, text)| piece(template, *src, text))
+        .collect();
+    para
+}
+
+fn paragraph_texts(imported: &Import, start: usize, count: usize) -> Vec<String> {
+    imported
+        .imported
+        .body
+        .iter()
+        .skip(start)
+        .take(count)
+        .map(text_of_block)
+        .collect()
+}
+
+fn patch_swapping(
+    imported: &rdocx_word_engine::wire::Imported,
+    from: u32,
+    to: u32,
+    blocks: Vec<PatchBlock>,
+) -> Patch {
+    let mut body = Vec::new();
+    let mut placed = false;
+    for block in &imported.body {
+        let src = block_src(block).expect("src");
+        if (from..=to).contains(&src) {
+            if !placed {
+                body.extend(blocks.clone());
+                placed = true;
+            }
+        } else {
+            body.push(PatchBlock::Keep { keep: src });
+        }
+    }
+    assert!(placed, "paragraphs {from}..={to} were not in the body");
+    Patch {
+        body,
+        sections: imported.sections.clone(),
+        new_lists: Vec::new(),
+        added_styles: Vec::new(),
+    }
+}
+
+#[test]
 fn join_three_paragraphs_each_keep_side() {
     let (session, before) = opened("basic.docx");
     for keep in [3u32, 5] {
@@ -467,6 +739,56 @@ fn paragraph_style() {
 }
 
 #[test]
+fn two_fresh_decimal_lists_keep_distinct_ids() {
+    let (session, before) = opened("basic.docx");
+    let mut later = body_para(&before, 41).clone();
+    later.props.numbering = Some(Some((-1, 0)));
+    let bullet = body_para(&before, 9).clone();
+    let prose = body_para(&before, 28).clone();
+    let mut merged = bullet.clone();
+    let mut inlines = vec![piece(&bullet, text_src(&bullet), "Second ")];
+    inlines.extend(prose.inlines.iter().cloned());
+    merged.inlines = inlines;
+    // The list on the joined paragraph is not referenced until after the image
+    // in the span is removed. That removal must not reuse the other list's id.
+    merged.props.numbering = Some(Some((-2, 0)));
+    let mut patch = patch_swapping(&before.imported, 9, 28, vec![changed_para(merged)]);
+    for block in &mut patch.body {
+        if let PatchBlock::Keep { keep: 41 } = block {
+            *block = changed_para(later.clone());
+        }
+    }
+    let level = ListLevel {
+        format: "decimal".into(),
+        text: "%1.".into(),
+        start: 1,
+        indent_left_pt: 36.0,
+        hanging_pt: 18.0,
+    };
+    let definition = ListDef {
+        fresh: true,
+        levels: vec![level],
+    };
+    patch.new_lists = vec![(-2, definition.clone()), (-1, definition)];
+    let written = save(&session, &patch);
+    let after = reopen(&written);
+    let numbering_of = |needle: &str| {
+        after
+            .imported
+            .body
+            .iter()
+            .find_map(|block| match block {
+                Block::P(para) if text_of(para).contains(needle) => Some(para.props.numbering),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {needle}"))
+    };
+    let joined = numbering_of("Second 这是一段");
+    let later_numbering = numbering_of("第12段");
+    assert_ne!(joined, later_numbering, "lists collapsed: {joined:?}");
+}
+
+#[test]
 fn paragraph_alignment() {
     let (session, before) = opened("basic.docx");
     let mut para = body_para(&before, 0).clone();
@@ -570,6 +892,57 @@ fn text_inside_a_table_cell() {
         panic!("cell");
     };
     assert_eq!(text_of(para), "Oranges");
+}
+
+#[test]
+fn cleared_table_cell_keeps_an_empty_paragraph() {
+    let (session, before) = opened("basic.docx");
+    let mut body = Vec::new();
+    for block in &before.imported.body {
+        if block_src(block) == Some(14) {
+            let Block::Table(table) = block else {
+                panic!("src 14 is not a table");
+            };
+            let mut table: Table = table.clone();
+            let cell = &mut table.rows[1].cells[0];
+            cell.blocks = vec![Block::P(Para::new(
+                None,
+                ParaProps::default(),
+                Vec::new(),
+                None,
+                None,
+            ))];
+            body.push(PatchBlock::Changed(Block::Table(table)));
+        } else {
+            body.push(PatchBlock::Keep {
+                keep: block_src(block).unwrap(),
+            });
+        }
+    }
+    let written = save(
+        &session,
+        &Patch {
+            body,
+            sections: before.imported.sections.clone(),
+            new_lists: Vec::new(),
+            added_styles: Vec::new(),
+        },
+    );
+    let after = reopen(&written);
+    let Block::Table(table) = after
+        .imported
+        .body
+        .iter()
+        .find(|block| block_src(block) == Some(14))
+        .unwrap()
+    else {
+        panic!("table");
+    };
+    let Block::P(para) = &table.rows[1].cells[0].blocks[0] else {
+        panic!("cell");
+    };
+    assert_eq!(text_of(para), "");
+    assert_eq!(table.rows[1].cells[0].blocks.len(), 1);
 }
 
 #[test]

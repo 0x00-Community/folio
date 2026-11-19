@@ -147,9 +147,16 @@ impl Session {
 
     /// Save the patch onto a fresh copy of the opened document and return docx bytes.
     pub fn save(&self, patch_json: &str) -> Result<Vec<u8>, JsValue> {
-        self.save_result(patch_json).map_err(|error| {
-            JsValue::from_str(&serde_json::to_string(&error).expect("bridge error is JSON"))
-        })
+        self.save_result(patch_json).map_err(bridge_error)
+    }
+
+    /// `save`, then drop a bookmark before verification so the result fails.
+    ///
+    /// The app does not call this. The dev hook uses it to show a verify error.
+    /// A document with no bookmark has its first run rewritten, so verification still fails.
+    pub fn save_tampered(&self, patch_json: &str) -> Result<Vec<u8>, JsValue> {
+        self.save_result_tampered(patch_json, tamper_for_verify)
+            .map_err(bridge_error)
     }
 
     /// Image bytes and content type for one media key. The sketch's `image` returns bytes only.
@@ -238,6 +245,30 @@ fn default_para_look() -> wire::ParaLook {
         page_break_before: false,
         widow_control: true,
     }
+}
+
+fn bridge_error(error: wire::BridgeError) -> JsValue {
+    JsValue::from_str(&serde_json::to_string(&error).expect("bridge error is JSON"))
+}
+
+/// Drop one bookmark. With none to drop, rewrite the first run so the projection differs.
+fn tamper_for_verify(doc: &mut rdocx::Document) {
+    let bookmark = doc
+        .bookmarks()
+        .into_iter()
+        .find_map(|bookmark| bookmark.id());
+    if let Some(id) = bookmark
+        && doc.remove_story_bookmark(id).is_ok()
+    {
+        return;
+    }
+    let Some(mut paragraph) = doc.paragraph_mut(0) else {
+        return;
+    };
+    let Some(mut run) = paragraph.run_mut(0) else {
+        return;
+    };
+    run.set_text("tampered");
 }
 
 fn open_error(message: &str) -> JsValue {
