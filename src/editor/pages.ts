@@ -1087,10 +1087,13 @@ export class PageView {
   private hold: ViewportHold | null = null
   /** scrollTop captured with the hold, so a short intermediate layout cannot clamp it away. */
   private holdScroll = 0
+  private readonly onLayout: () => void
 
-  constructor(host: HTMLElement, ctx: () => RenderContext) {
+  /** `onLayout` runs after each measured chunk, so a page count shown outside the view follows the layout. */
+  constructor(host: HTMLElement, ctx: () => RenderContext, onLayout: () => void = () => {}) {
     this.host = host
     this.ctx = ctx
+    this.onLayout = onLayout
   }
 
   get layout(): Layout {
@@ -1592,9 +1595,13 @@ export class PageView {
     if (this.rewriting && this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
     if (this.cursor < body.length) {
       this.chunk = requestAnimationFrame(() => this.pump())
+      this.onLayout()
       return
     }
-    if (!this.rewriting) return
+    if (!this.rewriting) {
+      this.onLayout()
+      return
+    }
     const hold = this.hold
     this.rewriting = false
     this.hold = null
@@ -1603,6 +1610,7 @@ export class PageView {
     if (this.restoreHold(hold)) this.syncFromGeometry()
     if (hold && this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
     this.clearOverflowAnchor()
+    this.onLayout()
   }
 
   private measureStories(): void {

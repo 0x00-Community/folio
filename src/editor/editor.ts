@@ -85,7 +85,7 @@ export class Editor implements EditingSurface {
     sink.autocomplete = 'off'
     sink.spellcheck = false
     this.sink = sink
-    this.view = new PageView(host, () => this.renderContext())
+    this.view = new PageView(host, () => this.renderContext(), () => this.scheduleChange())
     this.view.show(doc)
     this.paintSelection(true)
     this.input = attachInput(this, this.sink, this.host)
