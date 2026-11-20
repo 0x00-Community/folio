@@ -1,4 +1,5 @@
-import init, { Session, type MediaFile } from './pkg/engine.js'
+import { isPrintBoldKey } from '../fonts.ts'
+import init, { PrintLayout as WasmLayout, Session, type MediaFile } from './pkg/engine.js'
 import type {
   Atom,
   Block,
@@ -71,6 +72,40 @@ export class SaveWriteError extends Error {
   }
 }
 
+/**
+ * Layout or a render of it failed.
+ * `font` names the family, `layout` and `render` carry the engine's detail.
+ * A patch `write` refuses is `SaveWriteError`, the same error as save.
+ */
+export class PrintError extends Error {
+  readonly kind: 'font' | 'layout' | 'render'
+  readonly family: string | undefined
+  readonly detail: string | undefined
+
+  constructor(kind: 'font' | 'layout' | 'render', value: string) {
+    super(value)
+    this.name = 'PrintError'
+    this.kind = kind
+    this.family = kind === 'font' ? value : undefined
+    this.detail = kind === 'font' ? undefined : value
+  }
+}
+
+export type PrintFontInfo = {
+  readonly family: string
+  readonly embedded: boolean
+}
+
+/** One layout. Preview and PDF both read it. `free` drops the wasm object. */
+export type PrintLayout = {
+  pageCount(): number
+  pageSize(index: number): readonly [number, number]
+  pagePng(index: number, dpi: number): Uint8Array
+  pdf(): Uint8Array
+  fonts(): readonly PrintFontInfo[]
+  free(): void
+}
+
 /** Bytes of an image added this session. Every save starts from the opened document, so the bytes go out again. */
 export type AddedMedia = {
   readonly key: MediaKey
@@ -91,10 +126,13 @@ export type Opened = {
 
 export type Source = {
   save(doc: Doc): Uint8Array
-  exportPdf(doc: Doc): Uint8Array
-  exportHtml(doc: Doc): string
+  /** Lay out `doc` once. The caller frees the layout. */
+  printLayout(doc: Doc): PrintLayout
   fontsUsed(doc: Doc): readonly string[]
+  /** Store `bytes` as `family` for the rest of the session. A second add replaces the first. */
   addFont(family: string, bytes: Uint8Array): void
+  /** Map a requested family onto a family passed to `addFont`. */
+  addFontAlias(requested: string, loaded: string): void
   addMedia(file: Blob): Promise<AddedMedia>
   imageUrl(key: MediaKey): string
   /** Resolved run look for the paragraph's styles, with these direct marks overlaid. */
@@ -121,11 +159,27 @@ const baselines = new WeakMap<Source, SaveBaseline>()
 const tamperSaves = new WeakMap<Source, (doc: Doc) => Uint8Array>()
 const sessionMedia = new WeakMap<Source, Map<string, HeldMedia>>()
 
+let bootMs = 0
+let wasmMemory: WebAssembly.Memory | undefined
+
+/** How long `loadEngine` took to fetch and instantiate `engine.wasm`. */
+export function engineBootMs(): number {
+  return bootMs
+}
+
+/** The wasm memory size now. Grows as layouts run; it does not shrink. */
+export function wasmMemoryBytes(): number {
+  return wasmMemory?.buffer.byteLength ?? 0
+}
+
 export async function loadEngine(): Promise<Engine> {
+  const started = performance.now()
   const response = await fetch('/engine.wasm')
   if (!response.ok) throw new Error(`engine.wasm: ${response.status}`)
   const bytes = await response.arrayBuffer()
-  await init({ module_or_path: bytes })
+  const ready = await init({ module_or_path: bytes })
+  bootMs = performance.now() - started
+  wasmMemory = ready.memory
   return createEngine()
 }
 
@@ -198,18 +252,29 @@ function bindSource(
         throw toSaveError(error)
       }
     },
-    exportPdf() {
-      throw new Error('not implemented')
-    },
-    exportHtml() {
-      throw new Error('not implemented')
+    printLayout(doc) {
+      try {
+        return wrapLayout(session.print_layout(JSON.stringify(toPatch(doc, baseline, added))))
+      } catch (error) {
+        throw asPrintError(error)
+      }
     },
     fontsUsed(current) {
       return collectFonts(current, looks.run, [...importedFonts, ...extraFonts])
     },
-    addFont(family) {
+    addFont(family, bytes) {
       const trimmed = family.trim()
-      if (trimmed !== '') extraFonts.push(trimmed)
+      if (trimmed === '') return
+      session.add_font(trimmed, bytes)
+      // The bold companion is the same family. Listing `${family} Bold` would put it in the font menu.
+      if (isPrintBoldKey(trimmed) || extraFonts.includes(trimmed)) return
+      extraFonts.push(trimmed)
+    },
+    addFontAlias(requested, loaded) {
+      const from = requested.trim()
+      const to = loaded.trim()
+      if (from === '' || to === '') return
+      session.add_font_alias(from, to)
     },
     async addMedia(file) {
       const bytes = new Uint8Array(await file.arrayBuffer())
@@ -1423,6 +1488,120 @@ function styleRole(value: string | null | undefined): StyleRole | null {
 
 function fail(path: string, message: string): never {
   throw new Error(`${path}: ${message}`)
+}
+
+function wrapLayout(layout: WasmLayout): PrintLayout {
+  return {
+    pageCount() {
+      return layout.page_count()
+    },
+    pageSize(index) {
+      try {
+        return parsePageSize(layout.page_size(index))
+      } catch (error) {
+        throw asPrintError(error)
+      }
+    },
+    pagePng(index, dpi) {
+      try {
+        return copyBytes(layout.page_png(index, dpi))
+      } catch (error) {
+        throw asPrintError(error)
+      }
+    },
+    pdf() {
+      try {
+        return copyBytes(layout.pdf())
+      } catch (error) {
+        throw asPrintError(error)
+      }
+    },
+    fonts() {
+      try {
+        return parsePrintFonts(layout.fonts())
+      } catch (error) {
+        throw asPrintError(error)
+      }
+    },
+    free() {
+      layout.free()
+    },
+  }
+}
+
+function parsePageSize(json: string): readonly [number, number] {
+  const parsed = parseJson(json)
+  if (!Array.isArray(parsed) || parsed.length !== 2) throw renderError('page size')
+  const width = parsed[0]
+  const height = parsed[1]
+  if (typeof width !== 'number' || typeof height !== 'number') throw renderError('page size')
+  return [width, height]
+}
+
+function parsePrintFonts(json: string): PrintFontInfo[] {
+  const parsed = parseJson(json)
+  if (!Array.isArray(parsed)) throw renderError('fonts')
+  return parsed.map((item) => {
+    if (!isRecord(item) || typeof item.family !== 'string' || typeof item.embedded !== 'boolean') {
+      throw renderError('fonts')
+    }
+    return { family: item.family, embedded: item.embedded }
+  })
+}
+
+function parseJson(json: string): unknown {
+  try {
+    return JSON.parse(json)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw renderError(detail)
+  }
+}
+
+function renderError(detail: string): Error {
+  return new Error(JSON.stringify({ kind: 'render', detail }))
+}
+
+function asPrintError(error: unknown): never {
+  if (error instanceof PrintError || error instanceof SaveWriteError) throw error
+  throw toPrintError(error)
+}
+
+function toPrintError(error: unknown): PrintError | SaveWriteError {
+  const detail = errorText(error)
+  const parsed = parseErrorJson(detail)
+  if (isRecord(parsed)) {
+    if (parsed.kind === 'font' && typeof parsed.family === 'string') return new PrintError('font', parsed.family)
+    if ((parsed.kind === 'layout' || parsed.kind === 'render') && typeof parsed.detail === 'string') {
+      return new PrintError(parsed.kind, parsed.detail)
+    }
+    if (parsed.kind === 'write' && typeof parsed.detail === 'string') return new SaveWriteError(parsed.detail)
+  }
+  return new SaveWriteError(detail)
+}
+
+function errorText(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+function parseErrorJson(detail: string): unknown {
+  try {
+    return JSON.parse(detail)
+  } catch {
+    const start = detail.indexOf('{')
+    if (start < 0) return undefined
+    try {
+      return JSON.parse(detail.slice(start))
+    } catch {
+      return undefined
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function toSaveError(error: unknown): SaveVerifyError | SaveWriteError {
