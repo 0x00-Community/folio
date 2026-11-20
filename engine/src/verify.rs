@@ -137,6 +137,11 @@ fn close_pt(want: f64, got: f64) -> bool {
     (want - got).abs() < 0.05
 }
 
+/// The same tolerance `table_shape_changed` uses for a grid column.
+pub(crate) fn grid_pt_differs(left: f64, right: f64) -> bool {
+    (left - right).abs() > 0.05
+}
+
 fn subtract(ledger: &mut Ledger, removed: &BTreeMap<String, usize>) -> Result<(), String> {
     for (key, count) in removed {
         let Some(slot) = ledger.counts.get_mut(key) else {
@@ -414,6 +419,7 @@ enum Proj {
         nodes: Vec<Node>,
     },
     Table {
+        grid: Vec<f64>,
         rows: Vec<ProjRow>,
     },
     Opaque {
@@ -497,6 +503,7 @@ fn project_block(block: &Block, list_ids: &BTreeMap<i32, u32>) -> Proj {
             nodes: project_inlines(&para.inlines),
         },
         Block::Table(table) => Proj::Table {
+            grid: table.grid_pt.clone(),
             rows: table
                 .rows
                 .iter()
@@ -622,7 +629,24 @@ fn proj_diff(want: &Proj, got: &Proj, path: &str) -> Option<String> {
             }
             nodes_diff(want_nodes, got_nodes, path)
         }
-        (Proj::Table { rows: want_rows }, Proj::Table { rows: got_rows }) => {
+        (
+            Proj::Table {
+                grid: want_grid,
+                rows: want_rows,
+            },
+            Proj::Table {
+                grid: got_grid,
+                rows: got_rows,
+            },
+        ) => {
+            if want_grid.len() != got_grid.len()
+                || want_grid
+                    .iter()
+                    .zip(got_grid.iter())
+                    .any(|(left, right)| grid_pt_differs(*left, *right))
+            {
+                return Some(format!("{path} grid {want_grid:?} vs {got_grid:?}"));
+            }
             if want_rows.len() != got_rows.len() {
                 return Some(format!(
                     "{path} row count expected {} found {}",

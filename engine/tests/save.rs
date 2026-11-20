@@ -2,13 +2,13 @@
 
 use std::path::PathBuf;
 
-use rdocx::{Document, ParagraphPropertyKeep};
+use rdocx::{Document, ParagraphPropertyKeep, TableBorderEdge};
 use rdocx_word_engine::Session;
 use rdocx_word_engine::import::{self, Import};
 use rdocx_word_engine::verify;
 use rdocx_word_engine::wire::{
-    Atom, Block, BridgeError, Inline, ListDef, ListLevel, Marks, Para, ParaProps, Patch,
-    PatchBlock, Section, Table,
+    Atom, Block, BridgeError, Cell, Inline, ListDef, ListLevel, Marks, Para, ParaProps, Patch,
+    PatchBlock, Row, Section, Table,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -1123,28 +1123,15 @@ fn saving_twice_imports_equal_and_leaves_the_session() {
 }
 
 #[test]
-fn broken_contract_returns_write() {
+fn reordered_rows_return_write() {
     let (session, before) = opened("basic.docx");
-    let table = Table::new(None, vec![120.0], Vec::new());
-    let patch = Patch {
-        body: vec![PatchBlock::Changed(Block::Table(table))],
-        sections: before.imported.sections.clone(),
-        new_lists: Vec::new(),
-        added_styles: Vec::new(),
-    };
-    let error = session
-        .save_result(&serde_json::to_string(&patch).unwrap())
-        .expect_err("inserted table");
-    match error {
-        BridgeError::Write { detail } => assert!(
-            detail.to_ascii_lowercase().contains("inserted table"),
-            "{detail}"
-        ),
-        other => panic!("expected Write, got {other:?}"),
-    }
-    assert_eq!(
-        session.import(),
-        serde_json::to_string(&before.imported).unwrap()
+    let mut table = fixture_table(&before.imported).clone();
+    table.rows.swap(0, 2);
+    assert_contract(
+        &session,
+        &before,
+        &table_patch(&before.imported, table),
+        "reordered rows",
     );
 }
 
@@ -1578,4 +1565,701 @@ fn crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+fn fixture_table(imported: &rdocx_word_engine::wire::Imported) -> &Table {
+    imported
+        .body
+        .iter()
+        .find_map(|block| match block {
+            Block::Table(table) if table.src == Some(14) => Some(table),
+            _ => None,
+        })
+        .expect("basic.docx table")
+}
+
+fn table_patch(imported: &rdocx_word_engine::wire::Imported, table: Table) -> Patch {
+    let mut body = Vec::new();
+    let mut replaced = false;
+    for block in &imported.body {
+        if block_src(block) == Some(14) {
+            body.push(PatchBlock::Changed(Block::Table(table.clone())));
+            replaced = true;
+        } else {
+            body.push(PatchBlock::Keep {
+                keep: block_src(block).expect("src"),
+            });
+        }
+    }
+    assert!(replaced, "the fixture table was not in the body");
+    Patch {
+        body,
+        sections: imported.sections.clone(),
+        new_lists: Vec::new(),
+        added_styles: Vec::new(),
+    }
+}
+
+fn empty_para() -> Para {
+    Para::new(None, ParaProps::default(), Vec::new(), None, None)
+}
+
+fn text_para(text: &str) -> Para {
+    Para::new(
+        None,
+        ParaProps::default(),
+        vec![Inline::Text {
+            text: text.to_string(),
+            marks: Marks::default(),
+            src: None,
+        }],
+        None,
+        None,
+    )
+}
+
+fn blank_row(template: &Row) -> Row {
+    Row {
+        src: None,
+        header: false,
+        cant_split: false,
+        cells: template
+            .cells
+            .iter()
+            .map(|cell| Cell {
+                src: None,
+                span: cell.span,
+                v_merge: None,
+                blocks: vec![Block::P(empty_para())],
+            })
+            .collect(),
+    }
+}
+
+fn row_with_text(template: &Row, text: &str) -> Row {
+    let mut row = blank_row(template);
+    row.cells[0].blocks = vec![Block::P(text_para(text))];
+    row
+}
+
+fn fresh_table(rows: usize, cols: usize, width: f64) -> Table {
+    let mut table_rows = Vec::new();
+    for _ in 0..rows {
+        table_rows.push(Row {
+            src: None,
+            header: false,
+            cant_split: false,
+            cells: (0..cols)
+                .map(|_| Cell {
+                    src: None,
+                    span: 1,
+                    v_merge: None,
+                    blocks: vec![Block::P(empty_para())],
+                })
+                .collect(),
+        });
+    }
+    Table::new(None, vec![width; cols], table_rows)
+}
+
+fn insert_block(
+    imported: &rdocx_word_engine::wire::Imported,
+    after: Option<u32>,
+    block: Block,
+) -> Patch {
+    let mut body = Vec::new();
+    if after.is_none() {
+        body.push(PatchBlock::Changed(block.clone()));
+    }
+    for item in &imported.body {
+        let src = block_src(item).expect("src");
+        body.push(PatchBlock::Keep { keep: src });
+        if after == Some(src) {
+            body.push(PatchBlock::Changed(block.clone()));
+        }
+    }
+    Patch {
+        body,
+        sections: imported.sections.clone(),
+        new_lists: Vec::new(),
+        added_styles: Vec::new(),
+    }
+}
+
+fn saved_twice(session: &Session, patch: &Patch) -> (Vec<u8>, Import) {
+    let first = save(session, patch);
+    let second = save(session, patch);
+    let opened = reopen(&first);
+    assert_eq!(opened.imported, reopen(&second).imported, "saving twice");
+    (first, opened)
+}
+
+fn cell_text(table: &Table, row: usize, cell: usize) -> String {
+    table.rows[row].cells[cell]
+        .blocks
+        .iter()
+        .map(text_of_block)
+        .collect()
+}
+
+fn row_texts(table: &Table, row: usize) -> Vec<String> {
+    (0..table.rows[row].cells.len())
+        .map(|cell| cell_text(table, row, cell))
+        .collect()
+}
+
+fn only_table(imported: &rdocx_word_engine::wire::Imported) -> &Table {
+    let tables: Vec<_> = imported
+        .body
+        .iter()
+        .filter_map(|block| match block {
+            Block::Table(table) => Some(table),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tables.len(), 1, "one body table");
+    tables[0]
+}
+
+fn assert_grid(got: &[f64], want: &[f64]) {
+    assert_eq!(got.len(), want.len(), "grid {got:?} vs {want:?}");
+    for (index, (left, right)) in got.iter().zip(want).enumerate() {
+        assert!(
+            (left - right).abs() <= 0.05,
+            "column {index}: {left} vs {right}"
+        );
+    }
+}
+
+fn assert_single_borders(bytes: &[u8], content_index: usize) {
+    let doc = Document::from_bytes(bytes).expect("written bytes");
+    let ordinal = doc
+        .body_items()
+        .take(content_index)
+        .filter(|item| matches!(item, rdocx::BodyItemRef::Table(_)))
+        .count();
+    let table = doc.table(ordinal).expect("inserted table");
+    for edge in [
+        TableBorderEdge::Top,
+        TableBorderEdge::Bottom,
+        TableBorderEdge::Left,
+        TableBorderEdge::Right,
+        TableBorderEdge::InsideHorizontal,
+        TableBorderEdge::InsideVertical,
+    ] {
+        assert_eq!(
+            table.border(edge).map(|border| border.style()),
+            Some("single"),
+            "inserted table border"
+        );
+    }
+}
+
+fn assert_contract(session: &Session, before: &Import, patch: &Patch, needle: &str) {
+    let error = session
+        .save_result(&serde_json::to_string(patch).unwrap())
+        .expect_err(needle);
+    match error {
+        BridgeError::Write { detail } => {
+            assert!(detail.contains(needle), "{detail}");
+            assert!(
+                !detail.contains("inserted tables"),
+                "old refusal leaked: {detail}"
+            );
+        }
+        other => panic!("expected Write, got {other:?}"),
+    }
+    assert_eq!(
+        session.import(),
+        serde_json::to_string(&before.imported).unwrap()
+    );
+    assert_eq!(session.ledger().counts, before.ledger.counts);
+}
+
+fn set_cell_text(table: &mut Table, row: usize, cell: usize, text: &str) {
+    let Block::P(para) = &mut table.rows[row].cells[cell].blocks[0] else {
+        panic!("cell");
+    };
+    let src = para
+        .inlines
+        .iter()
+        .find_map(|inline| match inline {
+            Inline::Text { src, .. } => *src,
+            _ => None,
+        })
+        .expect("run");
+    set_run_text(para, src, text);
+}
+
+fn insert_grid_column(table: &mut Table, at: usize) {
+    let width = table
+        .grid_pt
+        .get(at)
+        .or_else(|| table.grid_pt.last())
+        .copied()
+        .unwrap_or(72.0);
+    let at = at.min(table.grid_pt.len());
+    table.grid_pt.insert(at, width);
+    for row in &mut table.rows {
+        let cell = Cell {
+            src: None,
+            span: 1,
+            v_merge: None,
+            blocks: vec![Block::P(empty_para())],
+        };
+        row.cells.insert(at.min(row.cells.len()), cell);
+    }
+}
+
+#[test]
+fn inserted_table_sits_between_paragraphs_at_the_edges_and_inside_a_split() {
+    let (session, before) = opened("basic.docx");
+    let width = 120.0;
+
+    let (left_src, left_text, right_text) = before
+        .imported
+        .body
+        .windows(2)
+        .find_map(|pair| match pair {
+            [Block::P(left), Block::P(right)] => {
+                Some((left.src.expect("src"), text_of(left), text_of(right)))
+            }
+            _ => None,
+        })
+        .expect("two adjacent paragraphs");
+    let between = insert_block(
+        &before.imported,
+        Some(left_src),
+        Block::Table(fresh_table(1, 2, width)),
+    );
+    let (bytes, after) = saved_twice(&session, &between);
+    let index = table_between(&after.imported.body, &left_text, &right_text);
+    let Block::Table(table) = &after.imported.body[index] else {
+        unreachable!("table");
+    };
+    assert_grid(&table.grid_pt, &[width, width]);
+    assert_single_borders(&bytes, index);
+
+    let first_text = text_of_block(&before.imported.body[0]);
+    let at_start = insert_block(
+        &before.imported,
+        None,
+        Block::Table(fresh_table(1, 1, width)),
+    );
+    let (bytes, after) = saved_twice(&session, &at_start);
+    assert!(matches!(after.imported.body[0], Block::Table(_)));
+    assert_eq!(text_of_block(&after.imported.body[1]), first_text);
+    assert_single_borders(&bytes, 0);
+
+    let last_src = block_src(before.imported.body.last().expect("body")).expect("src");
+    let last_text = text_of_block(before.imported.body.last().expect("body"));
+    let at_end = insert_block(
+        &before.imported,
+        Some(last_src),
+        Block::Table(fresh_table(1, 1, width)),
+    );
+    let (bytes, after) = saved_twice(&session, &at_end);
+    let end = after.imported.body.len() - 1;
+    assert!(matches!(after.imported.body[end], Block::Table(_)));
+    assert_eq!(text_of_block(&after.imported.body[end - 1]), last_text);
+    assert_single_borders(&bytes, end);
+
+    let original = body_para(&before, 3).clone();
+    let mut head = original.clone();
+    head.inlines = vec![Inline::Text {
+        text: "Cen".into(),
+        marks: Marks::default(),
+        src: Some(11),
+    }];
+    let mut tail = original;
+    tail.inlines = vec![Inline::Text {
+        text: "tered paragraph.".into(),
+        marks: Marks::default(),
+        src: Some(11),
+    }];
+    let mut table = fresh_table(2, 2, width);
+    table.rows[0].cells[0].blocks = vec![Block::P(text_para("Inside"))];
+    let split = patch_replacing(
+        &before.imported,
+        3,
+        vec![
+            changed_para(head),
+            PatchBlock::Changed(Block::Table(table)),
+            changed_para(tail),
+        ],
+    );
+    let (bytes, after) = saved_twice(&session, &split);
+    let index = table_between(&after.imported.body, "Cen", "tered paragraph.");
+    let Block::Table(table) = &after.imported.body[index] else {
+        unreachable!("table");
+    };
+    assert_eq!(cell_text(table, 0, 0), "Inside");
+    assert_grid(&table.grid_pt, &[width, width]);
+    assert_eq!(table.rows.len(), 2);
+    assert_single_borders(&bytes, index);
+}
+
+fn table_between(body: &[Block], before: &str, after: &str) -> usize {
+    body.iter()
+        .enumerate()
+        .find_map(|(index, block)| {
+            if !matches!(block, Block::Table(_)) {
+                return None;
+            }
+            let previous = index.checked_sub(1).map(|at| text_of_block(&body[at]));
+            let next = body.get(index + 1).map(text_of_block);
+            (previous.as_deref() == Some(before) && next.as_deref() == Some(after)).then_some(index)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "table not between {before:?} and {after:?}: {:?}",
+                body.iter().map(text_of_block).collect::<Vec<_>>()
+            )
+        })
+}
+
+#[test]
+fn table_rows_insert_above_below_and_in_the_middle_and_delete() {
+    let (session, before) = opened("basic.docx");
+    let original = fixture_table(&before.imported);
+
+    let mut above = original.clone();
+    above
+        .rows
+        .insert(0, row_with_text(&original.rows[0], "Above"));
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, above));
+    let table = only_table(&after.imported);
+    assert_eq!(table.rows.len(), 4);
+    assert_eq!(row_texts(table, 0), vec!["Above", "", ""]);
+    assert_eq!(cell_text(table, 1, 0), "Item");
+    assert_grid(&table.grid_pt, &original.grid_pt);
+
+    let mut below = original.clone();
+    below
+        .rows
+        .push(row_with_text(original.rows.last().expect("row"), "Below"));
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, below));
+    let table = only_table(&after.imported);
+    assert_eq!(table.rows.len(), 4);
+    assert_eq!(cell_text(table, 2, 0), "Pears");
+    assert_eq!(row_texts(table, 3), vec!["Below", "", ""]);
+
+    let mut middle = original.clone();
+    middle
+        .rows
+        .insert(1, row_with_text(&original.rows[1], "Middle"));
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, middle));
+    let table = only_table(&after.imported);
+    assert_eq!(cell_text(table, 0, 0), "Item");
+    assert_eq!(row_texts(table, 1), vec!["Middle", "", ""]);
+    assert_eq!(cell_text(table, 2, 0), "Apples");
+
+    let mut deleted = original.clone();
+    deleted.rows.remove(1);
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, deleted));
+    let table = only_table(&after.imported);
+    assert_eq!(table.rows.len(), 2);
+    assert_eq!(cell_text(table, 0, 0), "Item");
+    assert_eq!(cell_text(table, 1, 0), "Pears");
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+}
+
+#[test]
+fn table_columns_insert_at_each_edge_and_in_the_middle_and_delete() {
+    let (session, before) = opened("basic.docx");
+    let original = fixture_table(&before.imported);
+
+    let mut left = original.clone();
+    insert_grid_column(&mut left, 0);
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, left.clone()));
+    let table = only_table(&after.imported);
+    assert_eq!(row_texts(table, 0), vec!["", "Item", "Qty", "Price"]);
+    assert_eq!(row_texts(table, 1), vec!["", "Apples", "3", "1.20"]);
+    assert_grid(&table.grid_pt, &left.grid_pt);
+
+    let mut right = original.clone();
+    insert_grid_column(&mut right, original.grid_pt.len());
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, right.clone()));
+    let table = only_table(&after.imported);
+    assert_eq!(row_texts(table, 0), vec!["Item", "Qty", "Price", ""]);
+    assert_grid(&table.grid_pt, &right.grid_pt);
+
+    let mut middle = original.clone();
+    insert_grid_column(&mut middle, 1);
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, middle.clone()));
+    let table = only_table(&after.imported);
+    assert_eq!(row_texts(table, 0), vec!["Item", "", "Qty", "Price"]);
+    assert_eq!(row_texts(table, 2), vec!["Pears", "", "5", "2.40"]);
+    assert_grid(&table.grid_pt, &middle.grid_pt);
+
+    let mut deleted = original.clone();
+    deleted.grid_pt.remove(1);
+    for row in &mut deleted.rows {
+        row.cells.remove(1);
+    }
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, deleted.clone()));
+    let table = only_table(&after.imported);
+    assert_eq!(row_texts(table, 0), vec!["Item", "Price"]);
+    assert_eq!(row_texts(table, 1), vec!["Apples", "1.20"]);
+    assert_eq!(row_texts(table, 2), vec!["Pears", "2.40"]);
+    assert_grid(&table.grid_pt, &deleted.grid_pt);
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+}
+
+#[test]
+fn table_row_column_and_text_save_together() {
+    let (session, before) = opened("basic.docx");
+    let mut table = fixture_table(&before.imported).clone();
+    table.grid_pt.remove(1);
+    for row in &mut table.rows {
+        row.cells.remove(1);
+    }
+    set_cell_text(&mut table, 1, 0, "Oranges");
+    table
+        .rows
+        .push(row_with_text(table.rows.last().expect("row"), "Mix"));
+    let (_, after) = saved_twice(&session, &table_patch(&before.imported, table.clone()));
+    let written = only_table(&after.imported);
+    assert_eq!(row_texts(written, 0), vec!["Item", "Price"]);
+    assert_eq!(row_texts(written, 1), vec!["Oranges", "1.20"]);
+    assert_eq!(row_texts(written, 2), vec!["Pears", "2.40"]);
+    assert_eq!(row_texts(written, 3), vec!["Mix", ""]);
+    assert_grid(&written.grid_pt, &table.grid_pt);
+}
+
+#[test]
+fn deleting_the_table_round_trips() {
+    let (session, before) = opened("basic.docx");
+    let mut patch = keep_patch(&before.imported);
+    patch
+        .body
+        .retain(|block| !matches!(block, PatchBlock::Keep { keep } if *keep == 14));
+    let (_, after) = saved_twice(&session, &patch);
+    assert!(
+        after
+            .imported
+            .body
+            .iter()
+            .all(|block| !matches!(block, Block::Table(_)))
+    );
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+}
+
+#[test]
+fn nested_table_before_the_edited_table_does_not_shift_the_edit() {
+    let mut doc = Document::new();
+    doc.add_paragraph("Before");
+    {
+        let mut outer = doc.add_table(1, 1);
+        let mut cell = outer.cell(0, 0).expect("outer cell");
+        cell.try_set_text("outer").expect("outer text");
+        let mut nested = cell.add_table(1, 1);
+        nested
+            .cell(0, 0)
+            .expect("nested cell")
+            .try_set_text("nested-marker")
+            .expect("nested text");
+    }
+    doc.add_paragraph("Between");
+    {
+        let mut second = doc.add_table(2, 1);
+        second
+            .cell(0, 0)
+            .expect("second cell")
+            .try_set_text("second-marker")
+            .expect("second text");
+        second
+            .cell(1, 0)
+            .expect("second row")
+            .try_set_text("second-row")
+            .expect("second row text");
+    }
+    // Finding 7 said table_mut counts nested tables. body.tables() does not:
+    // the nested table is inside a cell, so the second body table is index 1.
+    assert_eq!(
+        doc.table_count(),
+        2,
+        "a nested table is not a table_mut index"
+    );
+    assert!(doc.table(2).is_none());
+    let marker = doc
+        .table(1)
+        .expect("second table")
+        .cell(0, 0)
+        .expect("cell")
+        .text();
+    assert!(
+        marker.contains("second-marker"),
+        "table_mut(1) is the second body table, got {marker}"
+    );
+    let bytes = doc.to_bytes().expect("bytes");
+    let session = Session::from_bytes(&bytes).expect("synthetic document");
+    let before = import::import(&Document::from_bytes(&bytes).expect("reopen"));
+    let mut edited = before
+        .imported
+        .body
+        .iter()
+        .find_map(|block| match block {
+            Block::Table(table) if table_text(table).contains("second-marker") => {
+                Some(table.clone())
+            }
+            _ => None,
+        })
+        .expect("second table");
+    let template = edited.rows.last().expect("row").clone();
+    edited.rows.push(row_with_text(&template, "Added"));
+    let src = edited.src.expect("table src");
+    let patch = patch_replacing(
+        &before.imported,
+        src,
+        vec![PatchBlock::Changed(Block::Table(edited))],
+    );
+    let (_, after) = saved_twice(&session, &patch);
+    let second = after
+        .imported
+        .body
+        .iter()
+        .find_map(|block| match block {
+            Block::Table(table) if table_text(table).contains("second-marker") => Some(table),
+            _ => None,
+        })
+        .expect("edited table");
+    assert_eq!(second.rows.len(), 3, "the second body table gained the row");
+    assert_eq!(cell_text(second, 2, 0), "Added");
+    let outer = after
+        .imported
+        .body
+        .iter()
+        .find_map(|block| match block {
+            Block::Table(table) if table_text(table).contains("nested-marker") => Some(table),
+            _ => None,
+        })
+        .expect("outer table");
+    assert_eq!(
+        outer.rows.len(),
+        1,
+        "the nested table did not take the edit"
+    );
+    let nested = nested_table(outer);
+    assert_eq!(nested.rows.len(), 1);
+    assert!(table_text(nested).contains("nested-marker"));
+}
+
+fn table_text(table: &Table) -> String {
+    let mut text = String::new();
+    for row in &table.rows {
+        for cell in &row.cells {
+            for block in &cell.blocks {
+                match block {
+                    Block::P(para) => text.push_str(&text_of(para)),
+                    Block::Table(nested) => text.push_str(&table_text(nested)),
+                    Block::Opaque(_) => {}
+                }
+            }
+        }
+    }
+    text
+}
+
+fn nested_table(table: &Table) -> &Table {
+    table
+        .rows
+        .iter()
+        .flat_map(|row| row.cells.iter())
+        .flat_map(|cell| cell.blocks.iter())
+        .find_map(|block| match block {
+            Block::Table(nested) => Some(nested),
+            _ => None,
+        })
+        .expect("nested table")
+}
+
+#[test]
+fn reordered_cells_merged_cells_and_a_fresh_nested_table_return_write() {
+    let (session, before) = opened("basic.docx");
+    let original = fixture_table(&before.imported);
+
+    let mut cells = original.clone();
+    cells.rows[0].cells.swap(0, 2);
+    assert_contract(
+        &session,
+        &before,
+        &table_patch(&before.imported, cells),
+        "reordered cells",
+    );
+
+    let mut span = original.clone();
+    span.rows[0].cells[0].span = 2;
+    assert_contract(
+        &session,
+        &before,
+        &table_patch(&before.imported, span),
+        "merged cell span",
+    );
+
+    let mut merged = original.clone();
+    merged.rows[1].cells[0].v_merge = Some("restart".to_string());
+    assert_contract(
+        &session,
+        &before,
+        &table_patch(&before.imported, merged),
+        "merged cell vMerge",
+    );
+
+    let mut both = original.clone();
+    both.rows[0].cells[0].span = 2;
+    both.rows[0].cells[0].v_merge = Some("continue".to_string());
+    assert_contract(
+        &session,
+        &before,
+        &table_patch(&before.imported, both),
+        "merged cell span and vMerge",
+    );
+
+    let mut nested = original.clone();
+    nested.rows[0].cells[0]
+        .blocks
+        .insert(0, Block::Table(fresh_table(1, 1, 72.0)));
+    assert_contract(
+        &session,
+        &before,
+        &table_patch(&before.imported, nested),
+        "fresh table inside a table cell",
+    );
+
+    let empty = Table::new(None, vec![120.0], Vec::new());
+    assert_contract(
+        &session,
+        &before,
+        &Patch {
+            body: vec![PatchBlock::Changed(Block::Table(empty))],
+            sections: before.imported.sections.clone(),
+            new_lists: Vec::new(),
+            added_styles: Vec::new(),
+        },
+        "inserted table has no cells",
+    );
+}
+
+#[test]
+fn inserting_twenty_rows_prints_the_save_time() {
+    let (session, before) = opened("basic.docx");
+    let mut table = fixture_table(&before.imported).clone();
+    let template = table.rows.last().expect("row").clone();
+    for index in 0..20 {
+        table
+            .rows
+            .push(row_with_text(&template, &format!("Row {index}")));
+    }
+    let patch = table_patch(&before.imported, table);
+    let started = std::time::Instant::now();
+    let written = save(&session, &patch);
+    let elapsed = started.elapsed();
+    println!("20 row insert save: {} ms", elapsed.as_millis());
+    let after = reopen(&written);
+    let table = only_table(&after.imported);
+    assert_eq!(table.rows.len(), 23);
+    assert_eq!(cell_text(table, 22, 0), "Row 19");
+    let again = save(&session, &patch);
+    assert_eq!(after.imported, reopen(&again).imported);
 }

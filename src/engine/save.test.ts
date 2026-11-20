@@ -369,11 +369,9 @@ test('save writes an edit, a bold run and a fresh list', () => {
 })
 
 // A write refusal is accepted only when its detail is one of the contracts the
-// save design leaves unread: tables, images, hyperlinks, column breaks,
-// fields and other unmodeled children. A defect such as a bad split point is not.
+// save design leaves unread: images, hyperlinks, column breaks, fields and
+// other unmodeled children. A defect such as a bad split point is not.
 const OUT_OF_SCOPE = [
-  'inserted tables',
-  'row and column changes',
   'inserted images',
   'hyperlink',
   'section break',

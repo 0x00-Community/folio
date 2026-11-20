@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rdocx::{
-    Alignment, BreakKind, Document, Length, ListLevel, ListNumberFormat, Paragraph, Run,
-    RunFontSlot, RunItemRef, RunRef, StyleBuilder, Twips, UnderlineStyle,
+    Alignment, BorderStyle, BreakKind, Document, Length, ListLevel, ListNumberFormat, Paragraph,
+    Run, RunFontSlot, RunItemRef, RunRef, StyleBuilder, Twips, UnderlineStyle, VMerge,
 };
 
 use crate::import::{self, ParaAddr, SourceMap};
@@ -64,11 +64,14 @@ pub struct Plan {
 pub enum Step {
     /// Pristine paragraphs `sources` become `finals`, joined then split.
     Region(Region),
-    /// A paragraph the patch created, inserted after the pristine content index (`None` is the start).
+    /// A block the patch created, inserted after the pristine content index (`None` is the start).
+    ///
+    /// A table between the halves of a split paragraph is not this step. It is stored on the
+    /// region and written after the split.
     Insert { after: Option<usize>, block: Block },
     /// A table or opaque block the patch dropped. Paragraphs are not removed this way.
     Remove { content_index: usize },
-    /// A table whose grid and cells are unchanged and whose paragraphs may have been edited.
+    /// A table that was in the opened document. Rows, columns, and cell text may have changed.
     Table { content_index: usize, table: Table },
 }
 
@@ -82,6 +85,12 @@ pub struct Region {
     pub paragraphs: Vec<usize>,
     pub gaps: Vec<usize>,
     pub finals: Vec<Para>,
+    /// Fresh blocks inserted after each final, in document order.
+    ///
+    /// `between[i]` follows final `i`. A table placed between the two halves of a
+    /// split paragraph is stored here and written after the split, so it does not
+    /// land after the tail.
+    pub between: Vec<Vec<Block>>,
 }
 
 /// Stage `patch` onto a clone of `pristine`.
@@ -216,6 +225,7 @@ pub fn plan(
     imported: &wire::Imported,
     body: &[PatchBlock],
 ) -> Result<Plan, WriteError> {
+    check_table_contracts(imported, body)?;
     check_run_order(imported, body)?;
     let slots = body_slots(sources, &imported.body)?;
     let mut by_src = HashMap::new();
@@ -256,9 +266,6 @@ pub fn plan(
                 items.push(item_from_block(block, false)?);
             }
         }
-    }
-    if items.iter().any(|item| matches!(item, Item::InsertTable)) {
-        return Err(contract("inserted tables"));
     }
 
     let para_positions: Vec<usize> = slots
@@ -354,7 +361,12 @@ pub fn plan(
     let mut seq = 0usize;
     let mut staged: Vec<(SortKey, Step)> = Vec::new();
     let mut last_content: Option<usize> = None;
-    for (item, links) in items.iter().zip(linked.iter()) {
+    let mut open: Option<OpenRegion> = None;
+    // Fresh blocks that sit between two finals of one region. Applied with that
+    // region, after the split, so a table between the halves is not written
+    // after the tail.
+    let mut pending: Vec<(usize, usize, Block)> = Vec::new();
+    for (index, (item, links)) in items.iter().zip(linked.iter()).enumerate() {
         match item {
             Item::Para { para, kept } => {
                 let Some(links) = links else { continue };
@@ -362,18 +374,21 @@ pub fn plan(
                     if para.lock.is_some() {
                         return Err(contract("locked paragraph"));
                     }
-                    staged.push((
-                        SortKey {
-                            pos: last_content.map(|index| index as isize).unwrap_or(-1),
-                            rank: 1,
-                            seq,
+                    place_fresh(
+                        Block::P(para.clone()),
+                        &mut FreshPlace {
+                            open,
+                            next_root: next_para_root(
+                                &items[index + 1..],
+                                &linked[index + 1..],
+                                &mut uf,
+                            ),
+                            pending: &mut pending,
+                            staged: &mut staged,
+                            last_content,
+                            seq: &mut seq,
                         },
-                        Step::Insert {
-                            after: last_content,
-                            block: Block::P(para.clone()),
-                        },
-                    ));
-                    seq += 1;
+                    );
                     continue;
                 }
                 let root = uf.find(links[0]);
@@ -384,21 +399,21 @@ pub fn plan(
                 kept_final[root].push(*kept);
                 let end = group_end(&groups[root], &para_positions, &slots);
                 last_content = Some(end);
+                open = Some(OpenRegion {
+                    root,
+                    final_index: finals[root].len() - 1,
+                });
             }
             Item::Table { table, kept } => {
-                let src = table.src.ok_or_else(|| contract("inserted tables"))?;
+                let src = table
+                    .src
+                    .ok_or_else(|| contract("table is not in the opened document"))?;
                 let position = by_src[&src];
                 let content_index = slots[position].content_index;
                 last_content = Some(content_index);
+                open = None;
                 if *kept {
                     continue;
-                }
-                let pristine = match &slots[position].block {
-                    Block::Table(table) => table,
-                    _ => return Err(contract("table src is not a table")),
-                };
-                if table_shape_changed(pristine, table) {
-                    return Err(contract("row and column changes"));
                 }
                 staged.push((
                     SortKey {
@@ -413,10 +428,27 @@ pub fn plan(
                 ));
                 seq += 1;
             }
-            Item::InsertTable => return Err(contract("inserted tables")),
+            Item::InsertTable { table } => {
+                place_fresh(
+                    Block::Table(table.clone()),
+                    &mut FreshPlace {
+                        open,
+                        next_root: next_para_root(
+                            &items[index + 1..],
+                            &linked[index + 1..],
+                            &mut uf,
+                        ),
+                        pending: &mut pending,
+                        staged: &mut staged,
+                        last_content,
+                        seq: &mut seq,
+                    },
+                );
+            }
             Item::Opaque { src } => {
                 let position = by_src[src];
                 last_content = Some(slots[position].content_index);
+                open = None;
             }
         }
     }
@@ -432,13 +464,26 @@ pub fn plan(
                 "deleted paragraph is not next to a surviving paragraph",
             ));
         }
-        if flags.iter().all(|kept| *kept)
+        let mut between = vec![Vec::new(); group_finals.len()];
+        for (pend_root, after_final, block) in &pending {
+            if *pend_root != root {
+                continue;
+            }
+            let Some(slot) = between.get_mut(*after_final) else {
+                return Err(contract("insert is outside its region"));
+            };
+            slot.push(block.clone());
+        }
+        let unchanged = flags.iter().all(|kept| *kept)
             && group_finals.len() == ordinals.len()
             && group_finals
                 .iter()
                 .zip(ordinals.iter())
-                .all(|(para, ordinal)| para.src == Some(slots[para_positions[*ordinal]].src))
-        {
+                .all(|(para, ordinal)| para.src == Some(slots[para_positions[*ordinal]].src));
+        if unchanged {
+            if between.iter().any(|blocks| !blocks.is_empty()) {
+                return Err(contract("insert is outside its region"));
+            }
             continue;
         }
         let src = group_finals[0]
@@ -492,6 +537,7 @@ pub fn plan(
                 paragraphs,
                 gaps,
                 finals: group_finals.clone(),
+                between,
             }),
         ));
         seq += 1;
@@ -567,7 +613,7 @@ enum Item {
     Para { para: Para, kept: bool },
     Table { table: Table, kept: bool },
     Opaque { src: u32 },
-    InsertTable,
+    InsertTable { table: Table },
 }
 
 fn item_from_block(block: &Block, kept: bool) -> Result<Item, WriteError> {
@@ -581,7 +627,9 @@ fn item_from_block(block: &Block, kept: bool) -> Result<Item, WriteError> {
         }
         Block::Table(table) => {
             if table.src.is_none() {
-                Ok(Item::InsertTable)
+                Ok(Item::InsertTable {
+                    table: table.clone(),
+                })
             } else {
                 Ok(Item::Table {
                     table: table.clone(),
@@ -733,6 +781,106 @@ fn group_end(ordinals: &[usize], para_positions: &[usize], slots: &[Slot]) -> us
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy)]
+struct OpenRegion {
+    root: usize,
+    final_index: usize,
+}
+
+struct FreshPlace<'a> {
+    open: Option<OpenRegion>,
+    next_root: Option<usize>,
+    pending: &'a mut Vec<(usize, usize, Block)>,
+    staged: &'a mut Vec<(SortKey, Step)>,
+    last_content: Option<usize>,
+    seq: &'a mut usize,
+}
+
+/// A fresh block that sits between two finals of one region is applied with that region.
+/// Anything else is inserted after the previous pristine block.
+fn place_fresh(block: Block, place: &mut FreshPlace<'_>) {
+    if let (Some(open), Some(root)) = (place.open, place.next_root)
+        && open.root == root
+    {
+        place.pending.push((open.root, open.final_index, block));
+        return;
+    }
+    let seq = *place.seq;
+    *place.seq += 1;
+    place.staged.push((
+        SortKey {
+            pos: place.last_content.map(|index| index as isize).unwrap_or(-1),
+            rank: 1,
+            seq,
+        },
+        Step::Insert {
+            after: place.last_content,
+            block,
+        },
+    ));
+}
+
+fn next_para_root(
+    items: &[Item],
+    linked: &[Option<Vec<usize>>],
+    uf: &mut UnionFind,
+) -> Option<usize> {
+    for (item, links) in items.iter().zip(linked) {
+        match item {
+            Item::Para { .. } => {
+                let Some(links) = links else {
+                    continue;
+                };
+                if links.is_empty() {
+                    continue;
+                }
+                return Some(uf.find(links[0]));
+            }
+            Item::InsertTable { .. } => continue,
+            Item::Table { .. } | Item::Opaque { .. } => return None,
+        }
+    }
+    None
+}
+
+fn check_table_contracts(imported: &wire::Imported, body: &[PatchBlock]) -> Result<(), WriteError> {
+    let mut by_src = HashMap::new();
+    index_blocks(&imported.body, &mut by_src);
+    for block in body {
+        let PatchBlock::Changed(block) = block else {
+            continue;
+        };
+        if let Block::Table(table) = block {
+            check_one_table(table, &by_src)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_one_table(table: &Table, by_src: &HashMap<u32, &Block>) -> Result<(), WriteError> {
+    if let Some(src) = table.src {
+        let Some(Block::Table(pristine)) = by_src.get(&src).copied() else {
+            return Err(contract("table is not in the opened document"));
+        };
+        let _ops = table_ops(pristine, table)?;
+    } else {
+        validate_inserted_table(table)?;
+    }
+    for row in &table.rows {
+        for cell in &row.cells {
+            if cell.src.is_none() {
+                reject_fresh_cell(cell)?;
+            }
+            for block in &cell.blocks {
+                if let Block::Table(nested) = block {
+                    check_one_table(nested, by_src)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_kept_atoms(
     slots: &[Slot],
     para_positions: &[usize],
@@ -861,7 +1009,7 @@ fn table_shape_changed(pristine: &Table, edited: &Table) -> bool {
             .grid_pt
             .iter()
             .zip(&edited.grid_pt)
-            .any(|(left, right)| (left - right).abs() > 0.05)
+            .any(|(left, right)| verify::grid_pt_differs(*left, *right))
     {
         return true;
     }
@@ -1011,8 +1159,19 @@ fn apply_region(
     if indices.windows(2).any(|pair| pair[1] != pair[0] + 1) {
         return Err(contract("region crosses a non-paragraph"));
     }
-    let mut loc = BodyLoc { doc };
-    apply_joined(&mut loc, &indices, &srcs, &region.finals, ctx)
+    {
+        let mut loc = BodyLoc { doc };
+        apply_joined(&mut loc, &indices, &srcs, &region.finals, ctx)?;
+    }
+    // Higher offsets first, and within an offset the later block first, so each
+    // insert lands at the same index and document order is preserved.
+    let start = *indices.first().expect("region has a paragraph");
+    for offset in (0..region.between.len()).rev() {
+        for block in region.between[offset].iter().rev() {
+            apply_insert_at(doc, start + offset + 1, block, ctx)?;
+        }
+    }
+    Ok(())
 }
 
 /// The paragraphs of one region, plus the dropped blocks that sit between them.
@@ -1067,15 +1226,25 @@ fn apply_insert(
     block: &Block,
     ctx: &mut Apply<'_>,
 ) -> Result<(), WriteError> {
-    let Block::P(para) = block else {
-        return Err(contract("inserted tables"));
-    };
     let index = after.map(|index| index + 1).unwrap_or(0);
-    {
-        let _paragraph = doc.insert_paragraph(index, "");
+    apply_insert_at(doc, index, block, ctx)
+}
+
+fn apply_insert_at(
+    doc: &mut Document,
+    index: usize,
+    block: &Block,
+    ctx: &mut Apply<'_>,
+) -> Result<(), WriteError> {
+    match block {
+        Block::P(para) => {
+            let _paragraph = doc.insert_paragraph(index, "");
+            let mut loc = BodyLoc { doc };
+            patch_paragraph(&mut loc, index, &[], para, ctx)
+        }
+        Block::Table(table) => insert_table_block(doc, index, table, ctx),
+        Block::Opaque(_) => Err(contract("opaque block")),
     }
-    let mut loc = BodyLoc { doc };
-    patch_paragraph(&mut loc, index, &[], para, ctx)
 }
 
 fn remove_content(
@@ -1213,21 +1382,81 @@ fn patch_table(
     ctx: &mut Apply<'_>,
 ) -> Result<(), WriteError> {
     let ordinal = table_ordinal(doc, content_index)?;
-    for (row_index, (pristine_row, edited_row)) in
-        pristine.rows.iter().zip(&edited.rows).enumerate()
-    {
-        for (cell_index, (pristine_cell, edited_cell)) in
-            pristine_row.cells.iter().zip(&edited_row.cells).enumerate()
+    if !table_shape_changed(pristine, edited) {
+        for (row_index, (pristine_row, edited_row)) in
+            pristine.rows.iter().zip(&edited.rows).enumerate()
         {
-            patch_cell(
-                doc,
-                ordinal,
-                row_index,
-                cell_index,
-                pristine_cell,
-                edited_cell,
-                ctx,
-            )?;
+            for (cell_index, (pristine_cell, edited_cell)) in
+                pristine_row.cells.iter().zip(&edited_row.cells).enumerate()
+            {
+                patch_cell(
+                    doc,
+                    ordinal,
+                    row_index,
+                    cell_index,
+                    pristine_cell,
+                    edited_cell,
+                    ctx,
+                )?;
+            }
+        }
+        return Ok(());
+    }
+    let ops = table_ops(pristine, edited)?;
+    apply_row_ops(doc, ordinal, pristine.rows.len(), &ops.rows)?;
+    apply_column_ops(doc, ordinal, &ops.columns)?;
+    sync_grid(doc, ordinal, &edited.grid_pt)?;
+    let rows_now = doc
+        .table(ordinal)
+        .map(|table| table.row_count())
+        .ok_or_else(|| contract("table is out of range"))?;
+    if rows_now != edited.rows.len() {
+        return Err(contract("table grid"));
+    }
+    let mut final_rows = Vec::new();
+    for op in &ops.rows {
+        match op {
+            RowOp::Remove { .. } => {}
+            RowOp::Keep { pristine: index } => final_rows.push(Some(*index)),
+            RowOp::Insert { .. } => final_rows.push(None),
+        }
+    }
+    for (row_index, edited_row) in edited.rows.iter().enumerate() {
+        let pristine_index = final_rows
+            .get(row_index)
+            .copied()
+            .ok_or_else(|| contract("table grid"))?;
+        let rewrite_flags = match pristine_index {
+            Some(index) => {
+                let had = &pristine.rows[index];
+                had.header != edited_row.header || had.cant_split != edited_row.cant_split
+            }
+            None => true,
+        };
+        if rewrite_flags {
+            set_row_flags(doc, ordinal, row_index, edited_row)?;
+        }
+        let cells_now = cell_count(doc, ordinal, row_index)?;
+        if cells_now != edited_row.cells.len() {
+            return Err(contract("table grid"));
+        }
+        for (cell_index, edited_cell) in edited_row.cells.iter().enumerate() {
+            if let Some(src) = edited_cell.src {
+                let pristine_cell = find_cell(pristine, src)
+                    .ok_or_else(|| contract(format!("cell {src} is not in the opened table")))?;
+                patch_cell(
+                    doc,
+                    ordinal,
+                    row_index,
+                    cell_index,
+                    pristine_cell,
+                    edited_cell,
+                    ctx,
+                )?;
+            } else {
+                fill_fresh_cell(doc, ordinal, row_index, cell_index, edited_cell, ctx)?;
+                sync_vmerge(doc, ordinal, row_index, cell_index, &edited_cell.v_merge)?;
+            }
         }
     }
     Ok(())
@@ -1250,6 +1479,764 @@ fn table_ordinal(doc: &Document, content_index: usize) -> Result<usize, WriteErr
     Err(contract(format!(
         "table at content {content_index} is missing"
     )))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColOp {
+    Insert { at: usize },
+    Remove { at: usize },
+}
+
+enum RowOp {
+    Keep { pristine: usize },
+    Insert { template: usize },
+    Remove { pristine: usize },
+}
+
+struct TableOps {
+    rows: Vec<RowOp>,
+    columns: Vec<ColOp>,
+}
+
+enum AlignOp {
+    Keep { pristine: usize, edited: usize },
+    Insert { edited: usize },
+    Remove { pristine: usize },
+}
+
+fn table_ops(pristine: &Table, edited: &Table) -> Result<TableOps, WriteError> {
+    let row_srcs: Vec<Option<u32>> = pristine.rows.iter().map(|row| row.src).collect();
+    let edited_srcs: Vec<Option<u32>> = edited.rows.iter().map(|row| row.src).collect();
+    let aligned = align_by_src(&row_srcs, &edited_srcs, "reordered rows", "row")?;
+    let mut columns: Option<Vec<ColOp>> = None;
+    for op in &aligned {
+        let AlignOp::Keep {
+            pristine: row_index,
+            edited: edited_index,
+        } = op
+        else {
+            continue;
+        };
+        let cell_ops = align_cells(&pristine.rows[*row_index], &edited.rows[*edited_index])?;
+        let derived = column_ops_from(&pristine.rows[*row_index], &cell_ops)?;
+        if let Some(existing) = &columns {
+            if existing != &derived {
+                return Err(contract("reordered cells"));
+            }
+        } else {
+            columns = Some(derived);
+        }
+    }
+    let columns = match columns {
+        Some(columns) => columns,
+        None if edited.grid_pt.len() == pristine.grid_pt.len() => Vec::new(),
+        None => return Err(contract("reordered cells")),
+    };
+    for op in &aligned {
+        match op {
+            AlignOp::Insert { edited: index } => {
+                for cell in &edited.rows[*index].cells {
+                    reject_fresh_cell(cell)?;
+                }
+            }
+            AlignOp::Keep { .. } | AlignOp::Remove { .. } => {}
+        }
+    }
+    let mut rows = Vec::new();
+    for op in aligned {
+        match op {
+            AlignOp::Keep {
+                pristine: index, ..
+            } => rows.push(RowOp::Keep { pristine: index }),
+            AlignOp::Remove { pristine: index } => rows.push(RowOp::Remove { pristine: index }),
+            AlignOp::Insert { edited: index } => rows.push(RowOp::Insert {
+                template: template_row(pristine, edited, index, &columns)?,
+            }),
+        }
+    }
+    Ok(TableOps { rows, columns })
+}
+
+fn align_cells(pristine: &wire::Row, edited: &wire::Row) -> Result<Vec<AlignOp>, WriteError> {
+    let pristine_srcs: Vec<Option<u32>> = pristine.cells.iter().map(|cell| cell.src).collect();
+    let edited_srcs: Vec<Option<u32>> = edited.cells.iter().map(|cell| cell.src).collect();
+    let aligned = align_by_src(&pristine_srcs, &edited_srcs, "reordered cells", "cell")?;
+    for op in &aligned {
+        match op {
+            AlignOp::Keep {
+                pristine: pristine_index,
+                edited: edited_index,
+            } => check_kept_cell(
+                &pristine.cells[*pristine_index],
+                &edited.cells[*edited_index],
+            )?,
+            AlignOp::Insert { edited: index } => reject_fresh_cell(&edited.cells[*index])?,
+            AlignOp::Remove { .. } => {}
+        }
+    }
+    Ok(aligned)
+}
+
+fn align_by_src(
+    pristine: &[Option<u32>],
+    edited: &[Option<u32>],
+    reordered: &str,
+    missing: &str,
+) -> Result<Vec<AlignOp>, WriteError> {
+    let mut next = 0usize;
+    let mut ops = Vec::new();
+    for (edited_index, src) in edited.iter().enumerate() {
+        let Some(src) = src else {
+            ops.push(AlignOp::Insert {
+                edited: edited_index,
+            });
+            continue;
+        };
+        let found = pristine[next..]
+            .iter()
+            .position(|item| *item == Some(*src))
+            .map(|offset| next + offset);
+        let Some(found) = found else {
+            if pristine[..next].contains(&Some(*src)) {
+                return Err(contract(reordered));
+            }
+            return Err(contract(format!(
+                "{missing} {src} is not in the opened table"
+            )));
+        };
+        for index in next..found {
+            ops.push(AlignOp::Remove { pristine: index });
+        }
+        ops.push(AlignOp::Keep {
+            pristine: found,
+            edited: edited_index,
+        });
+        next = found + 1;
+    }
+    for index in next..pristine.len() {
+        ops.push(AlignOp::Remove { pristine: index });
+    }
+    Ok(ops)
+}
+
+fn check_kept_cell(pristine: &wire::Cell, edited: &wire::Cell) -> Result<(), WriteError> {
+    match (
+        pristine.span != edited.span,
+        pristine.v_merge != edited.v_merge,
+    ) {
+        (true, true) => return Err(contract("merged cell span and vMerge")),
+        (true, false) => return Err(contract("merged cell span")),
+        (false, true) => return Err(contract("merged cell vMerge")),
+        (false, false) => {}
+    }
+    if non_para_srcs(&pristine.blocks) != non_para_srcs(&edited.blocks) {
+        if edited
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table(table) if table.src.is_none()))
+        {
+            return Err(contract("fresh table inside a table cell"));
+        }
+        return Err(contract("nested table"));
+    }
+    Ok(())
+}
+
+fn reject_fresh_cell(cell: &wire::Cell) -> Result<(), WriteError> {
+    for block in &cell.blocks {
+        match block {
+            Block::P(_) => {}
+            Block::Table(table) if table.src.is_none() => {
+                return Err(contract("fresh table inside a table cell"));
+            }
+            Block::Table(_) => return Err(contract("nested table")),
+            Block::Opaque(_) => return Err(contract("opaque block")),
+        }
+    }
+    Ok(())
+}
+
+fn column_ops_from(row: &wire::Row, ops: &[AlignOp]) -> Result<Vec<ColOp>, WriteError> {
+    let mut column = 0usize;
+    let mut out = Vec::new();
+    for op in ops {
+        match op {
+            AlignOp::Keep { pristine, .. } => {
+                column += row.cells[*pristine].span as usize;
+            }
+            AlignOp::Remove { pristine } => {
+                let span = row.cells[*pristine].span;
+                if span != 1 {
+                    return Err(contract("merged cell span"));
+                }
+                out.push(ColOp::Remove { at: column });
+                column += 1;
+            }
+            AlignOp::Insert { .. } => out.push(ColOp::Insert { at: column }),
+        }
+    }
+    Ok(out)
+}
+
+fn template_row(
+    pristine: &Table,
+    edited: &Table,
+    edited_index: usize,
+    columns: &[ColOp],
+) -> Result<usize, WriteError> {
+    let want: Vec<u32> = edited.rows[edited_index]
+        .cells
+        .iter()
+        .map(|cell| cell.span)
+        .collect();
+    let mut candidates = Vec::new();
+    if let Some(src) = edited.rows[..edited_index]
+        .iter()
+        .rev()
+        .find_map(|row| row.src)
+        && let Some(index) = pristine.rows.iter().position(|row| row.src == Some(src))
+    {
+        candidates.push(index);
+    }
+    if let Some(src) = edited.rows[edited_index + 1..]
+        .iter()
+        .find_map(|row| row.src)
+        && let Some(index) = pristine.rows.iter().position(|row| row.src == Some(src))
+    {
+        candidates.push(index);
+    }
+    if candidates.is_empty() {
+        return Err(contract("inserted row has no neighbor"));
+    }
+    for index in &candidates {
+        if spans_after(&pristine.rows[*index], columns).as_ref() == Some(&want) {
+            return Ok(*index);
+        }
+    }
+    Ok(candidates[0])
+}
+
+fn spans_after(row: &wire::Row, ops: &[ColOp]) -> Option<Vec<u32>> {
+    let mut owners = Vec::new();
+    for (index, cell) in row.cells.iter().enumerate() {
+        if cell.span == 0 {
+            return None;
+        }
+        for _ in 0..cell.span {
+            owners.push(index);
+        }
+    }
+    let mut removes: Vec<usize> = ops
+        .iter()
+        .filter_map(|op| match op {
+            ColOp::Remove { at } => Some(*at),
+            ColOp::Insert { .. } => None,
+        })
+        .collect();
+    removes.sort_unstable();
+    removes.dedup();
+    for at in removes.iter().rev().copied() {
+        if at >= owners.len() {
+            return None;
+        }
+        owners.remove(at);
+    }
+    let mut inserts: Vec<(usize, usize)> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(seq, op)| match op {
+            ColOp::Insert { at } => Some((*at, seq)),
+            ColOp::Remove { .. } => None,
+        })
+        .collect();
+    inserts.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    for (at, _) in inserts.into_iter().rev() {
+        let removed_before = removes.iter().filter(|column| **column < at).count();
+        let index = at.checked_sub(removed_before)?;
+        let index = index.min(owners.len());
+        owners.insert(index, usize::MAX);
+    }
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < owners.len() {
+        let owner = owners[cursor];
+        let mut width = 1usize;
+        if owner != usize::MAX {
+            while cursor + width < owners.len() && owners[cursor + width] == owner {
+                width += 1;
+            }
+        }
+        spans.push(u32::try_from(width).ok()?);
+        cursor += width;
+    }
+    Some(spans)
+}
+
+fn validate_inserted_table(table: &Table) -> Result<(), WriteError> {
+    if table.rows.is_empty() || table.grid_pt.is_empty() {
+        return Err(contract("inserted table has no cells"));
+    }
+    if table
+        .grid_pt
+        .iter()
+        .any(|width| !width.is_finite() || *width <= 0.0)
+    {
+        return Err(contract("inserted table grid"));
+    }
+    let columns = table.grid_pt.len();
+    for row in &table.rows {
+        let merged = row.cells.iter().any(|cell| cell.span != 1);
+        let vertical = row.cells.iter().any(|cell| cell.v_merge.is_some());
+        match (merged, vertical) {
+            (true, true) => return Err(contract("merged cell span and vMerge")),
+            (true, false) => return Err(contract("merged cell span")),
+            (false, true) => return Err(contract("merged cell vMerge")),
+            (false, false) => {}
+        }
+        if row.cells.len() != columns {
+            return Err(contract("inserted table grid"));
+        }
+        if row.cells.iter().any(|cell| cell.src.is_some()) {
+            return Err(contract("inserted table cell has a src"));
+        }
+    }
+    Ok(())
+}
+
+fn apply_row_ops(
+    doc: &mut Document,
+    ordinal: usize,
+    pristine_len: usize,
+    ops: &[RowOp],
+) -> Result<(), WriteError> {
+    if let Some(count) = trailing_appends(ops, pristine_len) {
+        // clone_table_row reopens the package. Appending copies the last row in
+        // place, which is the row insertRow('below') builds under the last row.
+        for _ in 0..count {
+            let mut table = doc
+                .table_mut(ordinal)
+                .ok_or_else(|| contract("table is out of range"))?;
+            table.add_row()?;
+        }
+        return Ok(());
+    }
+    let mut removes: Vec<usize> = ops
+        .iter()
+        .filter_map(|op| match op {
+            RowOp::Remove { pristine } => Some(*pristine),
+            _ => None,
+        })
+        .collect();
+    removes.sort_unstable();
+    for index in removes.iter().rev().copied() {
+        let removed = doc.remove_table_row(ordinal, index)?;
+        if !removed {
+            return Err(contract("row was not removed"));
+        }
+    }
+    // Final indexes of the inserted rows. Applying the highest first keeps the
+    // lower index equal to the number of kept rows before that insert.
+    let mut placed = Vec::new();
+    let mut cursor = 0usize;
+    for op in ops {
+        match op {
+            RowOp::Remove { .. } => {}
+            RowOp::Keep { .. } => cursor += 1,
+            RowOp::Insert { template } => {
+                placed.push((cursor, *template));
+                cursor += 1;
+            }
+        }
+    }
+    let positions: Vec<usize> = placed.iter().map(|(at, _)| *at).collect();
+    for (at, template) in placed.into_iter().rev() {
+        let earlier = positions.iter().filter(|index| **index < at).count();
+        let index = at - earlier;
+        let template_now = template
+            .checked_sub(removes.iter().filter(|row| **row < template).count())
+            .ok_or_else(|| contract("inserted row has no neighbor"))?;
+        let rows_now = doc
+            .table(ordinal)
+            .map(|table| table.row_count())
+            .ok_or_else(|| contract("table is out of range"))?;
+        if index == rows_now && template_now + 1 == rows_now {
+            let mut table = doc
+                .table_mut(ordinal)
+                .ok_or_else(|| contract("table is out of range"))?;
+            table.add_row()?;
+        } else {
+            doc.clone_table_row(ordinal, template_now, index)?;
+            strip_cloned_row(doc, ordinal, index)?;
+        }
+    }
+    Ok(())
+}
+
+fn trailing_appends(ops: &[RowOp], pristine_len: usize) -> Option<usize> {
+    if pristine_len == 0 {
+        return None;
+    }
+    let mut count = 0usize;
+    for op in ops.iter().rev() {
+        match op {
+            RowOp::Insert { template } if *template + 1 == pristine_len => count += 1,
+            RowOp::Keep { .. } => break,
+            RowOp::Insert { .. } | RowOp::Remove { .. } => return None,
+        }
+    }
+    if count == 0 || ops.len() < count {
+        return None;
+    }
+    let prefix = &ops[..ops.len() - count];
+    let kept = prefix.len() == pristine_len
+        && prefix
+            .iter()
+            .enumerate()
+            .all(|(index, op)| matches!(op, RowOp::Keep { pristine } if *pristine == index));
+    kept.then_some(count)
+}
+
+fn apply_column_ops(doc: &mut Document, ordinal: usize, ops: &[ColOp]) -> Result<(), WriteError> {
+    let mut removes: Vec<usize> = ops
+        .iter()
+        .filter_map(|op| match op {
+            ColOp::Remove { at } => Some(*at),
+            ColOp::Insert { .. } => None,
+        })
+        .collect();
+    removes.sort_unstable();
+    removes.dedup();
+    for at in removes.iter().rev().copied() {
+        doc.delete_table_column(ordinal, at)?;
+    }
+    let mut inserts: Vec<(usize, usize)> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(seq, op)| match op {
+            ColOp::Insert { at } => Some((*at, seq)),
+            ColOp::Remove { .. } => None,
+        })
+        .collect();
+    inserts.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    for (at, _) in inserts.into_iter().rev() {
+        let removed_before = removes.iter().filter(|column| **column < at).count();
+        let index = at
+            .checked_sub(removed_before)
+            .ok_or_else(|| contract("table grid"))?;
+        insert_one_column(doc, ordinal, index)?;
+    }
+    Ok(())
+}
+
+fn insert_one_column(doc: &mut Document, ordinal: usize, index: usize) -> Result<(), WriteError> {
+    let width = doc
+        .table(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?
+        .grid_widths()
+        .len();
+    if width == 0 {
+        return Err(contract("table grid"));
+    }
+    let mut table = doc
+        .table_mut(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    if index >= width {
+        table.insert_column(width - 1, false, None)?;
+    } else {
+        table.insert_column(index, true, None)?;
+    }
+    Ok(())
+}
+
+fn sync_grid(doc: &mut Document, ordinal: usize, grid: &[f64]) -> Result<(), WriteError> {
+    let current: Vec<f64> = doc
+        .table(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?
+        .grid_widths()
+        .into_iter()
+        .map(Length::to_pt)
+        .collect();
+    if current.len() != grid.len() {
+        return Err(contract("table grid"));
+    }
+    if current
+        .iter()
+        .zip(grid)
+        .all(|(left, right)| !verify::grid_pt_differs(*left, *right))
+    {
+        return Ok(());
+    }
+    let widths: Vec<Length> = grid.iter().copied().map(length_pt).collect();
+    let mut table = doc
+        .table_mut(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    table.set_grid_widths(&widths)?;
+    Ok(())
+}
+
+fn set_row_flags(
+    doc: &mut Document,
+    ordinal: usize,
+    index: usize,
+    row: &wire::Row,
+) -> Result<(), WriteError> {
+    let mut table = doc
+        .table_mut(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    let mut row_ref = table
+        .row(index)
+        .ok_or_else(|| contract("row is out of range"))?;
+    row_ref.set_header_value(row.header.then_some(true));
+    row_ref.set_cant_split_value(row.cant_split.then_some(true));
+    Ok(())
+}
+
+fn cell_count(doc: &Document, ordinal: usize, row: usize) -> Result<usize, WriteError> {
+    let table = doc
+        .table(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    let row = table
+        .row(row)
+        .ok_or_else(|| contract("row is out of range"))?;
+    Ok(row.cell_count())
+}
+
+fn find_cell(table: &Table, src: u32) -> Option<&wire::Cell> {
+    table
+        .rows
+        .iter()
+        .flat_map(|row| row.cells.iter())
+        .find(|cell| cell.src == Some(src))
+}
+
+fn fill_fresh_cell(
+    doc: &mut Document,
+    ordinal: usize,
+    row: usize,
+    cell_index: usize,
+    edited: &wire::Cell,
+    ctx: &mut Apply<'_>,
+) -> Result<(), WriteError> {
+    prepare_fresh_cell(doc, ordinal, row, cell_index)?;
+    let paras: Vec<&Para> = edited
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::P(para) => Some(para),
+            _ => None,
+        })
+        .collect();
+    for _ in 1..paras.len() {
+        let mut table = doc
+            .table_mut(ordinal)
+            .ok_or_else(|| contract("table is out of range"))?;
+        let mut cell = table
+            .cell(row, cell_index)
+            .ok_or_else(|| contract("cell is out of range"))?;
+        let _paragraph = cell.add_paragraph("");
+    }
+    for (index, para) in paras.iter().enumerate() {
+        let mut loc = CellLoc {
+            doc,
+            ordinal,
+            row,
+            cell: cell_index,
+        };
+        patch_paragraph(&mut loc, index, &[], para, ctx)?;
+    }
+    Ok(())
+}
+
+fn prepare_fresh_cell(
+    doc: &mut Document,
+    ordinal: usize,
+    row: usize,
+    cell_index: usize,
+) -> Result<(), WriteError> {
+    match cell_story(doc, ordinal, row, cell_index)? {
+        CellStory::Nested => return Err(contract("nested table")),
+        CellStory::Opaque => return Err(contract("opaque block")),
+        CellStory::Paragraphs => {}
+    }
+    loop {
+        let count = paragraph_count(doc, ordinal, row, cell_index)?;
+        if count <= 1 {
+            break;
+        }
+        let mut table = doc
+            .table_mut(ordinal)
+            .ok_or_else(|| contract("table is out of range"))?;
+        let mut cell = table
+            .cell(row, cell_index)
+            .ok_or_else(|| contract("cell is out of range"))?;
+        cell.join_paragraphs(0, rdocx::ParagraphPropertyKeep::First)?;
+    }
+    if paragraph_count(doc, ordinal, row, cell_index)? == 0 {
+        let mut table = doc
+            .table_mut(ordinal)
+            .ok_or_else(|| contract("table is out of range"))?;
+        let mut cell = table
+            .cell(row, cell_index)
+            .ok_or_else(|| contract("cell is out of range"))?;
+        let _paragraph = cell.add_paragraph("");
+    }
+    loop {
+        let runs = paragraph_run_count(doc, ordinal, row, cell_index)?;
+        if runs == 0 {
+            break;
+        }
+        let mut table = doc
+            .table_mut(ordinal)
+            .ok_or_else(|| contract("table is out of range"))?;
+        let mut cell = table
+            .cell(row, cell_index)
+            .ok_or_else(|| contract("cell is out of range"))?;
+        let mut paragraph = cell
+            .paragraph_mut(0)
+            .ok_or_else(|| contract("cell paragraph is missing"))?;
+        paragraph.remove_run(runs - 1)?;
+    }
+    Ok(())
+}
+
+enum CellStory {
+    Paragraphs,
+    Nested,
+    Opaque,
+}
+
+fn cell_story(
+    doc: &Document,
+    ordinal: usize,
+    row: usize,
+    cell_index: usize,
+) -> Result<CellStory, WriteError> {
+    let table = doc
+        .table(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    let cell = table
+        .cell(row, cell_index)
+        .ok_or_else(|| contract("cell is out of range"))?;
+    let mut nested = false;
+    let mut opaque = false;
+    for item in cell.items() {
+        match item {
+            rdocx::CellItemRef::Paragraph(_) => {}
+            rdocx::CellItemRef::Table(_) => nested = true,
+            _ => opaque = true,
+        }
+    }
+    Ok(if nested {
+        CellStory::Nested
+    } else if opaque {
+        CellStory::Opaque
+    } else {
+        CellStory::Paragraphs
+    })
+}
+
+fn paragraph_count(
+    doc: &Document,
+    ordinal: usize,
+    row: usize,
+    cell_index: usize,
+) -> Result<usize, WriteError> {
+    let table = doc
+        .table(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    let cell = table
+        .cell(row, cell_index)
+        .ok_or_else(|| contract("cell is out of range"))?;
+    Ok(cell.paragraph_count())
+}
+
+fn paragraph_run_count(
+    doc: &Document,
+    ordinal: usize,
+    row: usize,
+    cell_index: usize,
+) -> Result<usize, WriteError> {
+    let table = doc
+        .table(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    let cell = table
+        .cell(row, cell_index)
+        .ok_or_else(|| contract("cell is out of range"))?;
+    let paragraph = cell
+        .paragraph(0)
+        .ok_or_else(|| contract("cell paragraph is missing"))?;
+    Ok(paragraph.run_count())
+}
+
+fn strip_cloned_row(doc: &mut Document, ordinal: usize, row: usize) -> Result<(), WriteError> {
+    let cells = cell_count(doc, ordinal, row)?;
+    for cell in 0..cells {
+        prepare_fresh_cell(doc, ordinal, row, cell)?;
+        sync_vmerge(doc, ordinal, row, cell, &None)?;
+    }
+    Ok(())
+}
+
+fn sync_vmerge(
+    doc: &mut Document,
+    ordinal: usize,
+    row: usize,
+    cell_index: usize,
+    merge: &Option<String>,
+) -> Result<(), WriteError> {
+    let desired = match merge.as_deref() {
+        None => None,
+        Some("restart") => Some(VMerge::Restart),
+        Some("continue") => Some(VMerge::Continue),
+        Some(other) => return Err(contract(format!("vMerge {other}"))),
+    };
+    let current = {
+        let table = doc
+            .table(ordinal)
+            .ok_or_else(|| contract("table is out of range"))?;
+        table
+            .cell(row, cell_index)
+            .ok_or_else(|| contract("cell is out of range"))?
+            .v_merge()
+            .copied()
+    };
+    if current == desired {
+        return Ok(());
+    }
+    let mut table = doc
+        .table_mut(ordinal)
+        .ok_or_else(|| contract("table is out of range"))?;
+    table.set_cell_vertical_merge(row, cell_index, desired)?;
+    Ok(())
+}
+
+fn insert_table_block(
+    doc: &mut Document,
+    index: usize,
+    table: &Table,
+    ctx: &mut Apply<'_>,
+) -> Result<(), WriteError> {
+    validate_inserted_table(table)?;
+    let columns = table.grid_pt.len();
+    {
+        let mut inserted = doc.insert_table(index, table.rows.len(), columns);
+        // A half-point single line is the border Word shows for a new table.
+        // The editor already paints a cell border, so the file has to as well.
+        inserted.set_borders(BorderStyle::Single, 4, "000000");
+        let widths: Vec<Length> = table.grid_pt.iter().copied().map(length_pt).collect();
+        inserted.set_grid_widths(&widths)?;
+    }
+    let ordinal = table_ordinal(doc, index)?;
+    for (row_index, row) in table.rows.iter().enumerate() {
+        if row.header || row.cant_split {
+            set_row_flags(doc, ordinal, row_index, row)?;
+        }
+        for (cell_index, cell) in row.cells.iter().enumerate() {
+            fill_fresh_cell(doc, ordinal, row_index, cell_index, cell, ctx)?;
+            sync_vmerge(doc, ordinal, row_index, cell_index, &cell.v_merge)?;
+        }
+    }
+    Ok(())
 }
 
 fn patch_cell(
