@@ -1191,9 +1191,9 @@ fn emit_run(
             RunItemRef::Text(text) | RunItemRef::DeletedText(text) => buf.push_str(text),
             RunItemRef::Tab => buf.push('\t'),
             RunItemRef::Break(BreakKind::Line) => buf.push('\n'),
-            // ParagraphRef::text counts every break as "\n"; the atom records page and column breaks.
+            // The atom is the break. model_text counts it as the newline ParagraphRef::text
+            // reports, so the break is not also stored as text.
             RunItemRef::Break(BreakKind::Page) => {
-                buf.push('\n');
                 flush(&mut buf, inlines, &marks, src);
                 inlines.push(Inline::Atom {
                     atom: Atom::PageBreak {},
@@ -1201,7 +1201,6 @@ fn emit_run(
                 });
             }
             RunItemRef::Break(BreakKind::Column) => {
-                buf.push('\n');
                 flush(&mut buf, inlines, &marks, src);
                 inlines.push(Inline::Atom {
                     atom: Atom::ColumnBreak {},
@@ -1429,8 +1428,14 @@ fn vert_align(value: &str) -> Option<&str> {
 fn model_text(inlines: &[Inline]) -> String {
     let mut text = String::new();
     for inline in inlines {
-        if let Inline::Text { text: piece, .. } = inline {
-            text.push_str(piece);
+        match inline {
+            Inline::Text { text: piece, .. } => text.push_str(piece),
+            // ParagraphRef::text counts a page or column break as "\n".
+            Inline::Atom {
+                atom: Atom::PageBreak {} | Atom::ColumnBreak {},
+                ..
+            } => text.push('\n'),
+            Inline::Atom { .. } => {}
         }
     }
     text

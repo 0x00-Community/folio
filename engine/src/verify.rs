@@ -82,7 +82,59 @@ pub fn verify(
     if let Some(difference) = projection_diff(&want, &got) {
         return Err(difference);
     }
+    if let Some(difference) = sections_diff(&patch.sections, &again.imported.sections) {
+        return Err(difference);
+    }
     Ok(())
+}
+
+fn sections_diff(want: &[wire::Section], got: &[wire::Section]) -> Option<String> {
+    if want.len() != got.len() {
+        return Some(format!("section count {} vs {}", want.len(), got.len()));
+    }
+    for (index, (want, got)) in want.iter().zip(got).enumerate() {
+        if want.src != got.src
+            || want.break_type != got.break_type
+            || want.title_page != got.title_page
+            || want.headers != got.headers
+            || want.footers != got.footers
+            || !grid_same(&want.grid, &got.grid)
+        {
+            return Some(format!("section {index} structure differs"));
+        }
+        if !close_pt(want.width_pt, got.width_pt) || !close_pt(want.height_pt, got.height_pt) {
+            return Some(format!(
+                "section {index} size {}x{} vs {}x{}",
+                want.width_pt, want.height_pt, got.width_pt, got.height_pt
+            ));
+        }
+        for (edge, (want_edge, got_edge)) in want.margins_pt.iter().zip(got.margins_pt).enumerate()
+        {
+            if !close_pt(*want_edge, got_edge) {
+                return Some(format!(
+                    "section {index} margin {edge} {want_edge} vs {got_edge}"
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn grid_same(
+    want: &Option<(String, f64, Option<i32>)>,
+    got: &Option<(String, f64, Option<i32>)>,
+) -> bool {
+    match (want, got) {
+        (None, None) => true,
+        (Some((want_kind, want_pitch, want_space)), Some((got_kind, got_pitch, got_space))) => {
+            want_kind == got_kind && close_pt(*want_pitch, *got_pitch) && want_space == got_space
+        }
+        _ => false,
+    }
+}
+
+fn close_pt(want: f64, got: f64) -> bool {
+    (want - got).abs() < 0.05
 }
 
 fn subtract(ledger: &mut Ledger, removed: &BTreeMap<String, usize>) -> Result<(), String> {

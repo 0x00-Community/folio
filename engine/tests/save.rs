@@ -8,7 +8,7 @@ use rdocx_word_engine::import::{self, Import};
 use rdocx_word_engine::verify;
 use rdocx_word_engine::wire::{
     Atom, Block, BridgeError, Inline, ListDef, ListLevel, Marks, Para, ParaProps, Patch,
-    PatchBlock, Table,
+    PatchBlock, Section, Table,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -1232,6 +1232,243 @@ fn split_join_indexes(name: &str, bytes: &[u8], indexes: &[usize]) {
             );
         }
     }
+}
+
+fn patch_sections(imported: &rdocx_word_engine::wire::Imported, sections: Vec<Section>) -> Patch {
+    let mut patch = keep_patch(imported);
+    patch.sections = sections;
+    patch
+}
+
+fn near(want: f64, got: f64) -> bool {
+    (want - got).abs() < 0.05
+}
+
+fn assert_near(want: f64, got: f64, label: &str) {
+    assert!(near(want, got), "{label}: want {want} got {got}");
+}
+
+fn assert_kept_section(got: &Section, had: &Section) {
+    for index in 4..7 {
+        assert_near(
+            had.margins_pt[index],
+            got.margins_pt[index],
+            &format!("margin {index}"),
+        );
+    }
+    assert_eq!(got.break_type, had.break_type);
+    assert_eq!(got.title_page, had.title_page);
+    assert_eq!(got.headers, had.headers);
+    assert_eq!(got.footers, had.footers);
+    assert_eq!(got.grid, had.grid);
+    assert_eq!(got.src, had.src);
+}
+
+fn document_xml(bytes: &[u8]) -> String {
+    Document::from_bytes(bytes)
+        .expect("written bytes")
+        .part_xml("/word/document.xml")
+        .expect("document.xml")
+}
+
+fn assert_orient(xml: &str, value: &str) {
+    let quoted = format!("orient=\"{value}\"");
+    let apos = format!("orient='{value}'");
+    assert!(
+        xml.contains(&quoted) || xml.contains(&apos),
+        "missing {value} orientation\n{}",
+        xml_around(xml, "pgSz")
+    );
+}
+
+fn xml_around(xml: &str, needle: &str) -> String {
+    let Some(index) = xml.find(needle) else {
+        return xml.chars().take(400).collect();
+    };
+    let start = index.saturating_sub(80);
+    let end = (index + 160).min(xml.len());
+    xml.get(start..end).unwrap_or("").to_string()
+}
+
+#[test]
+fn page_setup_writes_margins() {
+    for name in ["basic.docx", "preserve.docx"] {
+        let (session, before) = opened(name);
+        let had = before.imported.sections[0].clone();
+        let mut sections = before.imported.sections.clone();
+        sections[0].margins_pt[0] = 50.0;
+        sections[0].margins_pt[1] = 60.0;
+        sections[0].margins_pt[2] = 70.0;
+        sections[0].margins_pt[3] = 80.0;
+        let written = save(&session, &patch_sections(&before.imported, sections));
+        let after = reopen(&written);
+        let got = &after.imported.sections[0];
+        assert_near(50.0, got.margins_pt[0], "top");
+        assert_near(60.0, got.margins_pt[1], "right");
+        assert_near(70.0, got.margins_pt[2], "bottom");
+        assert_near(80.0, got.margins_pt[3], "left");
+        assert_near(had.width_pt, got.width_pt, "width");
+        assert_near(had.height_pt, got.height_pt, "height");
+        assert_kept_section(got, &had);
+        assert_eq!(after.ledger.counts, before.ledger.counts, "{name} ledger");
+    }
+}
+
+#[test]
+fn page_setup_writes_page_size() {
+    for name in ["basic.docx", "preserve.docx"] {
+        let (session, before) = opened(name);
+        let had = before.imported.sections[0].clone();
+        let mut sections = before.imported.sections.clone();
+        let width = 11906.0 / 20.0;
+        let height = 16838.0 / 20.0;
+        sections[0].width_pt = width;
+        sections[0].height_pt = height;
+        let written = save(&session, &patch_sections(&before.imported, sections));
+        let after = reopen(&written);
+        let got = &after.imported.sections[0];
+        assert_near(width, got.width_pt, "width");
+        assert_near(height, got.height_pt, "height");
+        for index in 0..4 {
+            assert_near(had.margins_pt[index], got.margins_pt[index], "margin");
+        }
+        assert_kept_section(got, &had);
+        assert_eq!(after.ledger.counts, before.ledger.counts, "{name} ledger");
+    }
+}
+
+#[test]
+fn page_setup_writes_landscape() {
+    for name in ["basic.docx", "preserve.docx"] {
+        let (session, before) = opened(name);
+        let had = before.imported.sections[0].clone();
+        let mut sections = before.imported.sections.clone();
+        let width = 16838.0 / 20.0;
+        let height = 11906.0 / 20.0;
+        sections[0].width_pt = width;
+        sections[0].height_pt = height;
+        let written = save(&session, &patch_sections(&before.imported, sections));
+        let after = reopen(&written);
+        let got = &after.imported.sections[0];
+        assert_near(width, got.width_pt, "width");
+        assert_near(height, got.height_pt, "height");
+        assert!(got.width_pt > got.height_pt, "{name} is landscape");
+        assert_kept_section(got, &had);
+        assert_eq!(after.ledger.counts, before.ledger.counts, "{name} ledger");
+        assert_orient(&document_xml(&written), "landscape");
+    }
+}
+
+fn plain_paragraph(body: &[Block]) -> &Para {
+    body.iter()
+        .find_map(|block| {
+            let Block::P(para) = block else {
+                return None;
+            };
+            if para.inlines.len() != 1 {
+                return None;
+            }
+            let Inline::Text { text, .. } = &para.inlines[0] else {
+                return None;
+            };
+            if text.chars().count() < 4 {
+                return None;
+            }
+            Some(para)
+        })
+        .expect("plain paragraph")
+}
+
+fn with_mid_break(para: &Para) -> (Para, String, String) {
+    let Inline::Text { text, marks, src } = &para.inlines[0] else {
+        panic!("plain paragraph");
+    };
+    let mid = text.chars().count() / 2;
+    let head: String = text.chars().take(mid).collect();
+    let tail: String = text.chars().skip(mid).collect();
+    let mut next = para.clone();
+    next.inlines = vec![
+        Inline::Text {
+            text: head.clone(),
+            marks: marks.clone(),
+            src: *src,
+        },
+        Inline::Atom {
+            atom: Atom::PageBreak {},
+            src: None,
+        },
+        Inline::Text {
+            text: tail.clone(),
+            marks: marks.clone(),
+            src: *src,
+        },
+    ];
+    (next, head, tail)
+}
+
+#[test]
+fn page_break_in_the_middle_of_a_paragraph_round_trips() {
+    for name in ["basic.docx", "preserve.docx"] {
+        let (session, before) = opened(name);
+        let para = plain_paragraph(&before.imported.body);
+        let src = para.src.expect("paragraph src");
+        let original = text_of(para);
+        let (next, head, tail) = with_mid_break(para);
+        let patch = patch_replacing(&before.imported, src, vec![changed_para(next)]);
+        let written = save(&session, &patch);
+        let again = save(&session, &patch);
+        assert_eq!(reopen(&written).imported, reopen(&again).imported);
+        let after = reopen(&written);
+        let got = para_by_src(&after.imported.body, src);
+        match &got.inlines[..] {
+            [
+                Inline::Text { text: got_head, .. },
+                Inline::Atom {
+                    atom: Atom::PageBreak {},
+                    ..
+                },
+                Inline::Text { text: got_tail, .. },
+            ] => {
+                assert_eq!(got_head, &head, "{name} head");
+                assert_eq!(got_tail, &tail, "{name} tail");
+                assert_eq!(format!("{got_head}{got_tail}"), original, "{name} text");
+            }
+            other => panic!("{name} page break inlines {other:?}"),
+        }
+        assert_eq!(after.ledger.counts, before.ledger.counts, "{name} ledger");
+    }
+}
+
+#[test]
+fn page_setup_changes_only_the_named_section() {
+    let mut doc = Document::from_bytes(&fixture("basic.docx")).expect("basic");
+    doc.insert_section(1).expect("second section");
+    let bytes = doc.to_bytes().expect("bytes");
+    let session = Session::from_bytes(&bytes).expect("session");
+    let before = import::import(&Document::from_bytes(&bytes).expect("import"));
+    assert_eq!(before.imported.sections.len(), 2, "two sections");
+    let mut sections = before.imported.sections.clone();
+    let second = sections[1].clone();
+    let width = 16838.0 / 20.0;
+    let height = 11906.0 / 20.0;
+    sections[0].width_pt = width;
+    sections[0].height_pt = height;
+    sections[0].margins_pt[0] = 50.0;
+    let written = save(&session, &patch_sections(&before.imported, sections));
+    let after = reopen(&written);
+    let first = &after.imported.sections[0];
+    assert_near(width, first.width_pt, "section 0 width");
+    assert_near(height, first.height_pt, "section 0 height");
+    assert!(first.width_pt > first.height_pt, "section 0 is landscape");
+    let reread = Document::from_bytes(&written).expect("written");
+    let orientation = reread.section(0).expect("section 0").orientation();
+    assert!(
+        format!("{orientation:?}").contains("Landscape"),
+        "section 0 writes w:orient, got {orientation:?}"
+    );
+    assert_near(50.0, first.margins_pt[0], "section 0 top");
+    assert_eq!(after.imported.sections[1], second);
+    assert_eq!(after.ledger.counts, before.ledger.counts);
 }
 
 fn opaque_docx() -> Vec<u8> {

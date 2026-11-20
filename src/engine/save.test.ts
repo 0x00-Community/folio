@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { apply, deleteBackward, deleteForward, initialState, insertText, move, redo, setAlign, setMark, setParaStyle, setPageSetup, setSelection, splitParagraph, toggleList, toggleMark, undo } from '../editor/edit.ts'
+import { apply, deleteBackward, deleteForward, initialState, insertPageBreak, insertText, move, redo, setAlign, setMark, setParaStyle, setPageSetup, setSelection, splitParagraph, toggleList, toggleMark, undo } from '../editor/edit.ts'
 import type { Command, EditorState } from '../editor/edit.ts'
 import { withCaretParagraph } from '../editor/derive.ts'
 import { flatText, indexOf, type Block, type Doc, type Marks, type Paragraph, type Pt, type StyleId } from '../model.ts'
@@ -258,21 +258,59 @@ test('a fresh list is newLists and a missing built-in role is addedStyles', () =
   }
 })
 
-test('a page setup change is refused and nothing is written', () => {
+test('a page setup change saves and reopens', () => {
   const opened = engine.open(fixture('basic.docx'))
+  let again: Opened | undefined
   try {
     const section = opened.doc.sections[0]
     assert.ok(section)
-    const page = { ...section.page, widthPt: section.page.widthPt }
-    const widened = { ...page, widthPt: (Number(page.widthPt) + 36) as typeof page.widthPt }
-    const state = run(initialState(opened.doc), setPageSetup(0, widened))
-    assert.notEqual(state.doc.sections, opened.doc.sections)
-    assert.throws(() => opened.source.save(state.doc), (error: unknown) => {
-      assert.ok(error instanceof SaveWriteError)
-      assert.match(error.detail, /page setup/)
-      return true
-    })
+    const page = {
+      ...section.page,
+      widthPt: (11906 / 20) as Pt,
+      heightPt: (16838 / 20) as Pt,
+      margin: {
+        ...section.page.margin,
+        top: 144 as Pt,
+        right: 144 as Pt,
+        bottom: 144 as Pt,
+        left: 144 as Pt,
+      },
+    }
+    const state = run(initialState(opened.doc), setPageSetup(0, page))
+    const bytes = opened.source.save(state.doc)
+    again = engine.open(bytes)
+    const got = again.doc.sections[0]?.page
+    assert.ok(got)
+    assert.ok(Math.abs(got.widthPt - page.widthPt) < 0.05, `width ${got.widthPt}`)
+    assert.ok(Math.abs(got.heightPt - page.heightPt) < 0.05, `height ${got.heightPt}`)
+    assert.ok(got.widthPt < got.heightPt, 'A4 is portrait')
+    for (const edge of ['top', 'right', 'bottom', 'left'] as const) {
+      assert.ok(Math.abs(got.margin[edge] - 144) < 0.05, `${edge} ${got.margin[edge]}`)
+    }
+    assert.equal(got.margin.header, section.page.margin.header)
+    assert.equal(got.margin.footer, section.page.margin.footer)
+    assert.equal(got.margin.gutter, section.page.margin.gutter)
   } finally {
+    again?.source.free()
+    opened.source.free()
+  }
+})
+
+test('a page break in the middle of a paragraph saves', () => {
+  const opened = engine.open(fixture('basic.docx'))
+  let again: Opened | undefined
+  try {
+    const para = paraByText(opened.doc, 'Centered paragraph.')
+    let state = caret(initialState(opened.doc), para, 9)
+    state = run(state, insertPageBreak)
+    assert.equal(flatText(paraByText(state.doc, 'Centered \uFFFCparagraph.')), 'Centered \uFFFCparagraph.')
+    const bytes = opened.source.save(state.doc)
+    again = engine.open(bytes)
+    const found = bodyParas(again.doc).find((item) => flatText(item).replaceAll('\uFFFC', '') === 'Centered paragraph.')
+    assert.ok(found, 'the paragraph reopened')
+    assert.equal(flatText(found), 'Centered \uFFFCparagraph.')
+  } finally {
+    again?.source.free()
     opened.source.free()
   }
 })
@@ -331,18 +369,16 @@ test('save writes an edit, a bold run and a fresh list', () => {
 })
 
 // A write refusal is accepted only when its detail is one of the contracts the
-// save design leaves unread: tables, images, page setup, hyperlinks, breaks,
+// save design leaves unread: tables, images, hyperlinks, column breaks,
 // fields and other unmodeled children. A defect such as a bad split point is not.
 const OUT_OF_SCOPE = [
   'inserted tables',
   'row and column changes',
   'inserted images',
-  'page setup',
   'hyperlink',
   'section break',
   'unmodeled content',
   'field',
-  'page break',
   'column break',
   'opaque atom',
   'non-removable',

@@ -91,11 +91,9 @@ pub fn write(
     imported: &wire::Imported,
     patch: &Patch,
 ) -> Result<Written, WriteError> {
-    if patch.sections != imported.sections {
-        return Err(contract("page setup"));
-    }
     let plan = plan(sources, imported, &patch.body)?;
     let mut document = pristine.clone_for_staging();
+    apply_sections(&mut document, imported, patch)?;
     apply_styles(&mut document, &patch.added_styles)?;
     let list_ids = apply_lists(&mut document, &patch.new_lists)?;
     let links = run_links(&imported.body);
@@ -136,6 +134,71 @@ pub fn write(
         removed,
         list_ids,
     })
+}
+
+/// `Length::pt` truncates 595.3 pt to 11905 twips. Rounding through twips keeps A4.
+fn length_pt(pt: f64) -> Length {
+    Length::twips((pt * 20.0).round() as i32)
+}
+
+#[allow(clippy::float_cmp)]
+fn section_geometry_same(want: &wire::Section, had: &wire::Section) -> bool {
+    want.width_pt == had.width_pt
+        && want.height_pt == had.height_pt
+        && want.margins_pt == had.margins_pt
+}
+
+fn section_rest_same(want: &wire::Section, had: &wire::Section) -> bool {
+    want.src == had.src
+        && want.break_type == had.break_type
+        && want.title_page == had.title_page
+        && want.headers == had.headers
+        && want.footers == had.footers
+        && want.grid == had.grid
+}
+
+fn apply_sections(
+    document: &mut Document,
+    imported: &wire::Imported,
+    patch: &Patch,
+) -> Result<(), WriteError> {
+    if patch.sections.len() != imported.sections.len() {
+        return Err(contract("section break"));
+    }
+    for (index, (want, had)) in patch
+        .sections
+        .iter()
+        .zip(imported.sections.iter())
+        .enumerate()
+    {
+        if !section_rest_same(want, had) {
+            return Err(contract("section break"));
+        }
+        if section_geometry_same(want, had) {
+            continue;
+        }
+        {
+            let mut section = document
+                .section_mut(index)
+                .ok_or_else(|| contract("section break"))?;
+            section.set_page_size(length_pt(want.width_pt), length_pt(want.height_pt))?;
+            let margins = want.margins_pt;
+            section.set_margins(
+                length_pt(margins[0]),
+                length_pt(margins[1]),
+                length_pt(margins[2]),
+                length_pt(margins[3]),
+            )?;
+            section.set_header_footer_distance(length_pt(margins[4]), length_pt(margins[5]))?;
+            section.set_gutter(length_pt(margins[6]))?;
+            if want.width_pt > want.height_pt {
+                section.set_landscape();
+            } else {
+                section.set_portrait();
+            }
+        }
+    }
+    Ok(())
 }
 
 struct Apply<'a> {
@@ -716,7 +779,7 @@ fn reject_fresh_atoms(inlines: &[Inline]) -> Result<(), WriteError> {
         match atom {
             Atom::Image { .. } => return Err(contract("inserted images")),
             Atom::Field { .. } => return Err(contract("field")),
-            Atom::PageBreak {} => return Err(contract("page break")),
+            Atom::PageBreak {} => {}
             Atom::ColumnBreak {} => return Err(contract("column break")),
             Atom::Opaque { label, .. } if label == "bookmark" || label == "comment" => {}
             Atom::Opaque { label, .. } if label == "contentControl" => {}
@@ -1677,6 +1740,10 @@ fn patch_paragraph<S: Story>(
             Segment::Run(group) => {
                 cursor = apply_run(loc, index, &mut srcs, cursor, &group, ctx)?;
             }
+            Segment::PageBreak => {
+                insert_page_break(loc, index, &mut srcs, cursor)?;
+                cursor += 1;
+            }
         }
     }
     while cursor < srcs.len() {
@@ -1688,6 +1755,7 @@ fn patch_paragraph<S: Story>(
 enum Segment {
     Run(RunGroup),
     Fresh(Piece),
+    PageBreak,
 }
 
 struct RunGroup {
@@ -1698,6 +1766,7 @@ struct RunGroup {
 enum GroupItem {
     Text(Piece),
     Fresh(Piece),
+    Break,
 }
 
 #[derive(Clone)]
@@ -1737,6 +1806,10 @@ fn segments(inlines: &[Inline]) -> Result<Vec<Segment>, WriteError> {
                     literal: 0,
                 },
             }),
+            Inline::Atom {
+                atom: Atom::PageBreak {},
+                src: None,
+            } => events.push(Ev::PageBreak),
             Inline::Text {
                 text,
                 marks,
@@ -1769,6 +1842,22 @@ fn segments(inlines: &[Inline]) -> Result<Vec<Segment>, WriteError> {
                     segments.push(Segment::Fresh(piece.clone()));
                 }
             }
+            Ev::PageBreak => {
+                let next_src = events[index + 1..].iter().find_map(|event| event.src());
+                // A following piece of this same run searches forward and would delete a
+                // break that sat between the two halves as its own segment.
+                let attached = matches!(
+                    segments.last(),
+                    Some(Segment::Run(group)) if Some(group.src) == next_src
+                );
+                if attached {
+                    if let Some(Segment::Run(group)) = segments.last_mut() {
+                        group.items.push(GroupItem::Break);
+                    }
+                } else {
+                    segments.push(Segment::PageBreak);
+                }
+            }
             Ev::Source { src, piece } => {
                 if let Some(Segment::Run(group)) = segments.last_mut()
                     && group.src == *src
@@ -1796,13 +1885,14 @@ fn segments(inlines: &[Inline]) -> Result<Vec<Segment>, WriteError> {
 enum Ev {
     Source { src: u32, piece: Piece },
     Fresh(Piece),
+    PageBreak,
 }
 
 impl Ev {
     fn src(&self) -> Option<u32> {
         match self {
             Ev::Source { src, .. } => Some(*src),
-            Ev::Fresh(_) => None,
+            Ev::Fresh(_) | Ev::PageBreak => None,
         }
     }
 }
@@ -1867,7 +1957,7 @@ fn apply_run<S: Story>(
         .iter()
         .filter_map(|item| match item {
             GroupItem::Text(piece) => Some(piece),
-            GroupItem::Fresh(_) => None,
+            GroupItem::Fresh(_) | GroupItem::Break => None,
         })
         .collect();
     let concat: String = text_pieces
@@ -1935,6 +2025,10 @@ fn apply_run<S: Story>(
             }
             GroupItem::Fresh(piece) => {
                 insert_fresh(loc, paragraph_index, srcs, physical, piece, ctx)?;
+                physical += 1;
+            }
+            GroupItem::Break => {
+                insert_page_break(loc, paragraph_index, srcs, physical)?;
                 physical += 1;
             }
         }
@@ -2008,6 +2102,33 @@ fn insert_fresh<S: Story>(
                 apply_mark_values(run, &current, &piece.marks)
             })?;
         }
+        Ok(())
+    })?;
+    srcs.insert(at, None);
+    Ok(())
+}
+
+/// A page break is its own run. A break left inside the text run would protect that
+/// run, and the next edit of the same text would be refused.
+fn insert_page_break<S: Story>(
+    loc: &mut S,
+    paragraph_index: usize,
+    srcs: &mut Vec<Option<u32>>,
+    at: usize,
+) -> Result<(), WriteError> {
+    loc.with_para(paragraph_index, |paragraph| {
+        let count = paragraph.run_count();
+        if count == 0 {
+            paragraph.add_run_inheriting_mark("");
+        } else {
+            let like = if at == 0 { 0 } else { at - 1 };
+            paragraph.insert_run_like(at, like, "")?;
+        }
+        with_run(paragraph, at, |run| {
+            run.set_text("");
+            run.add_break(BreakKind::Page);
+            Ok(())
+        })?;
         Ok(())
     })?;
     srcs.insert(at, None);

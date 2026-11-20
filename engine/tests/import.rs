@@ -87,8 +87,13 @@ fn imported_texts(blocks: &[Block]) -> Vec<String> {
 fn flat_text(inlines: &[Inline]) -> String {
     let mut text = String::new();
     for inline in inlines {
-        if let Inline::Text { text: piece, .. } = inline {
-            text.push_str(piece);
+        match inline {
+            Inline::Text { text: piece, .. } => text.push_str(piece),
+            Inline::Atom {
+                atom: Atom::PageBreak {} | Atom::ColumnBreak {},
+                ..
+            } => text.push('\n'),
+            Inline::Atom { .. } => {}
         }
     }
     text
