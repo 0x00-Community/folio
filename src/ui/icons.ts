@@ -19,6 +19,7 @@ export type IconName =
   | 'indent-increase'
   | 'save'
   | 'save-as'
+  | 'page-setup'
 
 type MarkIcon = 'bold' | 'italic' | 'underline' | 'strike'
 
@@ -74,6 +75,8 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return drawSave(svg)
     case 'save-as':
       return drawSaveAs(svg)
+    case 'page-setup':
+      return drawPageSetup(svg)
     default: {
       const unexpected: never = name
       throw new Error(`unknown icon ${unexpected}`)
@@ -94,6 +97,13 @@ function drawSave(svg: SVGSVGElement): void {
   path(svg, 'M4 2.6 H11.2 L15 6.4 V15.4 H4 Z')
   path(svg, 'M6.2 2.6 V6.4 H10.6')
   path(svg, 'M6.2 15.4 V10.2 H12.6 V15.4')
+}
+
+function drawPageSetup(svg: SVGSVGElement): void {
+  path(svg, 'M4 2.4 H14 V15.6 H4 Z')
+  path(svg, 'M6.2 5.2 H11.8')
+  path(svg, 'M6.2 8 H11.8')
+  path(svg, 'M6.2 10.8 H9.6')
 }
 
 function drawSaveAs(svg: SVGSVGElement): void {

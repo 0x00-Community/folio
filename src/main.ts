@@ -26,6 +26,7 @@ function installHook(app: {
   save(): { base64: string; ms: number }
   saveTampered(): string
   requestClose(): boolean
+  pageSetupMs(): number
 }): void {
   // There is no production build flag. These hooks are how the e2e reaches save, a forced verify
   // failure, and beforeclose. `acde act w1 close` waits until the window is gone, so a handler that
@@ -46,6 +47,9 @@ function installHook(app: {
     },
     requestClose() {
       return app.requestClose()
+    },
+    pageSetupMs() {
+      return app.pageSetupMs()
     },
   }
 }
@@ -68,6 +72,7 @@ declare global {
       save(): { base64: string; ms: number }
       saveTampered(): string
       requestClose(): boolean
+      pageSetupMs(): number
     }
   }
 }

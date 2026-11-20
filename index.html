@@ -221,7 +221,7 @@
       .unsaved[hidden] { display: none }
       .unsaved-panel {
         box-sizing: border-box;
-        width: min(420px, calc(100% - 32px));
+        width: min(440px, calc(100% - 32px));
         margin: 16px;
         padding: 16px 18px;
         color: var(--text);
@@ -229,6 +229,7 @@
         border: 1px solid var(--chrome-border);
         border-radius: 8px;
         box-shadow: var(--page-shadow);
+        font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
       }
       .unsaved-panel p { margin: 0 0 14px }
       .unsaved-actions {
@@ -255,6 +256,65 @@
         background: var(--accent-soft);
         border-color: var(--accent);
         font-weight: 600;
+      }
+      .unsaved-actions button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .page-setup {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin: 0 0 14px;
+      }
+      .page-setup-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .page-setup-margins {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px 12px;
+      }
+      .page-setup input,
+      .page-setup select {
+        box-sizing: border-box;
+        width: 100%;
+        height: 28px;
+        padding: 0 8px;
+        color: var(--text);
+        background: var(--field-bg);
+        border: 1px solid var(--chrome-border);
+        border-radius: 6px;
+        font: inherit;
+      }
+      .page-setup input[aria-invalid="true"] {
+        border-color: var(--error-text);
+      }
+      .page-setup-orient {
+        margin: 0;
+        padding: 0;
+        border: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+      }
+      .page-setup-orient legend {
+        width: 100%;
+        padding: 0;
+        margin: 0;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .page-setup-orient label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--text);
+        font-size: 13px;
       }
     </style>
   </head>

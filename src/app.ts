@@ -1,7 +1,7 @@
 // Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
 import { Editor } from './editor/editor.ts'
-import { changeIndentLevel, setAlign, setMark, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { changeIndentLevel, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, loadEngine, saveTampered } from './engine/engine.ts'
@@ -11,6 +11,8 @@ import type { Doc, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
 import { createToolbar } from './ui/toolbar.ts'
 import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
+import { isDialogOpen } from './ui/dialog.ts'
+import { openPageSetup } from './ui/page-setup.ts'
 import { createUnsavedDialog } from './ui/unsaved.ts'
 import type { UnsavedChoice } from './ui/unsaved.ts'
 
@@ -34,6 +36,8 @@ export interface WordApp {
   saveTampered(): string
   /** The `beforeclose` handler. False means the window stays and the dialog is up. */
   requestClose(): boolean
+  /** How long the last page-setup confirm blocked, including the relayout. Zero before the first one. */
+  pageSetupMs(): number
 }
 
 type Pending = {
@@ -50,6 +54,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   let titleShown = ''
   let tail: Promise<void> = Promise.resolve()
   let pending: Pending | null = null
+  let lastPageSetupMs = 0
 
   const toolbarRoot = required('#toolbar')
   const statusRoot = required('#status')
@@ -92,6 +97,21 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     },
     onIndent(delta) {
       edit(() => { current().run(changeIndentLevel(delta)) })
+    },
+    onPageSetup() {
+      const editorNow = current()
+      const section = editorNow.status().section
+      const page = editorNow.state.doc.sections[section]?.page
+      if (!page || isDialogOpen()) return
+      void openPageSetup(page).then((next) => {
+        if (!next) {
+          current().focus()
+          return
+        }
+        const started = performance.now()
+        edit(() => { current().run(setPageSetup(section, next)) })
+        lastPageSetupMs = performance.now() - started
+      })
     },
     onZoom(zoom) {
       edit(() => { current().setZoom(zoom) })
@@ -341,7 +361,14 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   // Return false at once. The runtime closes a dirty window if beforeclose is still pending after 3 seconds.
   // close() does not ask again, so Save and Don't save close the window themselves.
   appWindow.on('beforeclose', () => requestClose())
-  return { editor, openBytes, save: timedSave, saveTampered: failSave, requestClose }
+  return {
+    editor,
+    openBytes,
+    save: timedSave,
+    saveTampered: failSave,
+    requestClose,
+    pageSetupMs: () => lastPageSetupMs,
+  }
 }
 
 function required(selector: string): HTMLElement {
