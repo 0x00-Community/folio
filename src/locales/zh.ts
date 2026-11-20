@@ -34,6 +34,8 @@ const messages: Record<string, string> = {
   'align.justify': '两端对齐',
   'list.bullet': '项目符号',
   'list.number': '编号',
+  'list.decrease': '减少缩进',
+  'list.increase': '增加缩进',
   zoom: '缩放',
   'status.page': '第 {page} 页，共 {pages} 页',
   'status.words': '{words} 个字',

@@ -34,6 +34,8 @@ const messages: Record<string, string> = {
   'align.justify': 'Justify',
   'list.bullet': 'Bulleted list',
   'list.number': 'Numbered list',
+  'list.decrease': 'Decrease indent',
+  'list.increase': 'Increase indent',
   zoom: 'Zoom',
   'status.page': 'Page {page} of {pages}',
   'status.words': '{words} words',

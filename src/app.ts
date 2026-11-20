@@ -1,7 +1,7 @@
 // Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
 import { Editor } from './editor/editor.ts'
-import { setAlign, setMark, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { changeIndentLevel, setAlign, setMark, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, loadEngine, saveTampered } from './engine/engine.ts'
@@ -89,6 +89,9 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     },
     onList(kind) {
       edit(() => { current().run(toggleList(kind)) })
+    },
+    onIndent(delta) {
+      edit(() => { current().run(changeIndentLevel(delta)) })
     },
     onZoom(zoom) {
       edit(() => { current().setZoom(zoom) })

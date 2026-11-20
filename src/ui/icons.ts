@@ -15,6 +15,8 @@ export type IconName =
   | 'align-justify'
   | 'list-bullet'
   | 'list-number'
+  | 'indent-decrease'
+  | 'indent-increase'
   | 'save'
   | 'save-as'
 
@@ -64,6 +66,10 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return listBullet(svg)
     case 'list-number':
       return listNumber(svg)
+    case 'indent-decrease':
+      return indentIcon(svg, 'decrease')
+    case 'indent-increase':
+      return indentIcon(svg, 'increase')
     case 'save':
       return drawSave(svg)
     case 'save-as':
@@ -128,6 +134,17 @@ function listBullet(svg: SVGSVGElement): void {
     dot(svg, 4, y)
     hline(svg, 7.4, 15, y)
   }
+}
+
+function indentIcon(svg: SVGSVGElement, direction: 'decrease' | 'increase'): void {
+  for (const y of [4.5, 9, 13.5]) hline(svg, 7.4, 15.2, y)
+  if (direction === 'increase') {
+    path(svg, 'M2.1 9 H5.2')
+    path(svg, 'M3.4 7.2 L5.4 9 L3.4 10.8')
+    return
+  }
+  path(svg, 'M5.4 9 H2.3')
+  path(svg, 'M4.1 7.2 L2.1 9 L4.1 10.8')
 }
 
 function listNumber(svg: SVGSVGElement): void {

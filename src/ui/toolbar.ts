@@ -25,6 +25,7 @@ export interface ToolbarHandlers {
   onStyle(id: string): void
   onAlign(align: Align): void
   onList(kind: 'bullet' | 'decimal'): void
+  onIndent(delta: 1 | -1): void
   onZoom(zoom: number): void
 }
 
@@ -116,7 +117,9 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
 
   const bullet = toggleButton(t('list.bullet'), null, platform, () => handlers.onList('bullet'), 'list-bullet')
   const numbered = toggleButton(t('list.number'), null, platform, () => handlers.onList('decimal'), 'list-number')
-  group(root).append(bullet, numbered)
+  const decrease = iconButton(t('list.decrease'), null, platform, () => handlers.onIndent(-1), 'indent-decrease')
+  const increase = iconButton(t('list.increase'), null, platform, () => handlers.onIndent(1), 'indent-increase')
+  group(root).append(bullet, numbered, decrease, increase)
 
   const zoomSelect = labeledSelect(t('zoom'), 'zoom')
   for (const percent of ZOOMS) {
