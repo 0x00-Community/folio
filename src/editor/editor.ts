@@ -292,9 +292,11 @@ export class Editor implements EditingSurface {
     this.current = next
     if (next.doc !== previous) {
       this.editedSinceLoad = true
-      this.markers = listMarkers(next.doc)
+      const previousMarkers = this.markers
+      const markers = listMarkers(next.doc)
+      this.markers = markers
       // update() cancels the in-progress measure. A selection-only transaction keeps the pump running.
-      this.view.update(previous, next.doc)
+      this.view.update(previous, next.doc, previousMarkers, markers)
       void this.applyMetrics(this.generation)
     }
     this.paintSelection(scroll)

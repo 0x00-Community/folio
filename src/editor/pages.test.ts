@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Block, BlockId, Doc, Paragraph, Pt, Section, StoryKey, StyleId } from '../model.ts'
-import { paginate, type Layout, type Measure } from './pages.ts'
+import { listMarkers } from './derive.ts'
+import { apply, deleteBackward, initialState, selectAll, setPageSetup, setSelection, toggleList } from './edit.ts'
+import { layoutPlan, paginate, type Layout, type Measure } from './pages.ts'
+import { makeDoc, paragraph, text } from './testkit.ts'
 
 function pt(n: number): Pt {
   return n as Pt
@@ -293,6 +296,99 @@ test('a header taller than the top margin pushes the body down', () => {
   )
   assert.equal(layout.pages[0]?.bodyTopPx, 90)
   assert.deepEqual(sig(layout), ['a:0-50'])
+})
+
+function margined(paperPx: number, marginPx: number): Section {
+  const edge = (px: number): Pt => pt((px * 3) / 4)
+  return {
+    src: null,
+    page: {
+      widthPt: edge(600),
+      heightPt: edge(paperPx),
+      margin: {
+        top: edge(marginPx),
+        right: edge(marginPx),
+        bottom: edge(marginPx),
+        left: edge(marginPx),
+        header: edge(0),
+        footer: edge(0),
+        gutter: edge(0),
+      },
+    },
+    breakType: 'nextPage',
+    titlePage: false,
+    headers: {},
+    footers: {},
+    grid: null,
+  }
+}
+
+test('setPageSetup with narrower margins changes the page count of a long document', () => {
+  const blocks = Array.from({ length: 24 }, (_, index) => para(`p${index}`))
+  const measures = new Map<string, Measure>(blocks.map((block) => [block.id, pm(100, [100])]))
+  const measure = (block: Block): Measure | undefined => measures.get(block.id)
+  const doc = docOf(blocks, [margined(900, 300)])
+  const first = paginate(doc, measure, null, [])
+  assert.equal(first.pages.length, 8, 'tall margins hold three blocks on a page')
+  const state = initialState(doc)
+  const narrow = margined(900, 50).page
+  const tr = setPageSetup(0, narrow)(state)
+  assert.ok(tr, 'setPageSetup applies')
+  const next = apply(state, tr, 0).doc
+  assert.equal(next.body, doc.body, 'page setup does not replace a block')
+  const second = paginate(next, measure, first, [])
+  assert.equal(second.pages.length, 3, 'narrower margins fit more blocks on a page')
+  const plan = layoutPlan(doc, next, new Map(), new Map())
+  assert.equal(plan.remeasure.length, blocks.length, 'the section page change invalidates every block measure')
+})
+
+test('changing nothing but titlePage measures no block again', () => {
+  const blocks = [para('a'), para('b'), para('c')]
+  const measures = new Map<string, Measure>(blocks.map((block) => [block.id, pm(40, [40])]))
+  let calls = 0
+  const measure = (block: Block): Measure | undefined => {
+    calls += 1
+    return measures.get(block.id)
+  }
+  const section = margined(400, 40)
+  const doc = docOf(blocks, [section])
+  const first = paginate(doc, measure, null, [])
+  const seen = calls
+  assert.ok(seen > 0, 'the first layout measures the blocks')
+  const titled: Section = { ...section, titlePage: true }
+  const next = docOf(blocks, [titled])
+  const second = paginate(next, measure, first, [])
+  assert.equal(calls, seen, 'titlePage does not measure a block again')
+  assert.equal(second.pages.length, first.pages.length)
+  assert.deepEqual(sig(second), sig(first))
+  const plan = layoutPlan(doc, next, new Map(), new Map())
+  assert.deepEqual(plan.remeasure, [], 'titlePage leaves measures in place')
+})
+
+test('deleting the first numbered item changes the marker painted for the third', () => {
+  const a = paragraph('a', [text('one')])
+  const b = paragraph('b', [text('two')])
+  const c = paragraph('c', [text('three')])
+  let state = initialState(makeDoc([a, b, c]))
+  const all = selectAll(state)
+  assert.ok(all, 'select all applies')
+  state = apply(state, all, 0)
+  const listed = toggleList('decimal')(state)
+  assert.ok(listed, 'the three paragraphs become one list')
+  state = apply(state, listed, 0)
+  assert.equal(listMarkers(state.doc).get(c.id), '3.')
+  const caret = setSelection({ kind: 'text', anchor: { p: a.id, o: 0 }, head: { p: a.id, o: 0 } })(state)
+  assert.ok(caret, 'the caret moves to the first item')
+  state = apply(state, caret, 0)
+  const cleared = deleteBackward('char')(state)
+  assert.ok(cleared, 'backspace at the start of a list item leaves the list')
+  const next = apply(state, cleared, 0)
+  const third = next.doc.body[2]
+  assert.equal(third, state.doc.body[2], 'the third paragraph object is unchanged')
+  assert.equal(listMarkers(next.doc).get(c.id), '2.', 'the third item is renumbered')
+  const plan = layoutPlan(state.doc, next.doc, listMarkers(state.doc), listMarkers(next.doc))
+  assert.ok(plan.paint.includes(c.id), 'the third item is painted again')
+  assert.ok(!plan.remeasure.includes(c.id), 'a marker change does not remeasure the paragraph')
 })
 
 test('a paragraph taller than a page splits on a line bottom inside the body', () => {

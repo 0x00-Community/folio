@@ -19,6 +19,7 @@ import type {
   Table,
   TableId,
 } from '../model.ts'
+import { listMarkers } from './derive.ts'
 import { PageView } from './pages.ts'
 import type { RenderContext } from './render.ts'
 import './view.css'
@@ -520,7 +521,7 @@ export function startViewDemo(): void {
       for (let i = 1; i <= 50; i++) {
         const next = replaceText(doc, built.benchId, base + '测'.repeat(i * 56))
         const started = performance.now()
-        view.update(doc, next)
+        view.update(doc, next, listMarkers(doc), listMarkers(next))
         times.push(performance.now() - started)
         doc = next
       }

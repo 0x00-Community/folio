@@ -166,12 +166,19 @@ export interface Page {
   readonly footer: StoryKey | null
   /** Body top in px from the page top: the top margin, or lower when the header is taller than the space it has. */
   readonly bodyTopPx: number
+  readonly bodyHeightPx: number
+  readonly contentWidthPx: number
 }
 
 export interface Layout {
   readonly pages: readonly Page[]
   /** False while blocks after `pages` are still unmeasured (the first chunks of a large open). */
   readonly complete: boolean
+  /**
+   * Page size, margins, and break type of each section, in section order.
+   * titlePage is not part of the key: it chooses a header and does not change a block's measure.
+   */
+  readonly sectionKeys: readonly string[]
 }
 
 type MeasureFn = (block: Block, section: Section) => Measure | undefined
@@ -452,6 +459,7 @@ class PageBuilder {
   readonly header: StoryKey | null
   readonly footer: StoryKey | null
   readonly softTop: boolean
+  readonly contentWidth: number
 
   constructor(
     sectionIndex: number,
@@ -460,6 +468,7 @@ class PageBuilder {
     header: StoryKey | null,
     footer: StoryKey | null,
     softTop: boolean,
+    contentWidth: number,
   ) {
     this.sectionIndex = sectionIndex
     this.bodyHeight = bodyHeight
@@ -467,6 +476,7 @@ class PageBuilder {
     this.header = header
     this.footer = footer
     this.softTop = softTop
+    this.contentWidth = contentWidth
   }
 
   remaining(): number {
@@ -485,18 +495,36 @@ class PageBuilder {
       header: this.header,
       footer: this.footer,
       bodyTopPx: this.bodyTop,
+      bodyHeightPx: this.bodyHeight,
+      contentWidthPx: this.contentWidth,
     }
   }
 }
 
 function openBuilder(doc: Doc, section: Section, sectionIndex: number, pageNumber: number, measure: MeasureFn, softTop: boolean): PageBuilder {
   const frame = pageFrame(doc, section, pageNumber, measure)
-  return new PageBuilder(sectionIndex, frame.bodyHeight, frame.bodyTop, frame.header, frame.footer, softTop)
+  return new PageBuilder(
+    sectionIndex,
+    frame.bodyHeight,
+    frame.bodyTop,
+    frame.header,
+    frame.footer,
+    softTop,
+    frame.contentWidth,
+  )
 }
 
 function blankPage(doc: Doc, section: Section, sectionIndex: number, pageNumber: number, measure: MeasureFn): Page {
   const frame = pageFrame(doc, section, pageNumber, measure)
-  return { section: sectionIndex, slices: [], header: frame.header, footer: frame.footer, bodyTopPx: frame.bodyTop }
+  return {
+    section: sectionIndex,
+    slices: [],
+    header: frame.header,
+    footer: frame.footer,
+    bodyTopPx: frame.bodyTop,
+    bodyHeightPx: frame.bodyHeight,
+    contentWidthPx: frame.contentWidth,
+  }
 }
 
 interface Cursor {
@@ -556,10 +584,13 @@ function restart(previous: Layout, body: readonly Block[], changed: ReadonlySet<
 function tryReuse(
   previous: Layout | null,
   pageIndex: number,
+  doc: Doc,
   body: readonly Block[],
   cursor: Cursor,
   changed: ReadonlySet<BlockId>,
   sectionOf: readonly number[],
+  measure: MeasureFn,
+  keys: readonly string[],
 ): readonly Page[] | null {
   if (!previous) return null
   if (!previous.complete && pageIndex >= previous.pages.length - 1) return null
@@ -570,8 +601,90 @@ function tryReuse(
   const block = body[cursor.index]
   if (!prev || !first || !block) return null
   if (first.block !== block.id || Math.abs(first.y0 - cursor.y0) > 0.25) return null
-  if (prev.section !== (sectionOf[cursor.index] ?? 0)) return null
+  const sectionIndex = sectionOf[cursor.index] ?? 0
+  if (prev.section !== sectionIndex) return null
+  if ((previous.sectionKeys[prev.section] ?? '') !== (keys[prev.section] ?? '')) return null
+  const section = doc.sections[prev.section]
+  if (!section) return null
+  const frame = pageFrame(doc, section, pageIndex + 1, measure)
+  if (frame.header !== prev.header || frame.footer !== prev.footer) return null
+  if (Math.abs(frame.bodyTop - prev.bodyTopPx) > 0.25) return null
+  if (Math.abs(frame.bodyHeight - prev.bodyHeightPx) > 0.25) return null
+  if (Math.abs(frame.contentWidth - prev.contentWidthPx) > 0.25) return null
   return previous.pages.slice(pageIndex)
+}
+
+// titlePage picks which header prints. Leaving it out of the key keeps a title-page switch from measuring body blocks again.
+function sectionFrameKey(section: Section): string {
+  const page = section.page
+  const margin = page.margin
+  return [
+    page.widthPt,
+    page.heightPt,
+    margin.top,
+    margin.right,
+    margin.bottom,
+    margin.left,
+    margin.header,
+    margin.footer,
+    margin.gutter,
+    section.breakType,
+  ].join(':')
+}
+
+function sectionKeysOf(doc: Doc): string[] {
+  return doc.sections.map(sectionFrameKey)
+}
+
+function sameSectionKeys(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function finishLayout(doc: Doc, pages: readonly Page[], complete: boolean): Layout {
+  return { pages, complete, sectionKeys: sectionKeysOf(doc) }
+}
+
+function firstDivergentPage(previous: Layout, keys: readonly string[]): number {
+  for (let i = 0; i < previous.pages.length; i++) {
+    const page = previous.pages[i]
+    if (!page) return i
+    if (previous.sectionKeys[page.section] !== keys[page.section]) return i
+  }
+  return previous.pages.length
+}
+
+function decorationKeysDiffer(doc: Doc, layout: Layout): boolean {
+  for (let i = 0; i < layout.pages.length; i++) {
+    const page = layout.pages[i]
+    if (!page) return true
+    const section = doc.sections[page.section]
+    if (!section) return true
+    if (headerKey(section, i + 1) !== page.header) return true
+    if (footerKey(section, i + 1) !== page.footer) return true
+  }
+  return false
+}
+
+function patchDecorations(doc: Doc, layout: Layout, measure: MeasureFn): Page[] | null {
+  const pages: Page[] = []
+  for (let i = 0; i < layout.pages.length; i++) {
+    const page = layout.pages[i]
+    if (!page) return null
+    const section = doc.sections[page.section]
+    if (!section) return null
+    const frame = pageFrame(doc, section, i + 1, measure)
+    if (Math.abs(frame.bodyTop - page.bodyTopPx) > 0.25) return null
+    if (Math.abs(frame.bodyHeight - page.bodyHeightPx) > 0.25) return null
+    if (Math.abs(frame.contentWidth - page.contentWidthPx) > 0.25) return null
+    if (frame.header === page.header && frame.footer === page.footer) {
+      pages.push(page)
+      continue
+    }
+    pages.push({ ...page, header: frame.header, footer: frame.footer })
+  }
+  return pages
 }
 
 function wantsBlank(breakType: 'evenPage' | 'oddPage', pageNumber: number): boolean {
@@ -586,22 +699,31 @@ function wantsBlank(breakType: 'evenPage' | 'oddPage', pageNumber: number): bool
  *
  * Incremental: with `previous` and `changed`, starts at the page holding the first changed block and stops at the first
  * page whose start (block, y0) equals the previous layout's page start at the same index, reusing the rest.
+ * A changed section key (page size, margins, or break type) starts at that section's first page instead.
  */
 export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, changed: readonly BlockId[]): Layout {
   const body = doc.body
   const sectionOf = sectionIndexes(body)
   const changedSet = new Set(changed)
+  const keys = sectionKeysOf(doc)
   if (body.length === 0) {
     const section = doc.sections[0]
-    if (!section) return { pages: [], complete: true }
-    return { pages: [blankPage(doc, section, 0, 1, measure)], complete: true }
+    if (!section) return { pages: [], complete: true, sectionKeys: keys }
+    return finishLayout(doc, [blankPage(doc, section, 0, 1, measure)], true)
   }
-  if (previous && changed.length === 0 && previous.complete) return previous
+  const geometrySame = !previous || sameSectionKeys(previous.sectionKeys, keys)
+  let forceStart = previous !== null && !geometrySame
+  if (geometrySame && previous && changed.length === 0 && previous.complete) {
+    if (!decorationKeysDiffer(doc, previous)) return previous
+    const patched = patchDecorations(doc, previous, measure)
+    if (patched) return finishLayout(doc, patched, true)
+    forceStart = true
+  }
 
   const pages: Page[] = []
   let cursor: Cursor = { index: 0, y0: 0 }
   let softNext = false
-  if (previous && previous.pages.length > 0) {
+  if (previous && previous.pages.length > 0 && !forceStart) {
     const start = restart(previous, body, changedSet)
     for (let i = 0; i < start.pageIndex; i++) {
       const page = previous.pages[i]
@@ -609,6 +731,19 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
     }
     cursor = start.cursor
     softNext = start.soft
+  } else if (previous && previous.pages.length > 0) {
+    let from = geometrySame ? 0 : firstDivergentPage(previous, keys)
+    if (changed.length > 0) {
+      const start = restart(previous, body, changedSet)
+      if (start.pageIndex < from) from = start.pageIndex
+    }
+    for (let i = 0; i < from; i++) {
+      const page = previous.pages[i]
+      if (page) pages.push(page)
+    }
+    const located = cursorFromPage(previous, body, from)
+    cursor = located.cursor
+    softNext = located.soft
   }
 
   let pending: PageBuilder | null = null
@@ -617,10 +752,10 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
   while (cursor.index < body.length && guard < maxGuard) {
     guard += 1
     if (!pending) {
-      const reused = tryReuse(previous, pages.length, body, cursor, changedSet, sectionOf)
+      const reused = tryReuse(previous, pages.length, doc, body, cursor, changedSet, sectionOf, measure, keys)
       if (reused) {
         for (const page of reused) pages.push(page)
-        return { pages, complete: previous?.complete ?? true }
+        return finishLayout(doc, pages, previous?.complete ?? true)
       }
     }
 
@@ -647,7 +782,7 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
     const measured = measure(block, section)
     if (!measured) {
       if (pending && pending.slices.length > 0) pages.push(pending.toPage())
-      return { pages, complete: false }
+      return finishLayout(doc, pages, false)
     }
 
     if (!pending) {
@@ -698,7 +833,7 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
     const section = doc.sections[0]
     if (section) pages.push(blankPage(doc, section, 0, 1, measure))
   }
-  return { pages, complete: cursor.index >= body.length && guard < maxGuard }
+  return finishLayout(doc, pages, cursor.index >= body.length && guard < maxGuard)
 }
 
 export interface CaretRect {
@@ -765,6 +900,100 @@ function diffIds(prev: readonly Block[], next: readonly Block[]): BlockId[] {
     }
   }
   return ids
+}
+
+export interface LayoutPlan {
+  readonly remeasure: readonly BlockId[]
+  readonly paint: readonly BlockId[]
+}
+
+/**
+ * What an edit invalidates. A replaced block, or a block in a section whose page object changed, is measured again.
+ * A paragraph whose marker text changed is painted again and not measured: the marker sits outside the line.
+ */
+export function layoutPlan(
+  previous: Doc,
+  next: Doc,
+  previousMarkers: ReadonlyMap<ParaId, string>,
+  nextMarkers: ReadonlyMap<ParaId, string>,
+): LayoutPlan {
+  const remeasure = diffIds(previous.body, next.body)
+  const seen = new Set<string>(remeasure)
+  const limit = Math.max(previous.sections.length, next.sections.length)
+  for (let i = 0; i < limit; i++) {
+    const before = previous.sections[i]
+    const after = next.sections[i]
+    if (before?.page === after?.page) continue
+    if (!after) continue
+    for (const id of sectionMeasureIds(next, i)) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      remeasure.push(id)
+    }
+  }
+  const paint = remeasure.slice()
+  const painted = new Set<string>(paint)
+  for (const id of markerPaintIds(next.body, previousMarkers, nextMarkers)) {
+    if (painted.has(id)) continue
+    painted.add(id)
+    paint.push(id)
+  }
+  return { remeasure, paint }
+}
+
+function sectionMeasureIds(doc: Doc, sectionIndex: number): BlockId[] {
+  const indexes = sectionIndexes(doc.body)
+  const ids: BlockId[] = []
+  for (let i = 0; i < doc.body.length; i++) {
+    if ((indexes[i] ?? 0) !== sectionIndex) continue
+    const block = doc.body[i]
+    if (block && !ids.includes(block.id)) ids.push(block.id)
+  }
+  const section = doc.sections[sectionIndex]
+  if (!section) return ids
+  const keys = [
+    section.headers.default,
+    section.headers.first,
+    section.headers.even,
+    section.footers.default,
+    section.footers.first,
+    section.footers.even,
+  ]
+  for (const key of keys) {
+    if (!key) continue
+    const blocks = doc.stories.get(key)
+    if (!blocks) continue
+    for (const block of blocks) {
+      if (!ids.includes(block.id)) ids.push(block.id)
+    }
+  }
+  return ids
+}
+
+function markerPaintIds(
+  body: readonly Block[],
+  previousMarkers: ReadonlyMap<ParaId, string>,
+  nextMarkers: ReadonlyMap<ParaId, string>,
+): BlockId[] {
+  const ids: BlockId[] = []
+  const seen = new Set<string>()
+  const consider = (id: ParaId): void => {
+    if (previousMarkers.get(id) === nextMarkers.get(id)) return
+    const owner = topBlockId(body, id)
+    if (!owner || seen.has(owner)) return
+    seen.add(owner)
+    ids.push(owner)
+  }
+  for (const id of previousMarkers.keys()) consider(id)
+  for (const id of nextMarkers.keys()) consider(id)
+  return ids
+}
+
+function topBlockId(body: readonly Block[], id: string): BlockId | null {
+  for (const block of body) {
+    if (containsId(block, id)) return block.id
+  }
+  return null
 }
 
 function extractHeader(blockEl: HTMLElement, rows: number): HTMLTableElement | null {
@@ -834,7 +1063,7 @@ export class PageView {
   private pageEls: HTMLElement[] = []
   private measures = new WeakMap<Block, Measure>()
   private lineStartCache = new WeakMap<Block, Uint32Array>()
-  private _layout: Layout = { pages: [], complete: false }
+  private _layout: Layout = { pages: [], complete: false, sectionKeys: [] }
   private zoom = 1
   private cursor = 0
   private chunk = 0
@@ -865,7 +1094,9 @@ export class PageView {
   }
 
   get layout(): Layout {
-    if (this.rewriting && this._layout.complete) return { pages: this._layout.pages, complete: false }
+    if (this.rewriting && this._layout.complete) {
+      return { pages: this._layout.pages, complete: false, sectionKeys: this._layout.sectionKeys }
+    }
     return this._layout
   }
 
@@ -881,7 +1112,7 @@ export class PageView {
     this.deco = null
     this.decoMeasure = null
     this.decoOwner = null
-    this._layout = { pages: [], complete: false }
+    this._layout = { pages: [], complete: false, sectionKeys: [] }
     this.cursor = 0
     this.dead = false
     this.ensureChrome()
@@ -920,25 +1151,33 @@ export class PageView {
   }
 
   /**
-   * After a transaction. Finds changed blocks by identity, re-renders their mounted copies, re-measures them,
-   * repaginates incrementally, and moves slices between mounted pages. Unmounted pages only get new slice lists.
+   * After a transaction. Remeasures a block whose object changed, and every block in a section whose page changed.
+   * A paragraph whose list marker changed is painted again without a new measure. Unmounted pages only get new slice lists.
    */
-  update(previous: Doc, next: Doc): void {
+  update(
+    previous: Doc,
+    next: Doc,
+    previousMarkers: ReadonlyMap<ParaId, string>,
+    nextMarkers: ReadonlyMap<ParaId, string>,
+  ): void {
     this.cancelChunk()
     this.finishRewrite()
-    const changed = diffIds(previous.body, next.body)
+    const plan = layoutPlan(previous, next, previousMarkers, nextMarkers)
     this.doc = next
     this.indexDoc = null
     this.indexMap = null
     this.deco = null
     this.decoMeasure = null
     this.decoOwner = null
-    for (const id of changed) {
+    for (const id of plan.remeasure) {
       const located = this.locateOwner(id)
-      if (located) this.measureOne(located.block, located.section)
+      if (!located) continue
+      this.measures.delete(located.block)
+      this.lineStartCache.delete(located.block)
+      this.measureOne(located.block, located.section)
     }
-    this._layout = paginate(next, (block) => this.measures.get(block), this._layout, changed)
-    this.changedIds = new Set(changed)
+    this._layout = paginate(next, (block) => this.measures.get(block), this._layout, plan.remeasure)
+    this.changedIds = new Set(plan.paint)
     this.syncPages()
     this.changedIds = null
     if (this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
@@ -1626,7 +1865,7 @@ export class PageView {
   }
 
   private signature(page: Page): string {
-    let text = `${page.section}:${page.bodyTopPx}:`
+    let text = `${page.section}:${page.bodyTopPx}:${page.header ?? ''}:${page.footer ?? ''}:`
     for (const slice of page.slices) text += `${slice.block}@${slice.y0},${slice.y1},${slice.repeatHeaderRows};`
     return text
   }
