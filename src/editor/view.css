@@ -171,17 +171,22 @@ img.atom {
   padding: 2px 4px;
 }
 
+/* Cell lines are inset shadows, not borders. With collapsed borders acdert lays each column out one
+   pixel wider than its <col>, so a table as wide as the text area lost its right edge to the clip. */
 .blk.t > table,
 .repeat-head {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: fixed;
+  box-shadow: inset 1px 1px 0 #8d8d8d;
 }
 
 .blk.t td,
 .repeat-head td {
-  border: 1px solid #8d8d8d;
+  box-sizing: border-box;
+  box-shadow: inset -1px -1px 0 #8d8d8d;
   vertical-align: top;
-  padding: 2px 4px;
+  padding: 3px 5px 3px 5px;
   overflow-wrap: break-word;
 }
 
