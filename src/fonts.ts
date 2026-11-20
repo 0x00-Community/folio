@@ -235,3 +235,198 @@ async function installedNames(): Promise<ReadonlySet<string> | null> {
   if (!ok) return null
   return names
 }
+
+/** One face from `GET /api/fonts`. `truetype` is false for a CFF `.otf`. */
+export type PrintCatalogFace = {
+  readonly id: string
+  readonly families: readonly string[]
+  readonly bold: boolean
+  readonly italic: boolean
+  readonly cjk: boolean
+  readonly truetype: boolean
+  /** OS/2 usWeightClass. Missing means the catalog did not say. */
+  readonly weight?: number
+}
+
+export type PrintFontPlan = {
+  readonly faces: readonly { readonly id: string; readonly family: string }[]
+  readonly aliases: readonly [string, string][]
+}
+
+/**
+ * The session keeps one face per family name, so a bold companion is registered under `${family} Bold`.
+ * Layout matches that face by the name and weight stored in the font, not by this key.
+ */
+export function isPrintBoldKey(family: string): boolean {
+  return family.endsWith(' Bold') || family.includes(' Bold ')
+}
+
+/**
+ * Caller faces for one print. Only CJK TrueType faces, each physical face once.
+ * The upright face is the first non-bold, non-italic match, the same face `resolveFont` returns.
+ * A bold face of that family is added when the catalog has one, preferring weight 700 over Black.
+ * Other requested spellings of the same face become aliases onto the first spelling.
+ * `han` adds 宋体 when the document has Han text and no CJK family resolved.
+ */
+export function printFonts(
+  families: readonly string[],
+  catalog: readonly PrintCatalogFace[],
+  han = false,
+): PrintFontPlan {
+  const requested: string[] = []
+  const seen = new Set<string>()
+  for (const family of families) {
+    const trimmed = family.trim()
+    const key = trimmed.toLowerCase()
+    if (trimmed === '' || seen.has(key)) continue
+    seen.add(key)
+    requested.push(trimmed)
+  }
+  if (han && !requested.some((family) => resolvedFaces(catalog, family).length > 0) && !seen.has('宋体')) {
+    requested.push('宋体')
+  }
+
+  const faces: { id: string; family: string }[] = []
+  const aliases: [string, string][] = []
+  const loadedById = new Map<string, string>()
+  const used = new Set<string>()
+  for (const family of requested) {
+    const matches = resolvedFaces(catalog, family)
+    const regular = regularFace(matches)
+    if (regular === undefined) continue
+    const existing = loadedById.get(regular.id)
+    if (existing !== undefined) {
+      if (existing !== family) aliases.push([family, existing])
+      continue
+    }
+    const key = claim(family, used)
+    loadedById.set(regular.id, key)
+    faces.push({ id: regular.id, family: key })
+    const bold = boldFace(matches)
+    if (bold !== undefined && bold.id !== regular.id && !loadedById.has(bold.id)) {
+      const boldKey = claimBold(key, bold.id, used)
+      loadedById.set(bold.id, boldKey)
+      faces.push({ id: bold.id, family: boldKey })
+    }
+  }
+  return { faces, aliases }
+}
+
+export type FetchedPrintFonts = {
+  readonly faces: readonly { readonly family: string; readonly bytes: Uint8Array }[]
+  readonly aliases: readonly [string, string][]
+}
+
+/** `printFonts` against `GET /api/fonts`, then one extracted face per id. A face that fails to read is omitted. */
+export async function fetchPrintFonts(families: readonly string[], han: boolean): Promise<FetchedPrintFonts> {
+  const plan = printFonts(families, await readPrintCatalog(), han)
+  const cached = new Map<string, Uint8Array>()
+  const faces: { family: string; bytes: Uint8Array }[] = []
+  for (const face of plan.faces) {
+    let bytes = cached.get(face.id)
+    if (bytes === undefined) {
+      const read = await readPrintFace(face.id)
+      if (read === undefined) continue
+      bytes = read
+      cached.set(face.id, bytes)
+    }
+    faces.push({ family: face.family, bytes })
+  }
+  const loaded = new Set(faces.map((face) => face.family))
+  const aliases = plan.aliases.filter((pair) => loaded.has(pair[1]))
+  return { faces, aliases }
+}
+
+function resolvedFaces(catalog: readonly PrintCatalogFace[], requested: string): readonly PrintCatalogFace[] {
+  for (const name of aliasChain(requested)) {
+    const matches = catalog.filter((face) => face.cjk && face.truetype && sameFamily(face, name))
+    if (matches.length > 0) return matches
+  }
+  return []
+}
+
+function sameFamily(face: PrintCatalogFace, name: string): boolean {
+  const key = name.trim().toLowerCase()
+  return face.families.some((family) => family.trim().toLowerCase() === key)
+}
+
+function regularFace(matches: readonly PrintCatalogFace[]): PrintCatalogFace | undefined {
+  return matches.find((face) => !face.bold && !face.italic) ?? matches[0]
+}
+
+function boldFace(matches: readonly PrintCatalogFace[]): PrintCatalogFace | undefined {
+  const bolds = matches.filter((face) => face.bold && !face.italic)
+  let best: PrintCatalogFace | undefined
+  for (const face of bolds) {
+    if (best === undefined || weightDistance(face) < weightDistance(best)) best = face
+  }
+  return best
+}
+
+function weightDistance(face: PrintCatalogFace): number {
+  return typeof face.weight === 'number' ? Math.abs(face.weight - 700) : Number.POSITIVE_INFINITY
+}
+
+function claim(name: string, used: Set<string>): string {
+  if (!used.has(name)) {
+    used.add(name)
+    return name
+  }
+  let n = 2
+  let key = `${name} ${n}`
+  while (used.has(key)) {
+    n += 1
+    key = `${name} ${n}`
+  }
+  used.add(key)
+  return key
+}
+
+function claimBold(loaded: string, id: string, used: Set<string>): string {
+  const preferred = `${loaded} Bold`
+  if (!used.has(preferred)) {
+    used.add(preferred)
+    return preferred
+  }
+  const alt = `${loaded} Bold ${id}`
+  if (!used.has(alt)) {
+    used.add(alt)
+    return alt
+  }
+  return claim(alt, used)
+}
+
+async function readPrintCatalog(): Promise<PrintCatalogFace[]> {
+  const body = await fontCatalog()
+  if (!Array.isArray(body)) return []
+  const faces: PrintCatalogFace[] = []
+  for (const item of body) {
+    if (!isRecord(item) || typeof item.id !== 'string' || !Array.isArray(item.families)) continue
+    const families: string[] = []
+    for (const name of item.families) {
+      if (typeof name === 'string' && name.trim() !== '') families.push(name)
+    }
+    if (families.length === 0) continue
+    const face: PrintCatalogFace = {
+      id: item.id,
+      families,
+      bold: item.bold === true,
+      italic: item.italic === true,
+      cjk: item.cjk === true,
+      truetype: item.truetype === true,
+    }
+    if (typeof item.weight === 'number' && Number.isFinite(item.weight)) faces.push({ ...face, weight: item.weight })
+    else faces.push(face)
+  }
+  return faces
+}
+
+async function readPrintFace(id: string): Promise<Uint8Array | undefined> {
+  try {
+    const response = await fetch(`/api/fonts/${encodeURIComponent(id)}/face`)
+    if (!response.ok) return undefined
+    return new Uint8Array(await response.arrayBuffer())
+  } catch {
+    return undefined
+  }
+}

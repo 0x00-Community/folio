@@ -11,6 +11,10 @@ export type FontFace = {
   bold: boolean
   italic: boolean
   cjk: boolean
+  /** OS/2 usWeightClass. 400 when the face has no OS/2 table. */
+  weight: number
+  /** TrueType outlines. CFF (OTTO) faces are not embedded by the PDF writer. */
+  truetype: boolean
   size: number
 }
 
@@ -123,17 +127,20 @@ export function readFaces(read: Reader): Omit<FontFace, 'id' | 'path' | 'size'>[
     let bold = false
     let italic = false
     let cjk = false
+    let weight = 400
     const os2 = tables.get('OS/2')
     if (os2 && os2.length >= 62) {
       const bytes = read(os2.at, Math.min(os2.length, 96))
-      const weight = u16(bytes, 4)
+      const usWeight = u16(bytes, 4)
+      weight = usWeight === 0 ? 400 : usWeight
       const selection = u16(bytes, 62)
       bold = weight >= 600 || (selection & 0x20) !== 0
       italic = (selection & 0x01) !== 0
       const unicodeRange2 = u32(bytes, 46)
       cjk = (unicodeRange2 & (1 << (59 - 32))) !== 0
     }
-    return { faceIndex, families: [...families], bold, italic, cjk }
+    const truetype = tag(read(offset, 4), 0) !== 'OTTO'
+    return { faceIndex, families: [...families], bold, italic, cjk, weight, truetype }
   })
 }
 

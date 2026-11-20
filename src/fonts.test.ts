@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliasChain, cssStack, installedFamilies } from './fonts.ts'
+import { aliasChain, cssStack, installedFamilies, printFonts } from './fonts.ts'
+import type { PrintCatalogFace } from './fonts.ts'
 
 test('cssStack builds the 宋体 substitute list and ends in the generic family', () => {
   const stack = cssStack('宋体', 'serif')
@@ -47,4 +48,59 @@ test('aliasChain walks the task order, with SimSun before 宋体', () => {
   assert.deepEqual(aliasChain('Calibri'), ['Calibri', 'Carlito'])
   assert.deepEqual(aliasChain('Courier New'), ['Courier New', 'Liberation Mono'])
   assert.deepEqual(aliasChain('等线').slice(0, 2), ['DengXian', 'PingFang SC'])
+})
+
+function face(id: string, families: string[], fields: Partial<PrintCatalogFace> = {}): PrintCatalogFace {
+  return {
+    id,
+    families,
+    bold: false,
+    italic: false,
+    cjk: true,
+    truetype: true,
+    weight: 400,
+    ...fields,
+  }
+}
+
+/** Songti SC as this machine lists it: Black, Bold, Light, plus a CFF twin and Calibri. */
+function songtiCatalog(): PrintCatalogFace[] {
+  return [
+    face('songti-black', ['Songti SC', '宋体-简'], { bold: true, weight: 900 }),
+    face('songti-bold', ['Songti SC', '宋体-简'], { bold: true, weight: 700 }),
+    face('songti', ['Songti SC', '宋体-简'], { weight: 300 }),
+    face('songti-otf', ['Songti SC'], { truetype: false, weight: 400 }),
+    face('source-han', ['Source Han Serif SC'], { truetype: false }),
+    face('calibri', ['Calibri'], { cjk: false }),
+  ]
+}
+
+test('printFonts maps 宋体 and SimSun onto one Songti face and one alias', () => {
+  const catalog = songtiCatalog().filter((item) => !item.bold)
+  const plan = printFonts(['宋体', 'SimSun'], catalog)
+  assert.deepEqual(plan.faces, [{ id: 'songti', family: '宋体' }])
+  assert.deepEqual(plan.aliases, [['SimSun', '宋体']])
+})
+
+test('printFonts adds the bold face, skips Calibri and CFF, and supplies 宋体 for Han text', () => {
+  const catalog = songtiCatalog()
+  const both = printFonts(['宋体', 'SimSun'], catalog)
+  assert.deepEqual(both.faces, [
+    { id: 'songti', family: '宋体' },
+    { id: 'songti-bold', family: '宋体 Bold' },
+  ])
+  assert.deepEqual(both.aliases, [['SimSun', '宋体']])
+  assert.equal(both.faces.some((item) => item.id === 'songti-black' || item.id === 'songti-otf'), false)
+
+  assert.deepEqual(printFonts(['Calibri'], catalog), { faces: [], aliases: [] })
+  const cffOnly = catalog.filter((item) => item.truetype === false || item.cjk === false)
+  assert.deepEqual(printFonts(['宋体'], cffOnly), { faces: [], aliases: [] })
+
+  const han = printFonts(['Calibri', 'Times New Roman'], catalog, true)
+  assert.deepEqual(han.faces, [
+    { id: 'songti', family: '宋体' },
+    { id: 'songti-bold', family: '宋体 Bold' },
+  ])
+  assert.deepEqual(han.aliases, [])
+  assert.deepEqual(printFonts(['Calibri', 'Times New Roman'], catalog), { faces: [], aliases: [] })
 })

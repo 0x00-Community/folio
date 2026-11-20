@@ -55,13 +55,15 @@ export default {
     const url = new URL(request.url)
     if (url.pathname === '/api/fonts') {
       return Response.json(
-        index().map(({ id, families, bold, italic, cjk, size }) => ({
+        index().map(({ id, families, bold, italic, cjk, size, truetype, weight }) => ({
           id,
           families,
           bold,
           italic,
           cjk,
           size,
+          truetype,
+          weight,
         })),
       )
     }
