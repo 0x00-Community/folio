@@ -1,6 +1,11 @@
 # Round 4 brief: lists, page setup, tables, images
 
-Status: not started (2026-11-20). Branch `r4/features`.
+Status: all five units pass their checks on `r4/features` (2026-11-20). The kit branch `work/editing-kit-grok` gained
+`Section::set_landscape` and `Section::set_portrait`. Not verified: a saved file opened in Microsoft Word, a table
+inside a body content control (finding 7 held for that case only by reading), the save time of a row inserted in the
+middle of a table or of a deleted row or column (one package clone each), and the caret position right after an
+image is inserted (the image screenshot shows it at the start of the cell text). Finding 7 was wrong for a table
+nested in a cell. The toolbar wraps to two rows at 1440 px.
 
 ## Goal
 
