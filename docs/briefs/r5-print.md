@@ -1,6 +1,27 @@
 # Round 5 brief: print preview and PDF export
 
-Status: not started (2026-11-20). Branch `r5/print`.
+Status: all three units pass their checks on `r5/print` (2026-11-20). The engine links layout and PDF, and
+`public/engine.wasm` is 24.8 MB (5.9 MB before). Measured in the runtime: layout 94 ms and 932 ms, one page image at
+144 dpi 141 ms and 229 ms, for `basic.docx` and `long.docx`.
+
+A real 35 page government form (private, read from `WORD_TEST_DOC` and `WORD_TEST_REF_PDF`, never committed) showed
+two rdocx layout defects, both fixed on the kit branch `work/editing-kit-grok` with a regression test each:
+`w:charSpace` was read as twips instead of 4096ths of a point (reversed, spread-out text), and a table after a
+full-width floating table was drawn through it. On that document the PDF went from 30 pages and 1,180 missing
+characters to 37 pages and 82 missing (Word: 35 pages, 26 missing).
+
+Open:
+
+- A vertically merged table row taller than a page is placed whole and runs past the page box. The 82 missing
+  characters are there. `scripts/e2e/print.mjs` fails its reference case for this reason.
+- Wasm memory is 490 MB after one layout of `basic.docx` and 1.3 GB for the real document. The layout copies each
+  font's bytes about five times. It does not grow on later layouts.
+- The page count of the preview differs from the editing view's (59 against 50 for `long.docx`).
+- The preview shows a table without borders as the file has it. The editing view draws borders on every table.
+- `shell-input.mjs` and `shell-app.mjs` each logged `engine.wasm: 404` once in one regression run and passed five
+  reruns. Not explained.
+- Not verified: an exported PDF opened in a PDF reader by a person, a CFF `.otf` CJK face, the abort path when the
+  engine panics.
 
 ## Goal
 
