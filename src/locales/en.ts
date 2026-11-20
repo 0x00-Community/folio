@@ -78,6 +78,20 @@ const messages: Record<string, string> = {
   'open.error.encrypted': 'This document is encrypted and cannot be opened.',
   'open.error.corrupt': 'This document is damaged and cannot be opened.',
   'open.error.tooLarge': 'This document is too large to open.',
+  'print.preview': 'Print preview',
+  'print.export': 'Export PDF',
+  'print.close': 'Close',
+  'print.cancel': 'Cancel',
+  'print.preparing': 'Preparing the preview…',
+  'print.pages': '{count} pages',
+  'print.region': 'Print preview',
+  'print.page': 'Page {page} of {pages}',
+  'print.reopen': 'This document must be reopened.',
+  'print.error.font': 'The font {family} could not be loaded for this preview.',
+  'print.error.layout': 'Could not prepare this preview. {detail}',
+  'print.error.render': 'Could not render this preview. {detail}',
+  'print.error.write': 'Could not write the PDF. {detail}',
+  'file.pdf': 'PDF',
 }
 
 export default messages

@@ -209,6 +209,81 @@
         background: var(--error-bg);
         color: var(--error-text);
       }
+      /* Author `display` beats the user-agent `[hidden]` rule, so a hidden bar would stay on screen and in inspect. */
+      .toolbar[hidden],
+      #pages[hidden],
+      .preview[hidden],
+      .preview-bar button[hidden] {
+        display: none !important;
+      }
+      .preview {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--canvas-bg);
+        font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+        color: var(--text);
+      }
+      .preview-bar {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        box-sizing: border-box;
+        min-height: 44px;
+        padding: 0 8px;
+        background: var(--chrome-bg);
+        border-bottom: 1px solid var(--chrome-border);
+      }
+      .preview-count {
+        margin-right: auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .preview-bar button {
+        height: 28px;
+        padding: 0 12px;
+        color: var(--text);
+        background: var(--field-bg);
+        border: 1px solid var(--chrome-border);
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .preview-bar button.primary {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      .preview-bar button:hover { background: var(--control-hover) }
+      .preview-bar button.primary:hover { background: var(--accent-soft) }
+      .preview-bar button:focus { outline: none }
+      .preview-bar button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .preview-bar button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .preview-pages {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        padding: 16px 16px 32px;
+      }
+      .preview-page {
+        margin: 0 auto 16px;
+        background: #fff;
+        box-shadow: var(--page-shadow);
+      }
+      .preview-page img {
+        display: block;
+        background: #fff;
+      }
       .unsaved {
         position: fixed;
         inset: 0;

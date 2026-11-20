@@ -5,8 +5,8 @@ import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, ins
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, engineBootMs, loadEngine, saveTampered, wasmMemoryBytes } from './engine/engine.ts'
-import type { Opened, PrintFontInfo } from './engine/engine.ts'
-import { fetchPrintFonts } from './fonts.ts'
+import type { Opened, PrintFontInfo, PrintLayout } from './engine/engine.ts'
+import { ensurePrintFonts } from './fonts.ts'
 import { locale, t } from './i18n.ts'
 import type { Block, Doc, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
@@ -17,8 +17,10 @@ import { openPageSetup } from './ui/page-setup.ts'
 import { openInsertTable } from './ui/table-tools.ts'
 import { createUnsavedDialog } from './ui/unsaved.ts'
 import type { UnsavedChoice } from './ui/unsaved.ts'
+import { describePrintFailure, mountPreview, pdfFileName, previewDpi, PreviewMachine } from './ui/preview.ts'
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+const PDF_MIME = 'application/pdf'
 
 export interface OpenFile {
   readonly handle: FileSystemFileHandle | null
@@ -40,9 +42,11 @@ export interface WordApp {
   requestClose(): boolean
   /** How long the last page-setup confirm blocked, including the relayout. Zero before the first one. */
   pageSetupMs(): number
+  /** The wasm memory size now. The print preview e2e reads it after opening and closing. */
+  memoryBytes(): number
   /**
    * Dev hook: fetch the CJK faces, lay out the open document, and time the blocking calls.
-   * Does not write a file. The PDF is base64.
+   * Does not write a file. The PDF is base64. The preview does not call this.
    */
   printLayout(): Promise<PrintMeasure>
 }
@@ -134,6 +138,9 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
         lastPageSetupMs = performance.now() - started
       })
     },
+    onPrint() {
+      void openPreview()
+    },
     onInsertTable() {
       if (isDialogOpen() || current().toolbar().inTable) return
       void openInsertTable().then((size) => {
@@ -170,6 +177,31 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   })
   const status = createStatus(statusRoot)
   const dialog = createUnsavedDialog((choice) => { void answer(choice) })
+  const pages = host
+  const machine = new PreviewMachine<PrintLayout>()
+  let heldScroll = { top: 0, left: 0 }
+  const preview = mountPreview(pages, machine, {
+    onCancel() {
+      requestPreviewClose()
+    },
+    onClose() {
+      requestPreviewClose()
+    },
+    onExport() {
+      void exportPdf()
+    },
+    onRenderError(error) {
+      failPreview(error)
+    },
+  })
+  // The dialog's own listener is capture-phase and stops Escape while it is open.
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || isDialogOpen()) return
+    const phase = machine.phase
+    if (phase === 'closed' || phase === 'unusable' || phase === 'failed') return
+    event.preventDefault()
+    requestPreviewClose()
+  })
 
   function current(): Editor {
     if (!editor) throw new Error('editor is not ready')
@@ -442,14 +474,172 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   // Return false at once. The runtime closes a dirty window if beforeclose is still pending after 3 seconds.
   // close() does not ask again, so Save and Don't save close the window themselves.
   appWindow.on('beforeclose', () => requestClose())
+
+  function concealEditing(): void {
+    toolbarRoot.hidden = true
+    pages.hidden = true
+  }
+
+  function revealEditing(scroll: { top: number; left: number }): void {
+    preview.hide()
+    toolbarRoot.hidden = false
+    pages.hidden = false
+    const restore = (): void => {
+      const phase = machine.phase
+      if (phase !== 'closed' && phase !== 'unusable' && phase !== 'failed') return
+      pages.scrollTop = scroll.top
+      pages.scrollLeft = scroll.left
+    }
+    restore()
+    // The page view may relayout on the frame it becomes visible and clamp the position.
+    requestAnimationFrame(() => {
+      restore()
+      requestAnimationFrame(restore)
+    })
+    current().focus()
+  }
+
+  function requestPreviewClose(): void {
+    const phase = machine.phase
+    if (phase === 'preparing') {
+      machine.cancel()
+      preview.markCancelling()
+      return
+    }
+    if (phase !== 'open' && phase !== 'exporting') return
+    const scroll = heldScroll
+    try {
+      preview.hide()
+      if (machine.close() === 'unusable') showBand(t('print.reopen'))
+    } catch (error) {
+      const failure = describePrintFailure(error, t)
+      if (failure.abort) machine.abort()
+      showBand(failure.message)
+    } finally {
+      revealEditing(scroll)
+    }
+  }
+
+  function failPreview(error: unknown): void {
+    const failure = describePrintFailure(error, t)
+    preview.hide()
+    if (failure.abort) {
+      machine.abort()
+      revealEditing(heldScroll)
+      showBand(failure.message)
+      return
+    }
+    if (machine.phase === 'cancelling') {
+      const phase = machine.finishCancel()
+      revealEditing(heldScroll)
+      if (phase === 'unusable') showBand(t('print.reopen'))
+      return
+    }
+    if (machine.phase !== 'closed' && machine.phase !== 'unusable') {
+      const phase = machine.fail()
+      if (phase === 'unusable') {
+        revealEditing(heldScroll)
+        showBand(t('print.reopen'))
+        return
+      }
+      machine.dismiss()
+    }
+    revealEditing(heldScroll)
+    showBand(failure.message)
+  }
+
+  async function openPreview(): Promise<void> {
+    if (isDialogOpen()) return
+    if (machine.phase === 'unusable') {
+      showBand(t('print.reopen'))
+      return
+    }
+    if (!machine.begin()) return
+    const editorNow = current()
+    const doc = editorNow.state.doc
+    heldScroll = { top: pages.scrollTop, left: pages.scrollLeft }
+    concealEditing()
+    preview.showPreparing()
+    clearError()
+    try {
+      // The status line has to paint before printLayout blocks the thread.
+      await paintFrame()
+      await paintFrame()
+      if (machine.phase !== 'preparing') {
+        machine.finishCancel()
+        revealEditing(heldScroll)
+        return
+      }
+      await ensurePrintFonts(editorNow.source, editorNow.source.fontsUsed(doc), documentHasHan(doc))
+      if (machine.phase !== 'preparing') {
+        machine.finishCancel()
+        revealEditing(heldScroll)
+        return
+      }
+      const layout = editorNow.source.printLayout(doc)
+      // The click is queued during the blocking call. This timer is queued after it, so settle sees the cancel.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      const settled = machine.settle(layout)
+      if (settled !== 'open') {
+        revealEditing(heldScroll)
+        if (settled === 'unusable') showBand(t('print.reopen'))
+        return
+      }
+      preview.showPages(layout, previewDpi(window.devicePixelRatio), {
+        pages: layout.pageCount(),
+        fonts: layout.fonts(),
+      })
+    } catch (error) {
+      failPreview(error)
+    }
+  }
+
+  async function exportPdf(): Promise<void> {
+    if (!machine.startExport()) return
+    preview.setExporting(true)
+    const layout = machine.held()
+    if (layout === null) {
+      machine.finishExport()
+      preview.setExporting(false)
+      return
+    }
+    let bytes: Uint8Array
+    try {
+      bytes = layout.pdf()
+    } catch (error) {
+      failPreview(error)
+      return
+    }
+    const suggested = pdfFileName(file?.name ?? t('untitled'))
+    try {
+      const picked = await pickPdf(suggested)
+      if (machine.phase !== 'exporting') return
+      if (!picked) {
+        machine.finishExport()
+        preview.setExporting(false)
+        return
+      }
+      await writeBytes(picked, bytes)
+      if (machine.phase !== 'exporting') return
+      machine.finishExport()
+      preview.setExporting(false)
+    } catch (error) {
+      if (machine.phase === 'exporting') {
+        machine.finishExport()
+        preview.setExporting(false)
+      }
+      if (isAbort(error)) return
+      const detail = error instanceof Error ? error.message : String(error)
+      showBand(t('print.error.write', { detail }))
+    }
+  }
+
   async function measurePrint(): Promise<PrintMeasure> {
     const editorNow = current()
     const doc = editorNow.state.doc
     const memoryBefore = wasmMemoryBytes()
     const fontStarted = performance.now()
-    const planned = await fetchPrintFonts(editorNow.source.fontsUsed(doc), documentHasHan(doc))
-    for (const face of planned.faces) editorNow.source.addFont(face.family, face.bytes)
-    for (const [requested, loaded] of planned.aliases) editorNow.source.addFontAlias(requested, loaded)
+    await ensurePrintFonts(editorNow.source, editorNow.source.fontsUsed(doc), documentHasHan(doc))
     const fontMs = performance.now() - fontStarted
     const layoutStarted = performance.now()
     const layout = editorNow.source.printLayout(doc)
@@ -486,6 +676,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     saveTampered: failSave,
     requestClose,
     pageSetupMs: () => lastPageSetupMs,
+    memoryBytes: () => wasmMemoryBytes(),
     printLayout: measurePrint,
   }
 }
@@ -541,6 +732,22 @@ async function writeBytes(handle: FileSystemFileHandle, bytes: Uint8Array): Prom
     await writable.close()
   } catch (error) {
     await writable.abort().catch(() => undefined)
+    throw error
+  }
+}
+
+function paintFrame(): Promise<void> {
+  return new Promise((resolve) => { requestAnimationFrame(() => resolve()) })
+}
+
+async function pickPdf(name: string): Promise<FileSystemFileHandle | null> {
+  try {
+    return await window.showSaveFilePicker({
+      suggestedName: name,
+      types: [{ description: t('file.pdf'), accept: { [PDF_MIME]: ['.pdf'] } }],
+    })
+  } catch (error) {
+    if (isAbort(error)) return null
     throw error
   }
 }

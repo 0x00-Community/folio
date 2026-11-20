@@ -29,6 +29,7 @@ export type IconName =
   | 'table-col-right'
   | 'table-col-delete'
   | 'table-delete'
+  | 'print'
 
 type MarkIcon = 'bold' | 'italic' | 'underline' | 'strike'
 
@@ -104,6 +105,8 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return drawTableColumn(svg, 'delete')
     case 'table-delete':
       return drawTableDelete(svg)
+    case 'print':
+      return drawPrint(svg)
     default: {
       const unexpected: never = name
       throw new Error(`unknown icon ${unexpected}`)
@@ -171,6 +174,13 @@ function drawTableColumn(svg: SVGSVGElement, where: 'left' | 'right' | 'delete')
   }
   grid(svg, 3, 3, 12, 12)
   path(svg, 'M7.4 4.2 L10.6 13.8')
+}
+
+function drawPrint(svg: SVGSVGElement): void {
+  path(svg, 'M5 2.6 H13 V6.4 H5 Z')
+  path(svg, 'M3.2 6.4 H14.8 V12 H3.2 Z')
+  path(svg, 'M5.6 10.2 H12.4 V15.4 H5.6 Z')
+  path(svg, 'M6.4 8.4 H8')
 }
 
 function drawTableDelete(svg: SVGSVGElement): void {

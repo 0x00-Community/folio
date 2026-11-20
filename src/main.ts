@@ -28,6 +28,7 @@ function installHook(app: {
   saveTampered(): string
   requestClose(): boolean
   pageSetupMs(): number
+  memoryBytes(): number
   printLayout(): Promise<PrintMeasure>
 }): void {
   // There is no production build flag. These hooks are how the e2e reaches save, a forced verify
@@ -52,6 +53,9 @@ function installHook(app: {
     },
     pageSetupMs() {
       return app.pageSetupMs()
+    },
+    memoryBytes() {
+      return app.memoryBytes()
     },
     printLayout() {
       return app.printLayout()
@@ -78,6 +82,7 @@ declare global {
       saveTampered(): string
       requestClose(): boolean
       pageSetupMs(): number
+      memoryBytes(): number
       printLayout(): Promise<PrintMeasure>
     }
   }

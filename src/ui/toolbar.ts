@@ -27,6 +27,7 @@ export interface ToolbarHandlers {
   onList(kind: 'bullet' | 'decimal'): void
   onIndent(delta: 1 | -1): void
   onPageSetup(): void
+  onPrint(): void
   onInsertTable(): void
   onInsertImage(): void
   onTableRow(where: 'above' | 'below'): void
@@ -128,7 +129,10 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   const decrease = iconButton(t('list.decrease'), null, platform, () => handlers.onIndent(-1), 'indent-decrease')
   const increase = iconButton(t('list.increase'), null, platform, () => handlers.onIndent(1), 'indent-increase')
   group(root).append(bullet, numbered, decrease, increase)
-  group(root).append(iconButton(t('pageSetup'), null, platform, () => handlers.onPageSetup(), 'page-setup'))
+  group(root).append(
+    iconButton(t('pageSetup'), null, platform, () => handlers.onPageSetup(), 'page-setup'),
+    textButton(t('print.preview'), platform, () => handlers.onPrint(), 'print'),
+  )
 
   const insertTable = iconButton(t('table.insert'), null, platform, () => handlers.onInsertTable(), 'table')
   const insertPicture = iconButton(t('image.insert'), null, platform, () => handlers.onInsertImage(), 'image')

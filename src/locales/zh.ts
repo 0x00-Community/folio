@@ -78,6 +78,20 @@ const messages: Record<string, string> = {
   'open.error.encrypted': '这个文档已加密，无法打开。',
   'open.error.corrupt': '这个文档已损坏，无法打开。',
   'open.error.tooLarge': '这个文档太大，无法打开。',
+  'print.preview': '打印预览',
+  'print.export': '导出 PDF',
+  'print.close': '关闭',
+  'print.cancel': '取消',
+  'print.preparing': '正在准备预览…',
+  'print.pages': '共 {count} 页',
+  'print.region': '打印预览',
+  'print.page': '第 {page} 页，共 {pages} 页',
+  'print.reopen': '必须重新打开此文档。',
+  'print.error.font': '无法加载字体 {family}，不能预览。',
+  'print.error.layout': '无法准备此预览。{detail}',
+  'print.error.render': '无法渲染此预览。{detail}',
+  'print.error.write': '无法写入 PDF。{detail}',
+  'file.pdf': 'PDF',
 }
 
 export default messages
