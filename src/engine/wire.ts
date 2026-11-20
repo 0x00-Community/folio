@@ -203,10 +203,18 @@ export type ParaLook = {
 /** A body block in a patch. `{ keep }` is the block import produced; anything else is the full block. */
 export type PatchBlock = { keep: number } | Block
 
+/** Bytes for one image key. `write` embeds each key once. */
+export type MediaPart = {
+  key: string
+  fileName: string
+  base64: string
+}
+
 /** What save sends. Field names match `wire::Patch` (camelCase). */
 export type Patch = {
   body: PatchBlock[]
   sections: Section[]
   newLists: [number, ListDef][]
   addedStyles: string[]
+  media: MediaPart[]
 }

@@ -603,6 +603,7 @@ export function deleteEnclosingTable(): Command {
 
 export interface MediaRef {
   readonly key: MediaKey
+  readonly contentType: string
   readonly widthPx: number
   readonly heightPx: number
 }
@@ -622,7 +623,7 @@ export function insertImage(media: MediaRef): Command {
     let doc = cleared.doc
     if (!doc.media.byKey.has(media.key)) {
       const byKey = new Map(doc.media.byKey)
-      byKey.set(media.key, { contentType: 'image/png', origin: 'added' })
+      byKey.set(media.key, { contentType: media.contentType, origin: 'added' })
       doc = { ...doc, media: { byKey } }
     }
     const inserted = insertAtom(doc, cleared.pos, atom)
@@ -1804,15 +1805,42 @@ function deleteGridColumn(table: Table, col: number): Table | null {
 }
 
 function scaleImage(doc: Doc, loc: ParaLoc, media: MediaRef): { width: number, height: number } {
-  let width = media.widthPx * 72 / 96
-  let height = media.heightPx * 72 / 96
-  const max = contentWidth(doc, sectionIndex(doc, loc))
+  let width = media.widthPx * 0.75
+  let height = media.heightPx * 0.75
+  const cell = cellWidth(doc, loc)
+  const max = cell !== null && cell > 0 ? cell : contentWidth(doc, sectionIndex(doc, loc))
   if (width > max && width > 0) {
     const scale = max / width
     width *= scale
     height *= scale
   }
   return { width, height }
+}
+
+function cellWidth(doc: Doc, loc: ParaLoc): number | null {
+  let blocks: readonly Block[] = doc.body
+  let width: number | null = null
+  const path = loc.path
+  let i = 0
+  while (i + 3 < path.length) {
+    const blockIndex = path[i]
+    const rowIndex = path[i + 1]
+    const cellIndex = path[i + 2]
+    if (blockIndex === undefined || rowIndex === undefined || cellIndex === undefined) return width
+    const block = blocks[blockIndex]
+    if (!block || block.kind !== 'table') return width
+    const row = block.rows[rowIndex]
+    const cell = row?.cells[cellIndex]
+    if (!row || !cell) return width
+    const start = columnOf(row, cellIndex)
+    let sum = 0
+    for (let column = 0; column < cell.span; column += 1) sum += block.grid[start + column] ?? 0
+    if (sum > 0) width = sum
+    if (i + 4 === path.length) return width
+    blocks = cell.blocks
+    i += 3
+  }
+  return width
 }
 
 function sectionIndex(doc: Doc, loc: ParaLoc): number {

@@ -572,7 +572,7 @@ test('images scale to the content width and page setup replaces one section', ()
   const para = paragraph('p', [text('a')])
   const key = mediaKey('pic')
   const doc = makeDoc([para], { media: { byKey: new Map([[key, { contentType: 'image/jpeg', origin: 'pristine' }]]) } })
-  const small = run(caretAt(initialState(doc), para.id, 1), insertImage({ key, widthPx: 200, heightPx: 100 }))
+  const small = run(caretAt(initialState(doc), para.id, 1), insertImage({ key, contentType: 'image/jpeg', widthPx: 200, heightPx: 100 }))
   const image = asParagraph(small.doc.body[0]).inlines[1]
   assert.ok(image && image.kind === 'atom' && image.atom.type === 'image', 'the image is an atom')
   if (image && image.kind === 'atom' && image.atom.type === 'image') {
@@ -580,7 +580,7 @@ test('images scale to the content width and page setup replaces one section', ()
     assert.equal(image.atom.heightPt, pt(75), 'height converts with the same scale')
   }
   assert.equal(small.doc.media.byKey.get(key)?.origin, 'pristine', 'an existing media key keeps its origin')
-  const fresh = run(caretAt(initialState(makeDoc([para])), para.id, 1), insertImage({ key: mediaKey('new'), widthPx: 1000, heightPx: 500 }))
+  const fresh = run(caretAt(initialState(makeDoc([para])), para.id, 1), insertImage({ key: mediaKey('new'), contentType: 'image/jpeg', widthPx: 1000, heightPx: 500 }))
   const scaled = asParagraph(fresh.doc.body[0]).inlines[1]
   assert.ok(scaled && scaled.kind === 'atom' && scaled.atom.type === 'image', 'a new image is inserted')
   if (scaled && scaled.kind === 'atom' && scaled.atom.type === 'image') {
@@ -588,7 +588,7 @@ test('images scale to the content width and page setup replaces one section', ()
     assert.equal(scaled.atom.heightPt, pt(234), 'height scales by the same factor')
   }
   assert.equal(fresh.doc.media.byKey.get(mediaKey('new'))?.origin, 'added', 'a new key is registered as added')
-  assert.equal(fresh.doc.media.byKey.get(mediaKey('new'))?.contentType, 'image/png', 'a new image is image/png')
+  assert.equal(fresh.doc.media.byKey.get(mediaKey('new'))?.contentType, 'image/jpeg', 'a new image keeps the content type it was given')
 
   const first = section(page(612))
   const second = section(page(500))
@@ -599,6 +599,22 @@ test('images scale to the content width and page setup replaces one section', ()
   assert.equal(setup.doc.sections[0], first, 'the other section object stays')
   assert.equal(setup.doc.sections[1]?.page.widthPt, pt(700), 'the chosen section takes the new page')
   assert.equal(setup.doc.sections[1]?.src, second.src, 'page setup keeps the section src')
+
+  const inner = paragraph('c', [text('a')])
+  const boxed = table('t', [row([cell([inner])])], [100])
+  const inCell = run(caretAt(initialState(makeDoc([boxed])), inner.id, 0), insertImage({
+    key: mediaKey('cell'),
+    contentType: 'image/jpeg',
+    widthPx: 1000,
+    heightPx: 500,
+  }))
+  const cellImage = asParagraph(asTable(inCell.doc.body[0]).rows[0]?.cells[0]?.blocks[0]).inlines[0]
+  assert.ok(cellImage && cellImage.kind === 'atom' && cellImage.atom.type === 'image', 'the cell image is an atom')
+  if (cellImage && cellImage.kind === 'atom' && cellImage.atom.type === 'image') {
+    assert.equal(cellImage.atom.widthPt, pt(100), 'a wide image scales to the cell width')
+    assert.equal(cellImage.atom.heightPt, pt(50), 'the cell scale keeps the ratio')
+  }
+  assert.equal(inCell.doc.media.byKey.get(mediaKey('cell'))?.contentType, 'image/jpeg', 'the cell image keeps its content type')
 })
 
 test('move, select, selected text, and word count', () => {

@@ -71,7 +71,7 @@ export class SaveWriteError extends Error {
   }
 }
 
-/** Bytes kept for an image added this session. `editor/edit.ts` is not part of this round. */
+/** Bytes of an image added this session. Every save starts from the opened document, so the bytes go out again. */
 export type AddedMedia = {
   readonly key: MediaKey
   readonly contentType: string
@@ -119,6 +119,7 @@ type SaveBaseline = {
 
 const baselines = new WeakMap<Source, SaveBaseline>()
 const tamperSaves = new WeakMap<Source, (doc: Doc) => Uint8Array>()
+const sessionMedia = new WeakMap<Source, Map<string, HeldMedia>>()
 
 export async function loadEngine(): Promise<Engine> {
   const response = await fetch('/engine.wasm')
@@ -192,7 +193,7 @@ function bindSource(
   const source: Source = {
     save(doc) {
       try {
-        return copyBytes(session.save(JSON.stringify(toPatch(doc, baseline))))
+        return copyBytes(session.save(JSON.stringify(toPatch(doc, baseline, added))))
       } catch (error) {
         throw toSaveError(error)
       }
@@ -212,10 +213,13 @@ function bindSource(
     },
     async addMedia(file) {
       const bytes = new Uint8Array(await file.arrayBuffer())
-      const contentType = file.type !== '' ? file.type : sniff(bytes)
-      const size = imageSize(bytes)
-      const widthPt = pt((size?.width ?? 0) * 0.75)
-      const heightPt = pt((size?.height ?? 0) * 0.75)
+      const contentType = sniff(bytes)
+      if (contentType !== 'image/png' && contentType !== 'image/jpeg') {
+        throw new Error('not a png or jpeg')
+      }
+      const size = await pixelSize(bytes, contentType)
+      const widthPt = pt(size.width * 0.75)
+      const heightPt = pt(size.height * 0.75)
       const key = mediaKey(`m${addedCount}`)
       addedCount += 1
       added.set(key, { bytes, contentType })
@@ -243,9 +247,10 @@ function bindSource(
     },
   }
   baselines.set(source, baseline)
+  sessionMedia.set(source, added)
   tamperSaves.set(source, (doc) => {
     try {
-      return copyBytes(session.save_tampered(JSON.stringify(toPatch(doc, baseline))))
+      return copyBytes(session.save_tampered(JSON.stringify(toPatch(doc, baseline, added))))
     } catch (error) {
       throw toSaveError(error)
     }
@@ -257,7 +262,7 @@ function bindSource(
 export function documentPatch(source: Source, doc: Doc): wire.Patch {
   const baseline = baselines.get(source)
   if (!baseline) throw new Error('save is not available')
-  return toPatch(doc, baseline)
+  return toPatch(doc, baseline, sessionMedia.get(source) ?? new Map())
 }
 
 /**
@@ -463,7 +468,7 @@ export function toWireBlock(block: Block): wire.Block {
   return toWireOpaque(block)
 }
 
-function toPatch(doc: Doc, baseline: SaveBaseline): wire.Patch {
+function toPatch(doc: Doc, baseline: SaveBaseline, added: ReadonlyMap<string, HeldMedia>): wire.Patch {
   const newLists: [number, wire.ListDef][] = []
   for (const [id, def] of doc.lists.byNum) {
     if (id < 0) newLists.push([id, toWireList(def)])
@@ -474,7 +479,52 @@ function toPatch(doc: Doc, baseline: SaveBaseline): wire.Patch {
     sections: doc.sections === baseline.sectionList ? [...baseline.sections] : doc.sections.map(toWireSection),
     newLists,
     addedStyles: [...doc.styles.added],
+    media: freshMedia(doc, added),
   }
+}
+
+function freshMedia(doc: Doc, added: ReadonlyMap<string, HeldMedia>): wire.MediaPart[] {
+  const keys: string[] = []
+  const seen = new Set<string>()
+  const visit = (blocks: readonly Block[]) => {
+    for (const block of blocks) {
+      if (block.kind === 'p') {
+        for (const inline of block.inlines) {
+          if (inline.kind !== 'atom' || inline.src !== null || inline.atom.type !== 'image') continue
+          const key = inline.atom.media
+          if (seen.has(key)) continue
+          seen.add(key)
+          keys.push(key)
+        }
+      } else if (block.kind === 'table') {
+        for (const row of block.rows) {
+          for (const cell of row.cells) visit(cell.blocks)
+        }
+      }
+    }
+  }
+  visit(doc.body)
+  return keys.map((key) => {
+    const held = added.get(key)
+    if (!held) throw new Error(`missing media ${key}`)
+    return { key, fileName: mediaFileName(key, held.contentType), base64: encodeBase64(held.bytes) }
+  })
+}
+
+function mediaFileName(key: string, contentType: string): string {
+  const stem = key.replace(/[^A-Za-z0-9_-]/g, '')
+  const name = stem.length > 0 ? stem : 'image'
+  return `${name}.${contentType === 'image/jpeg' ? 'jpg' : 'png'}`
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    const piece = bytes.subarray(i, i + chunk)
+    binary += String.fromCharCode(...piece)
+  }
+  return btoa(binary)
 }
 
 function toPatchBlock(block: Block, kept: ReadonlyMap<number, Block>): wire.PatchBlock {
@@ -1419,6 +1469,53 @@ function toOpenError(error: unknown): OpenError {
     // The wasm layer sometimes throws plain text.
   }
   return new OpenError('corrupt', detail)
+}
+
+async function pixelSize(bytes: Uint8Array, contentType: string): Promise<{ width: number; height: number }> {
+  // acdert may expose one decoder and not the other. A throw from createImageBitmap is final only
+  // when Image is absent; otherwise Image is what decides the file is not a picture.
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await bitmapSize(bytes, contentType)
+    } catch (error) {
+      if (typeof Image !== 'function') throw error
+    }
+  }
+  if (typeof Image === 'function') return elementSize(bytes, contentType)
+  // node --test has neither decoder. A PNG or JPEG header carries the pixel size the decoder would.
+  const header = imageSize(bytes)
+  if (!header || header.width <= 0 || header.height <= 0) throw new Error('undecodable image')
+  return header
+}
+
+async function bitmapSize(bytes: Uint8Array, contentType: string): Promise<{ width: number; height: number }> {
+  const bitmap = await createImageBitmap(new Blob([bytes.slice()], { type: contentType }))
+  try {
+    if (bitmap.width <= 0 || bitmap.height <= 0) throw new Error('undecodable image')
+    return { width: bitmap.width, height: bitmap.height }
+  } finally {
+    bitmap.close()
+  }
+}
+
+function elementSize(bytes: Uint8Array, contentType: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([bytes.slice()], { type: contentType }))
+    const image = new Image()
+    image.onload = () => {
+      URL.revokeObjectURL(url)
+      if (image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+        reject(new Error('undecodable image'))
+        return
+      }
+      resolve({ width: image.naturalWidth, height: image.naturalHeight })
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('undecodable image'))
+    }
+    image.src = url
+  })
 }
 
 function sniff(bytes: Uint8Array): string {

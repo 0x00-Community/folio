@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { apply, deleteBackward, deleteForward, initialState, insertPageBreak, insertText, move, redo, setAlign, setMark, setParaStyle, setPageSetup, setSelection, splitParagraph, toggleList, toggleMark, undo } from '../editor/edit.ts'
+import { apply, deleteBackward, deleteForward, initialState, insertImage, insertPageBreak, insertText, move, redo, setAlign, setMark, setParaStyle, setPageSetup, setSelection, splitParagraph, toggleList, toggleMark, undo } from '../editor/edit.ts'
 import type { Command, EditorState } from '../editor/edit.ts'
 import { withCaretParagraph } from '../editor/derive.ts'
-import { flatText, indexOf, type Block, type Doc, type Marks, type Paragraph, type Pt, type StyleId } from '../model.ts'
+import { flatText, indexOf, type Block, type Doc, type Marks, type MediaKey, type Paragraph, type Pt, type StyleId } from '../model.ts'
 import {
   SaveVerifyError,
   SaveWriteError,
@@ -171,6 +171,7 @@ test('an untouched document is all keep, and a copied block is not', () => {
     assert.ok(patch.body.every(isKeep), 'every imported block is kept by identity')
     assert.deepEqual(patch.newLists, [])
     assert.deepEqual(patch.addedStyles, [])
+    assert.deepEqual(patch.media, [])
     const first = opened.doc.body[0]
     assert.ok(first, 'body')
     const copy = { ...first }
@@ -369,10 +370,9 @@ test('save writes an edit, a bold run and a fresh list', () => {
 })
 
 // A write refusal is accepted only when its detail is one of the contracts the
-// save design leaves unread: images, hyperlinks, column breaks, fields and
-// other unmodeled children. A defect such as a bad split point is not.
+// save design leaves unread: hyperlinks, column breaks, fields and other
+// unmodeled children. A defect such as a bad split point is not.
 const OUT_OF_SCOPE = [
-  'inserted images',
   'hyperlink',
   'section break',
   'unmodeled content',
@@ -628,5 +628,98 @@ test('save_tampered fails verification and a blank document saves', () => {
   } finally {
     again?.source.free()
     blank.source.free()
+  }
+})
+
+const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg=='
+const JPEG_B64 = '/9j/4AAQSkZJRgABAgAAAQABAAD//gAPTGF2YzYzLjEuMTAyAP/bAEMACAoKCwoLDQ0NDQ0NEA8QEBAQEBAQEBAQEBISEhUVFRISEhAQEhIUFBUVFxcXFRUVFRcXGRkZHh4cHCMjJCsrM//EAEwAAQEAAAAAAAAAAAAAAAAAAAAGAQEBAAAAAAAAAAAAAAAAAAAGBxABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAAgACAMBIgACEQADEQD/2gAMAwEAAhEDEQA/AIsATX9//9k='
+
+function fileBytes(base64: string): Blob {
+  const bytes = Uint8Array.from(Buffer.from(base64, 'base64'))
+  return new Blob([bytes])
+}
+
+function imageAtoms(doc: Doc): { media: MediaKey, widthPt: number, heightPt: number, src: number | null }[] {
+  const out: { media: MediaKey, widthPt: number, heightPt: number, src: number | null }[] = []
+  const visit = (blocks: readonly Block[]) => {
+    for (const block of blocks) {
+      if (block.kind === 'p') {
+        for (const inline of block.inlines) {
+          if (inline.kind === 'atom' && inline.atom.type === 'image') {
+            out.push({
+              media: inline.atom.media,
+              widthPt: inline.atom.widthPt,
+              heightPt: inline.atom.heightPt,
+              src: inline.src ?? null,
+            })
+          }
+        }
+      } else if (block.kind === 'table') {
+        for (const row of block.rows) {
+          for (const cell of row.cells) visit(cell.blocks)
+        }
+      }
+    }
+  }
+  visit(doc.body)
+  return out
+}
+
+test('a fresh image saves from its bytes and a second save still carries them', async () => {
+  const opened = engine.open(fixture('basic.docx'))
+  let again: Opened | undefined
+  let third: Opened | undefined
+  try {
+    const png = await opened.source.addMedia(fileBytes(PNG_B64))
+    assert.equal(png.contentType, 'image/png')
+    assert.equal(png.widthPt, 1.5)
+    assert.equal(png.heightPt, 1.5)
+    const jpeg = await opened.source.addMedia(fileBytes(JPEG_B64))
+    assert.equal(jpeg.contentType, 'image/jpeg')
+    assert.equal(jpeg.widthPt, 6)
+    assert.equal(jpeg.heightPt, 6)
+    await assert.rejects(() => opened.source.addMedia(new Blob([Uint8Array.from([1, 2, 3, 4])])))
+
+    const para = paraByText(opened.doc, 'Centered paragraph.')
+    let state = caret(initialState(opened.doc), para, 9)
+    state = run(state, insertImage({
+      key: png.key,
+      contentType: png.contentType,
+      widthPx: png.widthPt / 0.75,
+      heightPx: png.heightPt / 0.75,
+    }))
+    const patch = documentPatch(opened.source, state.doc)
+    assert.equal(patch.media.length, 1, 'only the image the document uses')
+    assert.equal(patch.media[0]?.key, String(png.key))
+    assert.equal(patch.media[0]?.fileName, `${String(png.key)}.png`)
+    assert.deepEqual(Buffer.from(patch.media[0]?.base64 ?? '', 'base64'), Buffer.from(PNG_B64, 'base64'))
+
+    const bytes = opened.source.save(state.doc)
+    again = engine.open(bytes)
+    const found = imageAtoms(again.doc).filter((image) => Math.abs(image.widthPt - 1.5) < 0.05)
+    assert.equal(found.length, 1)
+    const image = found[0]
+    assert.ok(image)
+    assert.ok(Math.abs(image.heightPt - 1.5) < 0.05, `height ${image.heightPt}`)
+    assert.ok(image.src !== null, 'reimport gives the picture a relationship id')
+    const fetched = new Uint8Array(await (await fetch(again.source.imageUrl(image.media))).arrayBuffer())
+    assert.deepEqual(Buffer.from(fetched), Buffer.from(PNG_B64, 'base64'))
+
+    const second = documentPatch(opened.source, state.doc)
+    assert.equal(second.media.length, 1)
+    assert.equal(second.media[0]?.key, String(png.key))
+    assert.deepEqual(Buffer.from(second.media[0]?.base64 ?? '', 'base64'), Buffer.from(PNG_B64, 'base64'))
+    const againBytes = opened.source.save(state.doc)
+    third = engine.open(againBytes)
+    const kept = imageAtoms(third.doc).filter((item) => Math.abs(item.widthPt - 1.5) < 0.05)
+    assert.equal(kept.length, 1)
+    const keptImage = kept[0]
+    assert.ok(keptImage)
+    const keptBytes = new Uint8Array(await (await fetch(third.source.imageUrl(keptImage.media))).arrayBuffer())
+    assert.deepEqual(Buffer.from(keptBytes), Buffer.from(PNG_B64, 'base64'))
+  } finally {
+    third?.source.free()
+    again?.source.free()
+    opened.source.free()
   }
 })

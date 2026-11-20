@@ -21,6 +21,7 @@ export type IconName =
   | 'save-as'
   | 'page-setup'
   | 'table'
+  | 'image'
   | 'table-row-above'
   | 'table-row-below'
   | 'table-row-delete'
@@ -87,6 +88,8 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return drawPageSetup(svg)
     case 'table':
       return drawTable(svg)
+    case 'image':
+      return drawImage(svg)
     case 'table-row-above':
       return drawTableRow(svg, 'above')
     case 'table-row-below':
@@ -132,6 +135,12 @@ function drawPageSetup(svg: SVGSVGElement): void {
 
 function drawTable(svg: SVGSVGElement): void {
   grid(svg, 3, 3, 12, 12)
+}
+
+function drawImage(svg: SVGSVGElement): void {
+  path(svg, 'M3.2 4.2 H14.8 V13.8 H3.2 Z')
+  path(svg, 'M3.2 11.4 L6.6 8.4 L9.2 10.6 L11.4 8.8 L14.8 12')
+  dot(svg, 6.4, 6.8)
 }
 
 function drawTableRow(svg: SVGSVGElement, where: 'above' | 'below' | 'delete'): void {

@@ -1,7 +1,7 @@
 // Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
 import { Editor } from './editor/editor.ts'
-import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertRow, insertTable, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertImage, insertRow, insertTable, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, loadEngine, saveTampered } from './engine/engine.ts'
@@ -123,6 +123,9 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
         }
         edit(() => { current().run(insertTable(size.rows, size.cols)) })
       })
+    },
+    onInsertImage() {
+      void insertPicture()
     },
     onTableRow(where) {
       edit(() => { current().run(insertRow(where)) })
@@ -321,6 +324,36 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
         return
       }
       throw error
+    }
+  }
+
+  async function insertPicture(): Promise<void> {
+    try {
+      const picked = await window.showOpenFilePicker({
+        multiple: false,
+        types: [{
+          description: t('file.image'),
+          accept: { 'image/png': ['.png'], 'image/jpeg': ['.jpg', '.jpeg'] },
+        }],
+      })
+      const handle = picked[0]
+      if (!handle) return
+      const blob = await handle.getFile()
+      const media = await current().source.addMedia(blob)
+      edit(() => {
+        current().run(insertImage({
+          key: media.key,
+          contentType: media.contentType,
+          widthPx: media.widthPt / 0.75,
+          heightPx: media.heightPt / 0.75,
+        }))
+      })
+      clearError()
+    } catch (error) {
+      if (isAbort(error)) return
+      showBand(t('image.error'))
+    } finally {
+      current().focus()
     }
   }
 

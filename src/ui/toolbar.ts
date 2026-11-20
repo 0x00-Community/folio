@@ -28,6 +28,7 @@ export interface ToolbarHandlers {
   onIndent(delta: 1 | -1): void
   onPageSetup(): void
   onInsertTable(): void
+  onInsertImage(): void
   onTableRow(where: 'above' | 'below'): void
   onDeleteRows(): void
   onTableColumn(where: 'left' | 'right'): void
@@ -130,7 +131,8 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   group(root).append(iconButton(t('pageSetup'), null, platform, () => handlers.onPageSetup(), 'page-setup'))
 
   const insertTable = iconButton(t('table.insert'), null, platform, () => handlers.onInsertTable(), 'table')
-  group(root).append(insertTable)
+  const insertPicture = iconButton(t('image.insert'), null, platform, () => handlers.onInsertImage(), 'image')
+  group(root).append(insertTable, insertPicture)
   const rowAbove = iconButton(t('table.rowAbove'), null, platform, () => handlers.onTableRow('above'), 'table-row-above')
   const rowBelow = iconButton(t('table.rowBelow'), null, platform, () => handlers.onTableRow('below'), 'table-row-below')
   const deleteRow = iconButton(t('table.deleteRow'), null, platform, () => handlers.onDeleteRows(), 'table-row-delete')

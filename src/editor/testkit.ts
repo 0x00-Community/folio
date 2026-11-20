@@ -338,6 +338,7 @@ export function randomCommand(rng: () => number, state: { doc: Doc, sel: Selecti
     case 22: return generated('deleteTable', deleteTable(table?.id ?? tableId('missing')))
     case 23: return generated('insertImage', insertImage({
       key: mediaKey(rng() < 0.5 ? 'pic' : 'other'),
+      contentType: rng() < 0.5 ? 'image/png' : 'image/jpeg',
       widthPx: rng() < 0.5 ? 200 : 1000,
       heightPx: 500,
     }))
