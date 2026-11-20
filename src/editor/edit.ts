@@ -1801,7 +1801,7 @@ function sectionIndex(doc: Doc, loc: ParaLoc): number {
 function contentWidth(doc: Doc, section: number): number {
   const page = doc.sections[section]?.page ?? doc.sections[0]?.page
   if (!page) return 468
-  return Math.max(72, page.widthPt - page.margin.left - page.margin.right)
+  return Math.max(72, page.widthPt - page.margin.left - page.margin.gutter - page.margin.right)
 }
 
 function mapTouched(doc: Doc, sel: Selection, fn: (para: Paragraph) => Paragraph): Doc | null {

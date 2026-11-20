@@ -417,6 +417,10 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   assert.equal(inserted.rows.length, 2, 'the table has the requested rows')
   assert.equal(inserted.grid.length, 2, 'the table has the requested columns')
   assert.equal(inserted.grid[0], pt(234), 'columns share the content width')
+  const gutter = page()
+  const withGutter = { ...gutter, margin: { ...gutter.margin, gutter: pt(36) } }
+  const guttered = run(caretAt(initialState(makeDoc([para], { sections: [section(withGutter)] })), para.id, 4), insertTable(1, 2))
+  assert.equal(asTable(guttered.doc.body[1]).grid[0], pt(216), 'columns share the text width')
   assert.equal(flatText(asParagraph(middle.doc.body[2])), 'cd', 'the tail follows the table')
   assert.equal(asParagraph(middle.doc.body[0]).src, para.src, 'the head keeps the paragraph src')
   assert.equal(asParagraph(middle.doc.body[2]).src, para.src, 'the tail keeps the paragraph src')
