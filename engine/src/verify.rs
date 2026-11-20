@@ -69,6 +69,7 @@ pub fn verify(
     pristine: &Ledger,
     removed: &BTreeMap<String, usize>,
     list_ids: &BTreeMap<i32, u32>,
+    media: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     let actual = ledger(written);
     let mut expected = pristine.clone();
@@ -79,7 +80,7 @@ pub fn verify(
     let again = crate::import::import(written);
     let want = project_patch(patch, imported, list_ids)?;
     let got = project_blocks(&again.imported.body);
-    if let Some(difference) = projection_diff(&want, &got) {
+    if let Some(difference) = projection_diff(&want, &got, media) {
         return Err(difference);
     }
     if let Some(difference) = sections_diff(&patch.sections, &again.imported.sections) {
@@ -596,7 +597,19 @@ fn push_text(nodes: &mut Vec<Node>, text: &str, marks: &Marks) {
     });
 }
 
-fn projection_diff(want: &[Proj], got: &[Proj]) -> Option<String> {
+/// 914400 EMU per inch and 72 pt per inch.
+pub(crate) const EMU_PER_PT: f64 = 12_700.0;
+
+/// The point size `write` stores, after rounding to an EMU.
+pub(crate) fn image_pt_written(pt: f64) -> f64 {
+    (pt * EMU_PER_PT).round() / EMU_PER_PT
+}
+
+fn projection_diff(
+    want: &[Proj],
+    got: &[Proj],
+    media: &BTreeMap<String, String>,
+) -> Option<String> {
     if want.len() != got.len() {
         return Some(format!(
             "body block count expected {} found {}",
@@ -605,14 +618,19 @@ fn projection_diff(want: &[Proj], got: &[Proj]) -> Option<String> {
         ));
     }
     for (index, (want, got)) in want.iter().zip(got.iter()).enumerate() {
-        if let Some(difference) = proj_diff(want, got, &format!("body[{index}]")) {
+        if let Some(difference) = proj_diff(want, got, &format!("body[{index}]"), media) {
             return Some(difference);
         }
     }
     None
 }
 
-fn proj_diff(want: &Proj, got: &Proj, path: &str) -> Option<String> {
+fn proj_diff(
+    want: &Proj,
+    got: &Proj,
+    path: &str,
+    media: &BTreeMap<String, String>,
+) -> Option<String> {
     match (want, got) {
         (
             Proj::Para {
@@ -627,7 +645,7 @@ fn proj_diff(want: &Proj, got: &Proj, path: &str) -> Option<String> {
             if let Some(difference) = props_diff(want_props, got_props) {
                 return Some(format!("{path} {difference}"));
             }
-            nodes_diff(want_nodes, got_nodes, path)
+            nodes_diff(want_nodes, got_nodes, path, media)
         }
         (
             Proj::Table {
@@ -673,7 +691,9 @@ fn proj_diff(want: &Proj, got: &Proj, path: &str) -> Option<String> {
                             "{path} row {index} cell {cell_index} shape differs"
                         ));
                     }
-                    if let Some(difference) = projection_diff(&want_cell.blocks, &got_cell.blocks) {
+                    if let Some(difference) =
+                        projection_diff(&want_cell.blocks, &got_cell.blocks, media)
+                    {
                         return Some(format!("{path} row {index} cell {cell_index} {difference}"));
                     }
                 }
@@ -697,13 +717,18 @@ fn proj_diff(want: &Proj, got: &Proj, path: &str) -> Option<String> {
                     "{path} opaque {want_label}/{want_removable} vs {got_label}/{got_removable}"
                 ));
             }
-            projection_diff(want_preview, got_preview)
+            projection_diff(want_preview, got_preview, media)
         }
         _ => Some(format!("{path} block kind differs")),
     }
 }
 
-fn nodes_diff(want: &[Node], got: &[Node], path: &str) -> Option<String> {
+fn nodes_diff(
+    want: &[Node],
+    got: &[Node],
+    path: &str,
+    media: &BTreeMap<String, String>,
+) -> Option<String> {
     if want.len() != got.len() {
         return Some(format!(
             "{path} inline count expected {} found {} ({want:?} vs {got:?})",
@@ -712,13 +737,53 @@ fn nodes_diff(want: &[Node], got: &[Node], path: &str) -> Option<String> {
         ));
     }
     for (index, (want, got)) in want.iter().zip(got.iter()).enumerate() {
-        if want != got {
+        if !nodes_match(want, got, media) {
             return Some(format!(
                 "{path} inline {index} expected {want:?} found {got:?}"
             ));
         }
     }
     None
+}
+
+/// A fresh image's model key is not the relationship id import reports.
+/// Compare it through the map `write` built, and compare the size after the
+/// EMU rounding the writer used. A key already in the file is absent from the
+/// map and stays an exact match.
+fn nodes_match(want: &Node, got: &Node, media: &BTreeMap<String, String>) -> bool {
+    match (want, got) {
+        (Node::Atom(want_atom), Node::Atom(got_atom)) => atoms_match(want_atom, got_atom, media),
+        _ => want == got,
+    }
+}
+
+fn atoms_match(want: &Atom, got: &Atom, media: &BTreeMap<String, String>) -> bool {
+    match (want, got) {
+        (
+            Atom::Image {
+                media: want_key,
+                width_pt: want_width,
+                height_pt: want_height,
+            },
+            Atom::Image {
+                media: got_key,
+                width_pt: got_width,
+                height_pt: got_height,
+            },
+        ) => match media.get(want_key) {
+            Some(rel) => {
+                rel == got_key
+                    && image_pt_close(*want_width, *got_width)
+                    && image_pt_close(*want_height, *got_height)
+            }
+            None => want == got,
+        },
+        _ => want == got,
+    }
+}
+
+fn image_pt_close(want: f64, got: f64) -> bool {
+    (image_pt_written(want) - got).abs() < 1e-4
 }
 
 fn props_diff(want: &ParaProps, got: &ParaProps) -> Option<String> {

@@ -112,6 +112,7 @@ impl Session {
             &self.ledger,
             &written.removed,
             &written.list_ids,
+            &written.media,
         )
         .map_err(|first_difference| wire::BridgeError::Verify { first_difference })?;
         written

@@ -7,8 +7,8 @@ use rdocx_word_engine::Session;
 use rdocx_word_engine::import::{self, Import};
 use rdocx_word_engine::verify;
 use rdocx_word_engine::wire::{
-    Atom, Block, BridgeError, Cell, Inline, ListDef, ListLevel, Marks, Para, ParaProps, Patch,
-    PatchBlock, Row, Section, Table,
+    Atom, Block, BridgeError, Cell, Inline, ListDef, ListLevel, Marks, MediaPart, Para, ParaProps,
+    Patch, PatchBlock, Row, Section, Table,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -46,6 +46,7 @@ fn keep_patch(imported: &rdocx_word_engine::wire::Imported) -> Patch {
         sections: imported.sections.clone(),
         new_lists: Vec::new(),
         added_styles: Vec::new(),
+        media: Vec::new(),
     }
 }
 
@@ -72,6 +73,7 @@ fn patch_replacing(
         sections: imported.sections.clone(),
         new_lists: Vec::new(),
         added_styles: Vec::new(),
+        media: Vec::new(),
     }
 }
 
@@ -522,6 +524,7 @@ fn patch_swapping(
         sections: imported.sections.clone(),
         new_lists: Vec::new(),
         added_styles: Vec::new(),
+        media: Vec::new(),
     }
 }
 
@@ -876,6 +879,7 @@ fn text_inside_a_table_cell() {
         sections: before.imported.sections.clone(),
         new_lists: Vec::new(),
         added_styles: Vec::new(),
+        media: Vec::new(),
     };
     let written = save(&session, &patch);
     let after = reopen(&written);
@@ -926,6 +930,7 @@ fn cleared_table_cell_keeps_an_empty_paragraph() {
             sections: before.imported.sections.clone(),
             new_lists: Vec::new(),
             added_styles: Vec::new(),
+            media: Vec::new(),
         },
     );
     let after = reopen(&written);
@@ -1597,6 +1602,7 @@ fn table_patch(imported: &rdocx_word_engine::wire::Imported, table: Table) -> Pa
         sections: imported.sections.clone(),
         new_lists: Vec::new(),
         added_styles: Vec::new(),
+        media: Vec::new(),
     }
 }
 
@@ -1683,6 +1689,7 @@ fn insert_block(
         sections: imported.sections.clone(),
         new_lists: Vec::new(),
         added_styles: Vec::new(),
+        media: Vec::new(),
     }
 }
 
@@ -2236,6 +2243,7 @@ fn reordered_cells_merged_cells_and_a_fresh_nested_table_return_write() {
             sections: before.imported.sections.clone(),
             new_lists: Vec::new(),
             added_styles: Vec::new(),
+            media: Vec::new(),
         },
         "inserted table has no cells",
     );
@@ -2262,4 +2270,452 @@ fn inserting_twenty_rows_prints_the_save_time() {
     assert_eq!(cell_text(table, 22, 0), "Row 19");
     let again = save(&session, &patch);
     assert_eq!(after.imported, reopen(&again).imported);
+}
+
+const PNG_W: f64 = 36.41;
+const PNG_H: f64 = 18.205;
+const JPEG_W: f64 = 20.2;
+const JPEG_H: f64 = 15.7;
+
+const PNG_BYTES: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a,
+    0x73, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+    0x44, 0x0c, 0x10, 0x0a, 0x00, 0x1f, 0xee, 0x03, 0xfd, 0x8b, 0x5f, 0x14, 0xd4, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+const JPEG_BYTES: &[u8] = &[
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x02, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x0f, 0x4c, 0x61, 0x76, 0x63, 0x36, 0x33, 0x2e, 0x31,
+    0x2e, 0x31, 0x30, 0x32, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08, 0x0a, 0x0a, 0x0b, 0x0a, 0x0b,
+    0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x10, 0x0f, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+    0x10, 0x10, 0x10, 0x12, 0x12, 0x12, 0x15, 0x15, 0x15, 0x12, 0x12, 0x12, 0x10, 0x10, 0x12, 0x12,
+    0x14, 0x14, 0x15, 0x15, 0x17, 0x17, 0x17, 0x15, 0x15, 0x15, 0x15, 0x17, 0x17, 0x19, 0x19, 0x19,
+    0x1e, 0x1e, 0x1c, 0x1c, 0x23, 0x23, 0x24, 0x2b, 0x2b, 0x33, 0xff, 0xc4, 0x00, 0x4c, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x06, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x06, 0x07, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00,
+    0x08, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xda, 0x00, 0x0c, 0x03,
+    0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0x8b, 0x00, 0x4d, 0x7f, 0x7f, 0xff, 0xd9,
+];
+
+#[test]
+fn images_embed_once_in_a_paragraph_and_a_cell() {
+    let (session, before) = opened("basic.docx");
+    let title = with_image(&body_para(&before, 0).clone(), "jpeg", JPEG_W, JPEG_H);
+    let centered = with_images(&body_para(&before, 3).clone(), "png", PNG_W, PNG_H, 2);
+    let mut table = fixture_table(&before.imported).clone();
+    let Block::P(cell_para) = &table.rows[0].cells[0].blocks[0] else {
+        panic!("cell");
+    };
+    table.rows[0].cells[0].blocks[0] = Block::P(with_image(cell_para, "jpeg", JPEG_W, JPEG_H));
+    let fresh = fresh_image_table();
+    let mut patch = Patch {
+        body: Vec::new(),
+        sections: before.imported.sections.clone(),
+        new_lists: Vec::new(),
+        added_styles: Vec::new(),
+        media: vec![
+            media_part("png", "pic.png", PNG_BYTES),
+            media_part("jpeg", "pic.jpg", JPEG_BYTES),
+            media_part("spare", "spare.png", PNG_BYTES),
+        ],
+    };
+    for block in &before.imported.body {
+        let src = block_src(block).expect("src");
+        let changed = if src == 0 {
+            Some(changed_para(title.clone()))
+        } else if src == 3 {
+            Some(changed_para(centered.clone()))
+        } else if src == 14 {
+            Some(PatchBlock::Changed(Block::Table(table.clone())))
+        } else {
+            None
+        };
+        patch
+            .body
+            .push(changed.unwrap_or(PatchBlock::Keep { keep: src }));
+        if src == 3 {
+            patch
+                .body
+                .push(PatchBlock::Changed(Block::Table(fresh.clone())));
+        }
+    }
+    let (_bytes, after) = saved_twice(&session, &patch);
+    assert_eq!(session.ledger().counts, before.ledger.counts);
+    assert_eq!(
+        after.media_bytes.len(),
+        before.media_bytes.len() + 2,
+        "one part per distinct key, and an unused part is not embedded"
+    );
+
+    let pngs = images_near(&after.imported.body, PNG_W);
+    let jpegs = images_near(&after.imported.body, JPEG_W);
+    assert_eq!(
+        pngs.len(),
+        3,
+        "two uses in a paragraph and one in a fresh cell"
+    );
+    assert_eq!(jpegs.len(), 2, "a body paragraph and an existing cell");
+    assert!(pngs.iter().all(|image| image.media == pngs[0].media));
+    assert!(jpegs.iter().all(|image| image.media == jpegs[0].media));
+    assert_ne!(pngs[0].media, jpegs[0].media);
+    assert_eq!(part_bytes(&after, &pngs[0].media), PNG_BYTES);
+    assert_eq!(part_bytes(&after, &jpegs[0].media), JPEG_BYTES);
+    for image in &pngs {
+        assert!(
+            size_near(image.width, PNG_W) && size_near(image.height, PNG_H),
+            "png {}x{} ",
+            image.width,
+            image.height
+        );
+    }
+    for image in &jpegs {
+        assert!(
+            size_near(image.width, JPEG_W) && size_near(image.height, JPEG_H),
+            "jpeg {}x{}",
+            image.width,
+            image.height
+        );
+    }
+
+    assert_eq!(
+        inline_shape(para_by_text(&after.imported.body, "Centered paragraph.")),
+        "T I I T"
+    );
+    assert_eq!(
+        inline_shape(para_by_text(&after.imported.body, "Quarterly report")),
+        "T I T"
+    );
+    let index = table_between(
+        &after.imported.body,
+        "Centered paragraph.",
+        "Right aligned paragraph.",
+    );
+    let Block::Table(inserted) = &after.imported.body[index] else {
+        unreachable!("fresh table");
+    };
+    assert_eq!(cell_text(inserted, 0, 0), "LR");
+    let Block::P(para) = &inserted.rows[0].cells[0].blocks[0] else {
+        panic!("fresh cell");
+    };
+    assert_eq!(inline_shape(para), "T I T");
+
+    let fixture = table_with_cell(&after.imported.body, "Apples");
+    assert_eq!(cell_text(fixture, 0, 0), "Item");
+    let Block::P(para) = &fixture.rows[0].cells[0].blocks[0] else {
+        panic!("fixture cell");
+    };
+    assert_eq!(inline_shape(para), "T I T");
+
+    let original = images_near(&after.imported.body, 144.0);
+    assert_eq!(original.len(), 1, "the picture basic.docx already had");
+    let previous = images_near(&before.imported.body, 144.0);
+    assert_eq!(
+        part_bytes(&after, &original[0].media),
+        part_bytes(&before, &previous[0].media)
+    );
+}
+
+#[test]
+fn a_missing_image_key_names_the_key() {
+    let (session, before) = opened("basic.docx");
+    let mut para = body_para(&before, 3).clone();
+    para.inlines.push(image_inline("missing-pic", 10.0, 10.0));
+    assert_contract(
+        &session,
+        &before,
+        &patch_replacing(&before.imported, 3, vec![changed_para(para)]),
+        "missing-pic",
+    );
+}
+
+#[test]
+fn deleting_an_imported_image_keeps_the_ledger() {
+    let (session, before) = opened("basic.docx");
+    let para = before
+        .imported
+        .body
+        .iter()
+        .find_map(|block| match block {
+            Block::P(para)
+                if para.inlines.iter().any(|inline| {
+                    matches!(
+                        inline,
+                        Inline::Atom {
+                            atom: Atom::Image { .. },
+                            ..
+                        }
+                    )
+                }) =>
+            {
+                Some(para)
+            }
+            _ => None,
+        })
+        .expect("image");
+    let src = para.src.expect("src");
+    let mut edited = para.clone();
+    edited.inlines.retain(|inline| {
+        !matches!(
+            inline,
+            Inline::Atom {
+                atom: Atom::Image { .. },
+                ..
+            }
+        )
+    });
+    let written = save(
+        &session,
+        &patch_replacing(&before.imported, src, vec![changed_para(edited)]),
+    );
+    let after = reopen(&written);
+    assert!(images_near(&after.imported.body, 144.0).is_empty());
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+    assert_eq!(session.ledger().counts, before.ledger.counts);
+}
+
+#[test]
+fn inserting_an_image_in_preserve_keeps_the_ledger() {
+    let (session, before) = opened("preserve.docx");
+    let mut patch = insert_block(
+        &before.imported,
+        None,
+        Block::P(Para::new(
+            None,
+            ParaProps::default(),
+            vec![image_inline("png", 12.0, 8.0)],
+            None,
+            None,
+        )),
+    );
+    patch.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+    let written = save(&session, &patch);
+    let after = reopen(&written);
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+    assert_eq!(session.ledger().counts, before.ledger.counts);
+    assert_eq!(images_near(&after.imported.body, 12.0).len(), 1);
+    let again = save(&session, &patch);
+    assert_eq!(after.imported, reopen(&again).imported);
+}
+
+struct SeenImage {
+    media: String,
+    width: f64,
+    height: f64,
+}
+
+fn with_image(para: &Para, key: &str, width: f64, height: f64) -> Para {
+    with_images(para, key, width, height, 1)
+}
+
+fn with_images(para: &Para, key: &str, width: f64, height: f64, count: usize) -> Para {
+    let mut next = para.clone();
+    let mut inlines = Vec::new();
+    let mut done = false;
+    for inline in &para.inlines {
+        if !done
+            && let Inline::Text { text, marks, src } = inline
+            && text.chars().count() >= 2
+        {
+            let mid = text.chars().count() / 2;
+            let left: String = text.chars().take(mid).collect();
+            let right: String = text.chars().skip(mid).collect();
+            inlines.push(Inline::Text {
+                text: left,
+                marks: marks.clone(),
+                src: *src,
+            });
+            for _ in 0..count {
+                inlines.push(image_inline(key, width, height));
+            }
+            inlines.push(Inline::Text {
+                text: right,
+                marks: marks.clone(),
+                src: *src,
+            });
+            done = true;
+        } else {
+            inlines.push(inline.clone());
+        }
+    }
+    assert!(done, "no text to split");
+    next.inlines = inlines;
+    next
+}
+
+fn fresh_image_table() -> Table {
+    let mut table = fresh_table(1, 1, 80.0);
+    table.rows[0].cells[0].blocks = vec![Block::P(Para::new(
+        None,
+        ParaProps::default(),
+        vec![
+            Inline::Text {
+                text: "L".into(),
+                marks: Marks::default(),
+                src: None,
+            },
+            image_inline("png", PNG_W, PNG_H),
+            Inline::Text {
+                text: "R".into(),
+                marks: Marks::default(),
+                src: None,
+            },
+        ],
+        None,
+        None,
+    ))];
+    table
+}
+
+fn image_inline(key: &str, width: f64, height: f64) -> Inline {
+    Inline::Atom {
+        atom: Atom::Image {
+            media: key.to_string(),
+            width_pt: width,
+            height_pt: height,
+        },
+        src: None,
+    }
+}
+
+fn media_part(key: &str, file_name: &str, bytes: &[u8]) -> MediaPart {
+    MediaPart {
+        key: key.to_string(),
+        file_name: file_name.to_string(),
+        base64: base64_encode(bytes),
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let value = (u32::from(bytes[index]) << 16)
+            | (u32::from(bytes[index + 1]) << 8)
+            | u32::from(bytes[index + 2]);
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push(TABLE[((value >> 6) & 63) as usize] as char);
+        out.push(TABLE[(value & 63) as usize] as char);
+        index += 3;
+    }
+    let rest = bytes.len() - index;
+    if rest == 1 {
+        let value = u32::from(bytes[index]) << 16;
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rest == 2 {
+        let value = (u32::from(bytes[index]) << 16) | (u32::from(bytes[index + 1]) << 8);
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push(TABLE[((value >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+fn images_near(blocks: &[Block], width: f64) -> Vec<SeenImage> {
+    let mut found = Vec::new();
+    walk_images(blocks, &mut found);
+    found.retain(|image| (image.width - width).abs() < 0.05);
+    found
+}
+
+fn walk_images(blocks: &[Block], out: &mut Vec<SeenImage>) {
+    for block in blocks {
+        match block {
+            Block::P(para) => {
+                for inline in &para.inlines {
+                    if let Inline::Atom {
+                        atom:
+                            Atom::Image {
+                                media,
+                                width_pt,
+                                height_pt,
+                            },
+                        ..
+                    } = inline
+                    {
+                        out.push(SeenImage {
+                            media: media.clone(),
+                            width: *width_pt,
+                            height: *height_pt,
+                        });
+                    }
+                }
+            }
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        walk_images(&cell.blocks, out);
+                    }
+                }
+            }
+            Block::Opaque(_) => {}
+        }
+    }
+}
+
+fn part_bytes<'a>(import: &'a Import, rel: &str) -> &'a [u8] {
+    import
+        .media_bytes
+        .get(rel)
+        .unwrap_or_else(|| panic!("missing media {rel}"))
+        .1
+        .as_slice()
+}
+
+fn size_near(got: f64, want: f64) -> bool {
+    let written = (want * 12_700.0).round() / 12_700.0;
+    (got - written).abs() < 1e-4 && (got - want).abs() < 0.05
+}
+
+fn para_by_text<'a>(body: &'a [Block], text: &str) -> &'a Para {
+    body.iter()
+        .find_map(|block| match block {
+            Block::P(para) if text_of(para) == text => Some(para),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("paragraph {text}"))
+}
+
+fn inline_shape(para: &Para) -> String {
+    para.inlines
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text { .. } => "T",
+            Inline::Atom {
+                atom: Atom::Image { .. },
+                ..
+            } => "I",
+            _ => "?",
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn table_with_cell<'a>(body: &'a [Block], needle: &str) -> &'a Table {
+    body.iter()
+        .find_map(|block| match block {
+            Block::Table(table)
+                if table.rows.iter().any(|row| {
+                    row.cells.iter().any(|cell| {
+                        cell.blocks
+                            .iter()
+                            .any(|inner| text_of_block(inner).contains(needle))
+                    })
+                }) =>
+            {
+                Some(table)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("table containing {needle}"))
 }

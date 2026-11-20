@@ -392,6 +392,15 @@ pub struct ParaLook {
     pub widow_control: bool,
 }
 
+/// Bytes for one image key. `write` embeds each key once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPart {
+    pub key: String,
+    pub file_name: String,
+    pub base64: String,
+}
+
 /// What the editor sends to save: the final document, with untouched blocks named by source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -404,6 +413,9 @@ pub struct Patch {
     /// Built-in roles applied but missing from the pristine styles.
     #[serde(default)]
     pub added_styles: Vec<String>,
+    /// Image bytes for atoms with `src: null`. One entry per distinct key.
+    #[serde(default)]
+    pub media: Vec<MediaPart>,
 }
 
 /// A body block in a patch. `Keep` is the block import produced; `Changed` is the full block.

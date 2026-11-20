@@ -50,6 +50,8 @@ pub struct Written {
     pub document: Document,
     pub removed: BTreeMap<String, usize>,
     pub list_ids: BTreeMap<i32, u32>,
+    /// Model key to the relationship id `embed_image` returned.
+    pub media: BTreeMap<String, String>,
 }
 
 /// Ordered by pristine position. `write` applies `steps` from the back.
@@ -107,13 +109,17 @@ pub fn write(
     let list_ids = apply_lists(&mut document, &patch.new_lists)?;
     let links = run_links(&imported.body);
     let texts = run_texts(&imported.body);
+    let parts = decode_media(&patch.media)?;
     let mut removed = BTreeMap::new();
+    let mut rels = BTreeMap::new();
     let mut ctx = Apply {
         sources,
         list_ids: &list_ids,
         links: &links,
         texts: &texts,
         removed: &mut removed,
+        parts: &parts,
+        rels: &mut rels,
     };
     for step in plan.steps.iter().rev() {
         match step {
@@ -142,12 +148,82 @@ pub fn write(
         document,
         removed,
         list_ids,
+        media: rels,
     })
+}
+
+struct MediaBytes {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+fn decode_media(parts: &[wire::MediaPart]) -> Result<BTreeMap<String, MediaBytes>, WriteError> {
+    let mut decoded = BTreeMap::new();
+    for part in parts {
+        if decoded.contains_key(&part.key) {
+            continue;
+        }
+        let bytes =
+            decode_base64(&part.base64).map_err(|_| contract(format!("media {}", part.key)))?;
+        decoded.insert(
+            part.key.clone(),
+            MediaBytes {
+                file_name: part.file_name.clone(),
+                bytes,
+            },
+        );
+    }
+    Ok(decoded)
+}
+
+fn decode_base64(text: &str) -> Result<Vec<u8>, ()> {
+    fn value(byte: u8) -> Result<u32, ()> {
+        match byte {
+            b'A'..=b'Z' => Ok(u32::from(byte - b'A')),
+            b'a'..=b'z' => Ok(u32::from(byte - b'a' + 26)),
+            b'0'..=b'9' => Ok(u32::from(byte - b'0' + 52)),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(()),
+        }
+    }
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks_exact(4) {
+        let pad = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        if pad > 2 || chunk[..4 - pad].contains(&b'=') {
+            return Err(());
+        }
+        let first = value(chunk[0])?;
+        let second = value(chunk[1])?;
+        let third = if pad < 2 { value(chunk[2])? } else { 0 };
+        let fourth = if pad < 1 { value(chunk[3])? } else { 0 };
+        out.push(((first << 2) | (second >> 4)) as u8);
+        if pad < 2 {
+            out.push(((second << 4) | (third >> 2)) as u8);
+        }
+        if pad < 1 {
+            out.push(((third << 6) | fourth) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn is_raster(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff])
 }
 
 /// `Length::pt` truncates 595.3 pt to 11905 twips. Rounding through twips keeps A4.
 fn length_pt(pt: f64) -> Length {
     Length::twips((pt * 20.0).round() as i32)
+}
+
+/// Drawings store EMU. 914400 EMU per inch and 72 pt per inch is 12700 EMU per pt.
+fn image_length(pt: f64) -> Length {
+    Length::emu((pt * verify::EMU_PER_PT).round() as i64)
 }
 
 #[allow(clippy::float_cmp)]
@@ -217,6 +293,8 @@ struct Apply<'a> {
     /// Text import stored for each run. A field's `run.text()` is not that string.
     texts: &'a HashMap<u32, String>,
     removed: &'a mut BTreeMap<String, usize>,
+    parts: &'a BTreeMap<String, MediaBytes>,
+    rels: &'a mut BTreeMap<String, String>,
 }
 
 /// Group the final body into regions. Untouched blocks produce no step.
@@ -925,7 +1003,7 @@ fn reject_fresh_atoms(inlines: &[Inline]) -> Result<(), WriteError> {
             continue;
         };
         match atom {
-            Atom::Image { .. } => return Err(contract("inserted images")),
+            Atom::Image { .. } => {}
             Atom::Field { .. } => return Err(contract("field")),
             Atom::PageBreak {} => {}
             Atom::ColumnBreak {} => return Err(contract("column break")),
@@ -2344,6 +2422,7 @@ trait Story {
         edit: impl FnOnce(&mut Paragraph<'_>) -> Result<T, WriteError>,
     ) -> Result<T, WriteError>;
     fn direct_props(&mut self, index: usize) -> Result<ParaProps, WriteError>;
+    fn embed(&mut self, bytes: &[u8], name: &str) -> String;
 }
 
 struct BodyLoc<'a> {
@@ -2385,6 +2464,10 @@ impl Story for BodyLoc<'_> {
             .paragraph(paragraph_index)
             .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
         Ok(import::direct_props(&paragraph))
+    }
+
+    fn embed(&mut self, bytes: &[u8], name: &str) -> String {
+        self.doc.embed_image(bytes, name)
     }
 }
 
@@ -2448,6 +2531,10 @@ impl Story for CellLoc<'_> {
             .paragraph(index)
             .ok_or_else(|| contract("cell paragraph is out of range"))?;
         Ok(import::direct_props(&paragraph))
+    }
+
+    fn embed(&mut self, bytes: &[u8], name: &str) -> String {
+        self.doc.embed_image(bytes, name)
     }
 }
 
@@ -2718,6 +2805,7 @@ fn patch_paragraph<S: Story>(
     let mut srcs: Vec<Option<u32>> = run_srcs.iter().copied().map(Some).collect();
     let segments = segments(&target.inlines)?;
     let mut cursor = 0usize;
+    let mut pictures = Vec::new();
     for segment in segments {
         match segment {
             Segment::Fresh(piece) => {
@@ -2725,10 +2813,14 @@ fn patch_paragraph<S: Story>(
                 cursor += 1;
             }
             Segment::Run(group) => {
-                cursor = apply_run(loc, index, &mut srcs, cursor, &group, ctx)?;
+                cursor = apply_run(loc, index, &mut srcs, cursor, &group, ctx, &mut pictures)?;
             }
             Segment::PageBreak => {
                 insert_page_break(loc, index, &mut srcs, cursor)?;
+                cursor += 1;
+            }
+            Segment::Image(image) => {
+                insert_image(loc, index, &mut srcs, cursor, &image, &mut pictures)?;
                 cursor += 1;
             }
         }
@@ -2736,6 +2828,9 @@ fn patch_paragraph<S: Story>(
     while cursor < srcs.len() {
         remove_at(loc, index, &mut srcs, cursor, ctx.removed)?;
     }
+    // insert_run_like is refused once a drawing is already in the paragraph,
+    // so every new run is inserted first and the pictures are attached after.
+    place_pictures(loc, index, &pictures, ctx)?;
     Ok(())
 }
 
@@ -2743,6 +2838,7 @@ enum Segment {
     Run(RunGroup),
     Fresh(Piece),
     PageBreak,
+    Image(FreshImage),
 }
 
 struct RunGroup {
@@ -2754,6 +2850,21 @@ enum GroupItem {
     Text(Piece),
     Fresh(Piece),
     Break,
+    Image(FreshImage),
+}
+
+#[derive(Clone)]
+struct FreshImage {
+    key: String,
+    width_pt: f64,
+    height_pt: f64,
+}
+
+struct PendingPicture {
+    at: usize,
+    key: String,
+    width_pt: f64,
+    height_pt: f64,
 }
 
 #[derive(Clone)]
@@ -2797,6 +2908,19 @@ fn segments(inlines: &[Inline]) -> Result<Vec<Segment>, WriteError> {
                 atom: Atom::PageBreak {},
                 src: None,
             } => events.push(Ev::PageBreak),
+            Inline::Atom {
+                atom:
+                    Atom::Image {
+                        media,
+                        width_pt,
+                        height_pt,
+                    },
+                src: None,
+            } => events.push(Ev::Image(FreshImage {
+                key: media.clone(),
+                width_pt: *width_pt,
+                height_pt: *height_pt,
+            })),
             Inline::Text {
                 text,
                 marks,
@@ -2845,6 +2969,22 @@ fn segments(inlines: &[Inline]) -> Result<Vec<Segment>, WriteError> {
                     segments.push(Segment::PageBreak);
                 }
             }
+            Ev::Image(image) => {
+                let next_src = events[index + 1..].iter().find_map(|event| event.src());
+                // Same attachment as a page break: an image between two pieces of one
+                // run has to stay inside that run's segment, or the later piece deletes it.
+                let attached = matches!(
+                    segments.last(),
+                    Some(Segment::Run(group)) if Some(group.src) == next_src
+                );
+                if attached {
+                    if let Some(Segment::Run(group)) = segments.last_mut() {
+                        group.items.push(GroupItem::Image(image.clone()));
+                    }
+                } else {
+                    segments.push(Segment::Image(image.clone()));
+                }
+            }
             Ev::Source { src, piece } => {
                 if let Some(Segment::Run(group)) = segments.last_mut()
                     && group.src == *src
@@ -2873,13 +3013,14 @@ enum Ev {
     Source { src: u32, piece: Piece },
     Fresh(Piece),
     PageBreak,
+    Image(FreshImage),
 }
 
 impl Ev {
     fn src(&self) -> Option<u32> {
         match self {
             Ev::Source { src, .. } => Some(*src),
-            Ev::Fresh(_) | Ev::PageBreak => None,
+            Ev::Fresh(_) | Ev::PageBreak | Ev::Image(_) => None,
         }
     }
 }
@@ -2928,6 +3069,7 @@ fn apply_run<S: Story>(
     cursor: usize,
     group: &RunGroup,
     ctx: &mut Apply<'_>,
+    pictures: &mut Vec<PendingPicture>,
 ) -> Result<usize, WriteError> {
     while cursor < srcs.len() && srcs[cursor] != Some(group.src) {
         if srcs[cursor].is_some_and(|src| srcs[cursor + 1..].contains(&Some(src))) {
@@ -2944,7 +3086,7 @@ fn apply_run<S: Story>(
         .iter()
         .filter_map(|item| match item {
             GroupItem::Text(piece) => Some(piece),
-            GroupItem::Fresh(_) | GroupItem::Break => None,
+            GroupItem::Fresh(_) | GroupItem::Break | GroupItem::Image(_) => None,
         })
         .collect();
     let concat: String = text_pieces
@@ -3018,6 +3160,10 @@ fn apply_run<S: Story>(
                 insert_page_break(loc, paragraph_index, srcs, physical)?;
                 physical += 1;
             }
+            GroupItem::Image(image) => {
+                insert_image(loc, paragraph_index, srcs, physical, image, pictures)?;
+                physical += 1;
+            }
         }
     }
     if group.items.is_empty() {
@@ -3070,10 +3216,11 @@ fn insert_fresh<S: Story>(
     }
     loc.with_para(paragraph_index, |paragraph| {
         let count = paragraph.run_count();
-        if count == 0 {
+        if count == 0 || (at == count && paragraph_has_drawing(paragraph)) {
+            // insert_run_like refuses to append once the paragraph holds a drawing.
             let _run = paragraph.add_run_inheriting_mark(&piece.text);
         } else {
-            let like = if at == 0 { 0 } else { at - 1 };
+            let like = run_like(paragraph, at)?;
             paragraph.insert_run_like(at, like, &piece.text)?;
         }
         if piece.text.chars().any(|ch| ch == '\t' || ch == '\n') {
@@ -3120,6 +3267,118 @@ fn insert_page_break<S: Story>(
     })?;
     srcs.insert(at, None);
     Ok(())
+}
+
+/// A picture is its own run, same as a page break: a drawing left inside a text
+/// run would protect that run, and the next edit of the text would be refused.
+/// The drawing is attached later. `insert_run_like` is refused once one is present.
+fn insert_image<S: Story>(
+    loc: &mut S,
+    paragraph_index: usize,
+    srcs: &mut Vec<Option<u32>>,
+    at: usize,
+    image: &FreshImage,
+    pictures: &mut Vec<PendingPicture>,
+) -> Result<(), WriteError> {
+    loc.with_para(paragraph_index, |paragraph| {
+        let count = paragraph.run_count();
+        if count == 0 || at == count {
+            paragraph.add_run_inheriting_mark("");
+        } else {
+            let like = run_like(paragraph, at)?;
+            paragraph.insert_run_like(at, like, "")?;
+        }
+        Ok(())
+    })?;
+    pictures.push(PendingPicture {
+        at,
+        key: image.key.clone(),
+        width_pt: image.width_pt,
+        height_pt: image.height_pt,
+    });
+    srcs.insert(at, None);
+    Ok(())
+}
+
+fn place_pictures<S: Story>(
+    loc: &mut S,
+    paragraph_index: usize,
+    pictures: &[PendingPicture],
+    ctx: &mut Apply<'_>,
+) -> Result<(), WriteError> {
+    for picture in pictures {
+        let rel = rel_for(loc, &picture.key, ctx)?;
+        let width = image_length(picture.width_pt);
+        let height = image_length(picture.height_pt);
+        let at = picture.at;
+        loc.with_para(paragraph_index, |paragraph| {
+            with_run(paragraph, at, |run| {
+                run.set_text("");
+                run.add_picture(&rel, width, height);
+                Ok(())
+            })?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn paragraph_has_drawing(paragraph: &Paragraph<'_>) -> bool {
+    (0..paragraph.run_count()).any(|index| {
+        paragraph.run(index).is_some_and(|run| {
+            run.items()
+                .any(|item| matches!(item, RunItemRef::Drawing(_)))
+        })
+    })
+}
+
+/// `insert_run_like` copies the whole run. A drawing or a break cannot be that
+/// source, so pick the nearest run that is only text.
+fn run_like(paragraph: &mut Paragraph<'_>, at: usize) -> Result<usize, WriteError> {
+    let count = paragraph.run_count();
+    let mut order = Vec::new();
+    if at > 0 {
+        order.push(at - 1);
+    }
+    order.extend((0..at.saturating_sub(1)).rev());
+    order.extend(at + 1..count);
+    if at < count {
+        order.push(at);
+    }
+    let mut fallback = if at == 0 { 0 } else { at - 1 };
+    for candidate in order {
+        if candidate >= count {
+            continue;
+        }
+        let protected = {
+            let run = paragraph
+                .run(candidate)
+                .ok_or_else(|| contract("run index is out of range"))?;
+            is_protected(&run)
+        };
+        if !protected {
+            return Ok(candidate);
+        }
+        fallback = candidate;
+    }
+    Ok(fallback)
+}
+
+fn rel_for<S: Story>(loc: &mut S, key: &str, ctx: &mut Apply<'_>) -> Result<String, WriteError> {
+    if let Some(rel) = ctx.rels.get(key) {
+        return Ok(rel.clone());
+    }
+    let Some(part) = ctx.parts.get(key) else {
+        return Err(contract(format!("media {key}")));
+    };
+    if !is_raster(&part.bytes) {
+        return Err(contract(format!("media {key}")));
+    }
+    let name = part.file_name.clone();
+    let bytes = part.bytes.clone();
+    let rel = loc.embed(&bytes, &name);
+    ctx.rels.insert(key.to_string(), rel.clone());
+    Ok(rel)
 }
 
 fn remove_at<S: Story>(
