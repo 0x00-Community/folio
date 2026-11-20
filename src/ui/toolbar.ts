@@ -27,6 +27,12 @@ export interface ToolbarHandlers {
   onList(kind: 'bullet' | 'decimal'): void
   onIndent(delta: 1 | -1): void
   onPageSetup(): void
+  onInsertTable(): void
+  onTableRow(where: 'above' | 'below'): void
+  onDeleteRows(): void
+  onTableColumn(where: 'left' | 'right'): void
+  onDeleteColumns(): void
+  onDeleteTable(): void
   onZoom(zoom: number): void
 }
 
@@ -123,6 +129,20 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   group(root).append(bullet, numbered, decrease, increase)
   group(root).append(iconButton(t('pageSetup'), null, platform, () => handlers.onPageSetup(), 'page-setup'))
 
+  const insertTable = iconButton(t('table.insert'), null, platform, () => handlers.onInsertTable(), 'table')
+  group(root).append(insertTable)
+  const rowAbove = iconButton(t('table.rowAbove'), null, platform, () => handlers.onTableRow('above'), 'table-row-above')
+  const rowBelow = iconButton(t('table.rowBelow'), null, platform, () => handlers.onTableRow('below'), 'table-row-below')
+  const deleteRow = iconButton(t('table.deleteRow'), null, platform, () => handlers.onDeleteRows(), 'table-row-delete')
+  const columnLeft = iconButton(t('table.columnLeft'), null, platform, () => handlers.onTableColumn('left'), 'table-col-left')
+  const columnRight = iconButton(t('table.columnRight'), null, platform, () => handlers.onTableColumn('right'), 'table-col-right')
+  const deleteColumn = iconButton(t('table.deleteColumn'), null, platform, () => handlers.onDeleteColumns(), 'table-col-delete')
+  const deleteTableButton = iconButton(t('table.delete'), null, platform, () => handlers.onDeleteTable(), 'table-delete')
+  for (const button of [rowAbove, rowBelow, deleteRow, columnLeft, columnRight, deleteColumn, deleteTableButton]) {
+    button.disabled = true
+  }
+  group(root).append(rowAbove, rowBelow, deleteRow, columnLeft, columnRight, deleteColumn, deleteTableButton)
+
   const zoomSelect = labeledSelect(t('zoom'), 'zoom')
   for (const percent of ZOOMS) {
     const option = document.createElement('option')
@@ -203,6 +223,15 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
         if (saveButton.disabled !== !canSave) saveButton.disabled = !canSave
         if (undo.disabled !== !state.canUndo) undo.disabled = !state.canUndo
         if (redo.disabled !== !state.canRedo) redo.disabled = !state.canRedo
+        // A table nested in a cell is refused on save, so insert stays off while the caret is in one.
+        setDisabled(insertTable, state.inTable)
+        setDisabled(rowAbove, !state.rowTools)
+        setDisabled(rowBelow, !state.rowTools)
+        setDisabled(deleteRow, !state.rowTools)
+        setDisabled(columnLeft, !state.columnTools)
+        setDisabled(columnRight, !state.columnTools)
+        setDisabled(deleteColumn, !state.columnTools)
+        setDisabled(deleteTableButton, !state.inTable)
         setPressed(marks.bold, pressedOf(state.bold))
         setPressed(marks.italic, pressedOf(state.italic))
         setPressed(marks.underline, pressedOf(state.underline))
@@ -339,4 +368,8 @@ function pressedOf(value: boolean | 'mixed'): 'true' | 'false' | 'mixed' {
 
 function setPressed(button: HTMLButtonElement, pressed: 'true' | 'false' | 'mixed'): void {
   if (button.getAttribute('aria-pressed') !== pressed) button.setAttribute('aria-pressed', pressed)
+}
+
+function setDisabled(button: HTMLButtonElement, disabled: boolean): void {
+  if (button.disabled !== disabled) button.disabled = disabled
 }

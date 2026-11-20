@@ -20,6 +20,14 @@ export type IconName =
   | 'save'
   | 'save-as'
   | 'page-setup'
+  | 'table'
+  | 'table-row-above'
+  | 'table-row-below'
+  | 'table-row-delete'
+  | 'table-col-left'
+  | 'table-col-right'
+  | 'table-col-delete'
+  | 'table-delete'
 
 type MarkIcon = 'bold' | 'italic' | 'underline' | 'strike'
 
@@ -77,6 +85,22 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return drawSaveAs(svg)
     case 'page-setup':
       return drawPageSetup(svg)
+    case 'table':
+      return drawTable(svg)
+    case 'table-row-above':
+      return drawTableRow(svg, 'above')
+    case 'table-row-below':
+      return drawTableRow(svg, 'below')
+    case 'table-row-delete':
+      return drawTableRow(svg, 'delete')
+    case 'table-col-left':
+      return drawTableColumn(svg, 'left')
+    case 'table-col-right':
+      return drawTableColumn(svg, 'right')
+    case 'table-col-delete':
+      return drawTableColumn(svg, 'delete')
+    case 'table-delete':
+      return drawTableDelete(svg)
     default: {
       const unexpected: never = name
       throw new Error(`unknown icon ${unexpected}`)
@@ -104,6 +128,57 @@ function drawPageSetup(svg: SVGSVGElement): void {
   path(svg, 'M6.2 5.2 H11.8')
   path(svg, 'M6.2 8 H11.8')
   path(svg, 'M6.2 10.8 H9.6')
+}
+
+function drawTable(svg: SVGSVGElement): void {
+  grid(svg, 3, 3, 12, 12)
+}
+
+function drawTableRow(svg: SVGSVGElement, where: 'above' | 'below' | 'delete'): void {
+  if (where === 'above') {
+    plus(svg, 9, 2.4)
+    grid(svg, 3.2, 5.6, 11.6, 9.2)
+    return
+  }
+  if (where === 'below') {
+    grid(svg, 3.2, 3.2, 11.6, 9.2)
+    plus(svg, 9, 15.6)
+    return
+  }
+  grid(svg, 3, 3, 12, 12)
+  path(svg, 'M4.2 7.4 L13.8 10.6')
+}
+
+function drawTableColumn(svg: SVGSVGElement, where: 'left' | 'right' | 'delete'): void {
+  if (where === 'left') {
+    plus(svg, 2.4, 9)
+    grid(svg, 5.6, 3.2, 9.2, 11.6)
+    return
+  }
+  if (where === 'right') {
+    grid(svg, 3.2, 3.2, 9.2, 11.6)
+    plus(svg, 15.6, 9)
+    return
+  }
+  grid(svg, 3, 3, 12, 12)
+  path(svg, 'M7.4 4.2 L10.6 13.8')
+}
+
+function drawTableDelete(svg: SVGSVGElement): void {
+  grid(svg, 3, 3, 12, 12)
+  path(svg, 'M4.6 4.6 L13.4 13.4')
+  path(svg, 'M13.4 4.6 L4.6 13.4')
+}
+
+function grid(svg: SVGSVGElement, x: number, y: number, w: number, h: number): void {
+  path(svg, `M${x} ${y} H${x + w} V${y + h} H${x} Z`)
+  path(svg, `M${x + w / 2} ${y} V${y + h}`)
+  path(svg, `M${x} ${y + h / 2} H${x + w}`)
+}
+
+function plus(svg: SVGSVGElement, x: number, y: number): void {
+  path(svg, `M${x - 1.7} ${y} H${x + 1.7}`)
+  path(svg, `M${x} ${y - 1.7} V${y + 1.7}`)
 }
 
 function drawSaveAs(svg: SVGSVGElement): void {

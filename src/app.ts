@@ -1,7 +1,7 @@
 // Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
 import { Editor } from './editor/editor.ts'
-import { changeIndentLevel, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertRow, insertTable, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, loadEngine, saveTampered } from './engine/engine.ts'
@@ -13,6 +13,7 @@ import { createToolbar } from './ui/toolbar.ts'
 import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
 import { isDialogOpen } from './ui/dialog.ts'
 import { openPageSetup } from './ui/page-setup.ts'
+import { openInsertTable } from './ui/table-tools.ts'
 import { createUnsavedDialog } from './ui/unsaved.ts'
 import type { UnsavedChoice } from './ui/unsaved.ts'
 
@@ -112,6 +113,33 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
         edit(() => { current().run(setPageSetup(section, next)) })
         lastPageSetupMs = performance.now() - started
       })
+    },
+    onInsertTable() {
+      if (isDialogOpen() || current().toolbar().inTable) return
+      void openInsertTable().then((size) => {
+        if (!size || current().toolbar().inTable) {
+          current().focus()
+          return
+        }
+        edit(() => { current().run(insertTable(size.rows, size.cols)) })
+      })
+    },
+    onTableRow(where) {
+      edit(() => { current().run(insertRow(where)) })
+    },
+    onDeleteRows() {
+      edit(() => { current().run(deleteRows()) })
+    },
+    onTableColumn(where) {
+      if (!current().toolbar().columnTools) return
+      edit(() => { current().run(insertColumn(where)) })
+    },
+    onDeleteColumns() {
+      if (!current().toolbar().columnTools) return
+      edit(() => { current().run(deleteColumns()) })
+    },
+    onDeleteTable() {
+      edit(() => { current().run(deleteEnclosingTable()) })
     },
     onZoom(zoom) {
       edit(() => { current().setZoom(zoom) })
