@@ -4,10 +4,11 @@ import { Editor } from './editor/editor.ts'
 import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertImage, insertRow, insertTable, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
-import { OpenError, SaveVerifyError, SaveWriteError, loadEngine, saveTampered } from './engine/engine.ts'
-import type { Opened } from './engine/engine.ts'
+import { OpenError, SaveVerifyError, SaveWriteError, engineBootMs, loadEngine, saveTampered, wasmMemoryBytes } from './engine/engine.ts'
+import type { Opened, PrintFontInfo } from './engine/engine.ts'
+import { fetchPrintFonts } from './fonts.ts'
 import { locale, t } from './i18n.ts'
-import type { Doc, Pt, StyleId } from './model.ts'
+import type { Block, Doc, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
 import { createToolbar } from './ui/toolbar.ts'
 import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
@@ -39,6 +40,25 @@ export interface WordApp {
   requestClose(): boolean
   /** How long the last page-setup confirm blocked, including the relayout. Zero before the first one. */
   pageSetupMs(): number
+  /**
+   * Dev hook: fetch the CJK faces, lay out the open document, and time the blocking calls.
+   * Does not write a file. The PDF is base64.
+   */
+  printLayout(): Promise<PrintMeasure>
+}
+
+export type PrintMeasure = {
+  readonly pages: number
+  readonly pdfBase64: string
+  readonly fontMs: number
+  readonly layoutMs: number
+  readonly pdfMs: number
+  readonly pngMs: number
+  readonly pngBytes: number
+  readonly memoryBefore: number
+  readonly memoryAfter: number
+  readonly bootMs: number
+  readonly fonts: readonly PrintFontInfo[]
 }
 
 type Pending = {
@@ -422,6 +442,43 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   // Return false at once. The runtime closes a dirty window if beforeclose is still pending after 3 seconds.
   // close() does not ask again, so Save and Don't save close the window themselves.
   appWindow.on('beforeclose', () => requestClose())
+  async function measurePrint(): Promise<PrintMeasure> {
+    const editorNow = current()
+    const doc = editorNow.state.doc
+    const memoryBefore = wasmMemoryBytes()
+    const fontStarted = performance.now()
+    const planned = await fetchPrintFonts(editorNow.source.fontsUsed(doc), documentHasHan(doc))
+    for (const face of planned.faces) editorNow.source.addFont(face.family, face.bytes)
+    for (const [requested, loaded] of planned.aliases) editorNow.source.addFontAlias(requested, loaded)
+    const fontMs = performance.now() - fontStarted
+    const layoutStarted = performance.now()
+    const layout = editorNow.source.printLayout(doc)
+    const layoutMs = performance.now() - layoutStarted
+    try {
+      const pdfStarted = performance.now()
+      const pdf = layout.pdf()
+      const pdfMs = performance.now() - pdfStarted
+      const pngStarted = performance.now()
+      const png = layout.pagePng(0, 144)
+      const pngMs = performance.now() - pngStarted
+      return {
+        pages: layout.pageCount(),
+        pdfBase64: encodeBase64(pdf),
+        fontMs,
+        layoutMs,
+        pdfMs,
+        pngMs,
+        pngBytes: png.byteLength,
+        memoryBefore,
+        memoryAfter: wasmMemoryBytes(),
+        bootMs: engineBootMs(),
+        fonts: layout.fonts(),
+      }
+    } finally {
+      layout.free()
+    }
+  }
+
   return {
     editor,
     openBytes,
@@ -429,7 +486,35 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     saveTampered: failSave,
     requestClose,
     pageSetupMs: () => lastPageSetupMs,
+    printLayout: measurePrint,
   }
+}
+
+function documentHasHan(doc: Doc): boolean {
+  const han = /\p{Script=Han}/u
+  const visit = (blocks: readonly Block[]): boolean => {
+    for (const block of blocks) {
+      if (block.kind === 'p') {
+        for (const inline of block.inlines) {
+          if (inline.kind === 'text' && han.test(inline.text)) return true
+        }
+      } else if (block.kind === 'table') {
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            if (visit(cell.blocks)) return true
+          }
+        }
+      } else if (visit(block.preview)) {
+        return true
+      }
+    }
+    return false
+  }
+  if (visit(doc.body)) return true
+  for (const blocks of doc.stories.values()) {
+    if (visit(blocks)) return true
+  }
+  return false
 }
 
 function required(selector: string): HTMLElement {

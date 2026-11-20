@@ -4,9 +4,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 export const root = new URL('../..', import.meta.url).pathname
 const APP = 'word'
 
-function acde(args, { allowFail = false } = {}) {
+function acde(args, { allowFail = false, maxBuffer = 64 * 1024 * 1024 } = {}) {
   try {
-    return execFileSync('acde', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    return execFileSync('acde', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer })
   } catch (error) {
     if (allowFail) return null
     throw new Error(`acde ${args.join(' ')} failed: ${error.stderr || error.message}`)

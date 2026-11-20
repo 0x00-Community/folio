@@ -1,4 +1,5 @@
 import { window as appWindow } from 'acde:window'
+import type { PrintMeasure } from './app.ts'
 import type { Editor } from './editor/editor.ts'
 import { insertText, setSelection } from './editor/edit.ts'
 import type { Command } from './editor/edit.ts'
@@ -27,6 +28,7 @@ function installHook(app: {
   saveTampered(): string
   requestClose(): boolean
   pageSetupMs(): number
+  printLayout(): Promise<PrintMeasure>
 }): void {
   // There is no production build flag. These hooks are how the e2e reaches save, a forced verify
   // failure, and beforeclose. `acde act w1 close` waits until the window is gone, so a handler that
@@ -51,6 +53,9 @@ function installHook(app: {
     pageSetupMs() {
       return app.pageSetupMs()
     },
+    printLayout() {
+      return app.printLayout()
+    },
   }
 }
 
@@ -73,6 +78,7 @@ declare global {
       saveTampered(): string
       requestClose(): boolean
       pageSetupMs(): number
+      printLayout(): Promise<PrintMeasure>
     }
   }
 }
