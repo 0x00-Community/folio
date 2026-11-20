@@ -8,6 +8,7 @@ import {
   COALESCE_MS,
   deleteBackward,
   deleteColumns,
+  deleteEnclosingTable,
   deleteForward,
   deleteRows,
   deleteSelection,
@@ -34,6 +35,7 @@ import {
   setParaStyle,
   setSelection,
   splitParagraph,
+  tableEditTools,
   toggleList,
   toggleMark,
   toolbarState,
@@ -416,6 +418,15 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   const inserted = asTable(middle.doc.body[1])
   assert.equal(inserted.rows.length, 2, 'the table has the requested rows')
   assert.equal(inserted.grid.length, 2, 'the table has the requested columns')
+  const firstCell = inserted.rows[0]?.cells[0]?.blocks[0]
+  assert.ok(firstCell && firstCell.kind === 'p', 'the first cell has a paragraph')
+  assert.equal(middle.sel.kind, 'text', 'insert leaves a text caret')
+  if (firstCell && firstCell.kind === 'p' && middle.sel.kind === 'text') {
+    assert.equal(middle.sel.head.p, firstCell.id, 'the caret is in the first cell')
+    assert.equal(middle.sel.head.o, 0, 'the caret is at the start of that cell')
+    assert.equal(middle.sel.anchor.p, firstCell.id, 'the caret is collapsed')
+    assert.equal(middle.sel.anchor.o, 0, 'the collapsed caret stays at the start')
+  }
   assert.equal(inserted.grid[0], pt(234), 'columns share the content width')
   const gutter = page()
   const withGutter = { ...gutter, margin: { ...gutter.margin, gutter: pt(36) } }
@@ -483,9 +494,78 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   assert.equal(asTable(added.doc.body[0]).rows[0]?.cells[0], wide.rows[0]?.cells[0], 'the existing cell object stays')
   const narrowed = run(added, deleteColumns())
   assert.equal(asTable(narrowed.doc.body[0]).grid.length, 2, 'deleteColumns removes a column')
+  const only = paragraph('only', [text('z')])
+  const single = table('one', [row([cell([only])])], [72])
+  const clearedCol = run(initialState(makeDoc([single])), deleteColumns())
+  assert.equal(clearedCol.doc.body[0]?.kind, 'p', 'deleting the last column removes the table')
+  const beside = run(caretAt(initialState(makeDoc([para, single])), only.id, 0), deleteColumns())
+  assert.equal(beside.doc.body.length, 1, 'the last column takes the table with it')
+  assert.equal(beside.doc.body[0], para, 'the paragraph outside the table stays')
   const dropped = run(initialState(makeDoc([para, wide])), deleteTable(wide.id))
   assert.equal(dropped.doc.body.length, 1, 'deleteTable removes the table')
   assert.equal(dropped.doc.body[0], para, 'the paragraph outside the table stays')
+  const host = wide.rows[0]?.cells[0]?.blocks[0]
+  assert.ok(host && host.kind === 'p')
+  if (host && host.kind === 'p') {
+    const droppedByCaret = run(caretAt(initialState(makeDoc([para, wide])), host.id, 0), deleteEnclosingTable())
+    assert.equal(droppedByCaret.doc.body.length, 1, 'deleteEnclosingTable removes the table around the caret')
+    assert.equal(droppedByCaret.doc.body[0], para, 'the paragraph outside the table stays')
+  }
+})
+
+test('column edits rewrite span inside a merged cell, so those tools turn off; row edits and a vertical merge do not', () => {
+  const widePara = paragraph('wide', [text('wide')])
+  const side = paragraph('side', [text('side')])
+  const narrow = paragraph('narrow', [text('narrow')])
+  const mid = paragraph('mid', [text('mid')])
+  const end = paragraph('end', [text('end')])
+  const horizontal = table('h', [
+    row([{ ...cell([widePara], 2), vMerge: 'restart' }, cell([side])]),
+    row([cell([narrow]), cell([mid]), cell([end])]),
+  ], [72, 72, 72])
+  assert.deepEqual(tableEditTools(horizontal), { rows: true, columns: false }, 'a span above 1 turns column tools off for the whole table')
+  const atMid = caretAt(initialState(makeDoc([horizontal])), mid.id, 0)
+  const bar = toolbarState(atMid, look)
+  assert.equal(bar.inTable, true, 'the caret is in the table')
+  assert.equal(bar.rowTools, true, 'row tools stay available')
+  assert.equal(bar.columnTools, false, 'column tools follow tableEditTools')
+
+  const grown = run(atMid, insertColumn('left'))
+  const grownCell = asTable(grown.doc.body[0]).rows[0]?.cells[0]
+  assert.equal(grownCell?.span, 3, 'insertColumn inside a span rewrites that span')
+  assert.equal(grownCell?.vMerge, 'restart', 'insertColumn leaves vMerge as it was')
+  assert.equal(flatText(asParagraph(grownCell?.blocks[0])), 'wide', 'the rewritten cell is the merged one')
+
+  const shrunk = run(atMid, deleteColumns())
+  const shrunkCell = asTable(shrunk.doc.body[0]).rows[0]?.cells[0]
+  assert.equal(shrunkCell?.span, 1, 'deleteColumns inside a span rewrites that span')
+  assert.equal(shrunkCell?.vMerge, 'restart', 'deleteColumns leaves vMerge as it was')
+
+  const added = run(caretAt(initialState(makeDoc([horizontal])), widePara.id, 0), insertRow('below'))
+  const addedTable = asTable(added.doc.body[0])
+  assert.equal(addedTable.rows[0], horizontal.rows[0], 'insertRow does not rewrite the existing row')
+  assert.equal(addedTable.rows[1]?.cells[0]?.span, 2, 'the new row copies span')
+  assert.equal(addedTable.rows[1]?.cells[0]?.vMerge, null, 'the new row clears vMerge')
+  const removedRow = run(caretAt(initialState(makeDoc([horizontal])), widePara.id, 0), deleteRows())
+  assert.equal(asTable(removedRow.doc.body[0]).rows[0], horizontal.rows[1], 'deleteRows keeps the other row object')
+
+  const top = paragraph('top', [text('top')])
+  const topRight = paragraph('tr', [text('tr')])
+  const bottom = paragraph('bot', [text('bot')])
+  const bottomRight = paragraph('br', [text('br')])
+  const vertical = table('v', [
+    row([{ ...cell([top]), vMerge: 'restart' }, cell([topRight])]),
+    row([{ ...cell([bottom]), vMerge: 'continue' }, cell([bottomRight])]),
+  ], [72, 72])
+  assert.deepEqual(tableEditTools(vertical), { rows: true, columns: true }, 'a vertical merge does not turn column tools off')
+  const verticalBar = toolbarState(initialState(makeDoc([vertical])), look)
+  assert.equal(verticalBar.columnTools, true, 'column tools stay on for a vertical merge')
+  assert.equal(verticalBar.rowTools, true, 'row tools stay on for a vertical merge')
+  const extended = run(initialState(makeDoc([vertical])), insertColumn('right'))
+  assert.equal(asTable(extended.doc.body[0]).rows[0]?.cells[0], vertical.rows[0]?.cells[0], 'insertColumn beside a vertical merge keeps that cell')
+  const trimmed = run(caretAt(initialState(makeDoc([vertical])), topRight.id, 0), deleteColumns())
+  assert.equal(asTable(trimmed.doc.body[0]).rows[0]?.cells[0], vertical.rows[0]?.cells[0], 'deleteColumns beside a vertical merge keeps that cell')
+  assert.equal(asTable(trimmed.doc.body[0]).rows[0]?.cells[0]?.vMerge, 'restart', 'the kept cell keeps its vMerge')
 })
 
 test('images scale to the content width and page setup replaces one section', () => {
@@ -576,6 +656,8 @@ test('toolbar state uses the look callback and reports mixed', () => {
   assert.equal(head.font, '宋体', 'the font slot shown is East Asian')
   assert.equal(head.canUndo, false, 'a fresh state cannot undo')
   assert.equal(head.inTable, false, 'a body paragraph is not in a table')
+  assert.equal(head.rowTools, false, 'row tools are off outside a table')
+  assert.equal(head.columnTools, false, 'column tools are off outside a table')
 
   const para = paragraph('p', [text('a')])
   let state = initialState(makeDoc([para]))
@@ -594,6 +676,8 @@ test('toolbar state uses the look callback and reports mixed', () => {
   const inner = paragraph('c', [text('cell')])
   const inside = toolbarState(initialState(makeDoc([table('t', [row([cell([inner])])])])), look)
   assert.equal(inside.inTable, true, 'a caret in a cell reports inTable')
+  assert.equal(inside.rowTools, true, 'row tools are on in a table without a horizontal merge')
+  assert.equal(inside.columnTools, true, 'column tools are on when every span is 1')
   const edited = run(state, insertText('x'))
   assert.equal(toolbarState(edited, look).canUndo, true, 'a recorded command can undo')
   const back = undo(edited)

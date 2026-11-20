@@ -593,6 +593,14 @@ export function deleteTable(table: TableId): Command {
   }
 }
 
+export function deleteEnclosingTable(): Command {
+  return (state) => {
+    const hit = tableHit(state)
+    if (!hit) return null
+    return deleteTable(hit.table.id)(state)
+  }
+}
+
 export interface MediaRef {
   readonly key: MediaKey
   readonly widthPx: number
@@ -648,8 +656,24 @@ export interface ToolbarState {
   readonly align: NonNullable<ParaProps['align']> | 'mixed'
   readonly list: 'bullet' | 'decimal' | 'none' | 'mixed'
   readonly inTable: boolean
+  readonly rowTools: boolean
+  readonly columnTools: boolean
   readonly canUndo: boolean
   readonly canRedo: boolean
+}
+
+// insertColumn and deleteColumns rewrite span when the edited column falls inside a cell that already
+// covers more than one column, so one such cell turns column tools off for the whole table. insertRow
+// copies span onto a new row and clears vMerge there; deleteRows drops rows. Neither writes span or
+// vMerge on a cell that stays, so a vertical merge does not turn tools off.
+export function tableEditTools(table: Table): { readonly rows: boolean, readonly columns: boolean } {
+  let columns = true
+  for (const row of table.rows) {
+    for (const cell of row.cells) {
+      if (cell.span > 1) columns = false
+    }
+  }
+  return { rows: true, columns }
 }
 
 export function toolbarState(state: EditorState, look: (para: Paragraph, marks: Marks) => RunLook): ToolbarState {
@@ -668,8 +692,12 @@ export function toolbarState(state: EditorState, look: (para: Paragraph, marks: 
   const align = uniform(paras.map(para => effectiveAlign(state.doc, para)))
   const list = uniform(paras.map(para => listKindOf(state.doc, para)))
   const inTable = state.sel.kind === 'cells' || paras.some(para => paragraphInTable(state.doc, para.id))
+  const hit = tableHit(state)
+  const tools = hit ? tableEditTools(hit.table) : { rows: false, columns: false }
   return {
     bold, italic, underline, strike, font, sizePt, color, highlight, style, align, list, inTable,
+    rowTools: tools.rows,
+    columnTools: tools.columns,
     canUndo: state.history.past.length > 0,
     canRedo: state.history.future.length > 0,
   }
