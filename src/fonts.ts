@@ -317,6 +317,88 @@ export type FetchedPrintFonts = {
   readonly aliases: readonly [string, string][]
 }
 
+export interface PrintFontTarget {
+  addFont(family: string, bytes: Uint8Array): void
+  addFontAlias(requested: string, loaded: string): void
+}
+
+type HeldPrintFonts = {
+  families: Set<string>
+  aliases: Set<string>
+}
+
+// Keyed by the session `Source`. A second preview does not fetch or add a face this set already has.
+// The preview does not keep a copy.
+const sessionFonts = new WeakMap<object, HeldPrintFonts>()
+
+function sessionFontsOf(source: object): HeldPrintFonts {
+  let held = sessionFonts.get(source)
+  if (held === undefined) {
+    held = { families: new Set(), aliases: new Set() }
+    sessionFonts.set(source, held)
+  }
+  return held
+}
+
+function aliasKey(requested: string, loaded: string): string {
+  return `${requested}\0${loaded}`
+}
+
+/** The part of a plan this session has not stored yet. */
+export function selectNewPrintFonts(source: object, plan: PrintFontPlan): PrintFontPlan {
+  const held = sessionFonts.get(source)
+  if (held === undefined) return plan
+  return {
+    faces: plan.faces.filter((face) => !held.families.has(face.family)),
+    aliases: plan.aliases.filter(([requested, loaded]) => !held.aliases.has(aliasKey(requested, loaded))),
+  }
+}
+
+/** Add faces and aliases the session does not already have. A repeat call does not call `addFont` again. */
+export function installPrintFonts(source: PrintFontTarget, fetched: FetchedPrintFonts): void {
+  const held = sessionFontsOf(source)
+  for (const face of fetched.faces) {
+    if (held.families.has(face.family)) continue
+    source.addFont(face.family, face.bytes)
+    held.families.add(face.family)
+  }
+  for (const [requested, loaded] of fetched.aliases) {
+    const key = aliasKey(requested, loaded)
+    if (held.aliases.has(key) || !held.families.has(loaded)) continue
+    source.addFontAlias(requested, loaded)
+    held.aliases.add(key)
+  }
+}
+
+/**
+ * Fetch and add the caller faces for one print. Faces this session already holds are left as they are:
+ * a second preview does not fetch them and does not pass the bytes into wasm again.
+ */
+export async function ensurePrintFonts(source: PrintFontTarget, families: readonly string[], han: boolean): Promise<void> {
+  const plan = printFonts(families, await readPrintCatalog(), han)
+  const missing = selectNewPrintFonts(source, plan)
+  if (missing.faces.length === 0 && missing.aliases.length === 0) return
+  const cached = new Map<string, Uint8Array>()
+  const faces: { family: string; bytes: Uint8Array }[] = []
+  for (const face of missing.faces) {
+    let bytes = cached.get(face.id)
+    if (bytes === undefined) {
+      const read = await readPrintFace(face.id)
+      if (read === undefined) continue
+      bytes = read
+      cached.set(face.id, bytes)
+    }
+    faces.push({ family: face.family, bytes })
+  }
+  const loaded = new Set(faces.map((face) => face.family))
+  const held = sessionFonts.get(source)
+  if (held !== undefined) {
+    for (const family of held.families) loaded.add(family)
+  }
+  const aliases = missing.aliases.filter((pair) => loaded.has(pair[1]))
+  installPrintFonts(source, { faces, aliases })
+}
+
 /** `printFonts` against `GET /api/fonts`, then one extracted face per id. A face that fails to read is omitted. */
 export async function fetchPrintFonts(families: readonly string[], han: boolean): Promise<FetchedPrintFonts> {
   const plan = printFonts(families, await readPrintCatalog(), han)

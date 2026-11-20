@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliasChain, cssStack, installedFamilies, printFonts } from './fonts.ts'
+import { aliasChain, cssStack, installPrintFonts, installedFamilies, printFonts, selectNewPrintFonts } from './fonts.ts'
 import type { PrintCatalogFace } from './fonts.ts'
 
 test('cssStack builds the 宋体 substitute list and ends in the generic family', () => {
@@ -103,4 +103,37 @@ test('printFonts adds the bold face, skips Calibri and CFF, and supplies 宋体 
   ])
   assert.deepEqual(han.aliases, [])
   assert.deepEqual(printFonts(['Calibri', 'Times New Roman'], catalog), { faces: [], aliases: [] })
+})
+
+test('a face the session already holds is not added again', () => {
+  const added: string[] = []
+  const aliases: string[] = []
+  const source = {
+    addFont(family: string) {
+      added.push(family)
+    },
+    addFontAlias(requested: string, loaded: string) {
+      aliases.push(`${requested}=${loaded}`)
+    },
+  }
+  const fetched = {
+    faces: [{ family: '宋体', bytes: new Uint8Array([1, 2]) }],
+    aliases: [['SimSun', '宋体'] as [string, string]],
+  }
+  const plan = {
+    faces: [
+      { id: 'songti', family: '宋体' },
+      { id: 'hei', family: '黑体' },
+    ],
+    aliases: [['SimSun', '宋体'] as [string, string], ['Heiti SC', '黑体'] as [string, string]],
+  }
+  assert.deepEqual(selectNewPrintFonts(source, plan), plan)
+  installPrintFonts(source, fetched)
+  installPrintFonts(source, fetched)
+  assert.deepEqual(added, ['宋体'])
+  assert.deepEqual(aliases, ['SimSun=宋体'])
+  assert.deepEqual(selectNewPrintFonts(source, plan), {
+    faces: [{ id: 'hei', family: '黑体' }],
+    aliases: [['Heiti SC', '黑体']],
+  })
 })
