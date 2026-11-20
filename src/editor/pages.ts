@@ -564,6 +564,29 @@ function cursorFromPage(previous: Layout, body: readonly Block[], pageIndex: num
   return { pageIndex, cursor: { index: Math.min(index, body.length), y0: 0 }, soft: true }
 }
 
+function pageOfEarlier(previous: Layout, body: readonly Block[], before: number): number {
+  for (let i = before - 1; i >= 0; i--) {
+    const id = body[i]?.id
+    if (!id) continue
+    const found = pageContaining(previous, id)
+    if (found >= 0) return found
+  }
+  return -1
+}
+
+function earliestRemovedPage(previous: Layout, body: readonly Block[]): number {
+  const live = new Set<BlockId>()
+  for (const block of body) live.add(block.id)
+  for (let i = 0; i < previous.pages.length; i++) {
+    const page = previous.pages[i]
+    if (!page) continue
+    for (const slice of page.slices) {
+      if (!live.has(slice.block)) return i
+    }
+  }
+  return -1
+}
+
 function restart(previous: Layout, body: readonly Block[], changed: ReadonlySet<BlockId>): { pageIndex: number; cursor: Cursor; soft: boolean } {
   if (changed.size === 0) return cursorFromPage(previous, body, Math.max(0, previous.pages.length - 1))
   let earliest = -1
@@ -574,8 +597,20 @@ function restart(previous: Layout, body: readonly Block[], changed: ReadonlySet<
       break
     }
   }
-  if (earliest < 0) return cursorFromPage(previous, body, Math.max(0, previous.pages.length - 1))
-  let pageIndex = pageContaining(previous, body[earliest]?.id ?? ('' as BlockId))
+  let pageIndex = -1
+  if (earliest >= 0) {
+    const id = body[earliest]?.id ?? ('' as BlockId)
+    pageIndex = pageContaining(previous, id)
+    // A new block is on no previous page. Anchor on the nearest earlier block the
+    // previous layout did place. If nothing before it was placed, the old first slice
+    // now sits after this block, so the cursor starts at the beginning of the body.
+    if (pageIndex < 0) pageIndex = pageOfEarlier(previous, body, earliest)
+    if (pageIndex < 0) return { pageIndex: 0, cursor: { index: 0, y0: 0 }, soft: false }
+  }
+  // diffIds cannot name a block that is gone. A page that still holds one is an
+  // earlier anchor than the next surviving block, which may sit pages later.
+  const removed = earliestRemovedPage(previous, body)
+  if (removed >= 0 && (pageIndex < 0 || removed < pageIndex)) pageIndex = removed
   if (pageIndex < 0) pageIndex = Math.max(0, previous.pages.length - 1)
   else if (pageIndex > 0) pageIndex -= 1
   return cursorFromPage(previous, body, pageIndex)
