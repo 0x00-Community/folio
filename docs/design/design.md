@@ -83,3 +83,42 @@ Each unit ends in a check that must pass before its result merges. Code is writt
 | 3 | Save (`write.rs`, verify), save as, dirty state, close guard | Grok | e2e plus native: edit fixtures, save, reopen, text and marks match; unmodeled-item multiset unchanged |
 | 4 | Tables, images, page setup, lists UI | Grok | e2e per feature, round-trip through save |
 | 5 | PDF export through caller fonts, print preview | Grok | Chinese fixture PDF embeds SimSun, `pdftotext` matches |
+| 6 | Automation interface: operate the document and read its structure (planned, see below) | Grok | a script edits `basic.docx` through the interface alone and reads back the outline, saved bytes match |
+
+## Round 6 (planned): an automation interface
+
+Requested on 2026-11-20. Not designed yet. This section records the request and what a design has to settle.
+
+A caller that is not a person at the keyboard (an agent, a test, another app) needs two things from the editor.
+
+1. **Operate the document.** Click at a place, press Enter, type text, insert a table, an image or a page break, and
+   the other edits the toolbar offers.
+2. **Read the document.** Three views of the same model:
+   - the document structure: blocks in order with their kind (paragraph, table, image, opaque), sections and pages;
+   - the text structure: each paragraph's text, runs and marks, list level and number, and table cells;
+   - the chapter structure: the outline built from heading styles, with each heading's level, number, text, page
+     and the range of blocks it covers.
+
+What exists today and why it is not this interface:
+
+- `acde inspect` and `acde act` drive the real window. They see only mounted pages, name a paragraph by its flat
+  text, and cannot address a position inside one.
+- `window.__word` (`src/main.ts`) is a dev hook for the e2e scripts. It exists in dev builds only, has no stable
+  shape, and gives out the internal model objects.
+
+What a design has to settle before any code:
+
+- **Addressing.** How a caller names a place: a paragraph id and an offset (`Pos` in `src/model.ts`), a heading
+  path, a text search result, or a page and a point. Ids must stay valid across edits the caller did not make.
+- **Operations as commands, not events.** Every operation should run a `Command` from `src/editor/edit.ts`
+  through `Editor.run`, so it lands in the undo history and in save exactly as a keystroke does. "Click" then means
+  "set the selection at an address", and a click at a pixel is a separate, view-dependent call.
+- **Transport.** Which runtime channel carries it: app requests (`appWindow.on('request')`, kinds declared in
+  `acde.config.jsonc`), an MCP surface, or the app's backend. Read the acde guides `agents.md`, `mcp.md` and
+  `open.md` first. Do not guess the API.
+- **A stable, versioned shape** for the three read views that does not leak `src` origins or other internals, and a
+  size bound for long documents (a page or block range per call).
+- **Results.** Each operation answers with what changed (the new selection, the ids of blocks created or removed) or
+  a typed refusal (a locked paragraph, an address that no longer exists).
+- **Consent and safety.** Whether another app may edit an open document without the user seeing it, and what the
+  user sees while it happens.
