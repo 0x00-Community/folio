@@ -425,6 +425,75 @@ export function changeIndentLevel(delta: 1 | -1): Command {
   }
 }
 
+/**
+ * Tab moves to the next table cell, or raises a list level, or inserts a tab character.
+ * A list inside a cell follows the cell, so the table is decided first.
+ * Shift+Tab outside a table or a list changes nothing; the chord stays bound so focus stays in the editor.
+ */
+export function tabKey(direction: 1 | -1): Command {
+  return (state) => {
+    const hit = tableHit(state)
+    if (hit) return moveTabCell(state, hit, direction)
+    if (touchedParagraphs(state.doc, state.sel).some((para) => listInfo(state.doc, para) !== null)) {
+      return changeIndentLevel(direction)(state)
+    }
+    if (direction < 0) return null
+    return insertText('\t')(state)
+  }
+}
+
+function moveTabCell(
+  state: EditorState,
+  hit: { table: Table, rows: { start: number, end: number }, cell: number },
+  direction: 1 | -1,
+): Transaction | null {
+  const at = tabCell(state, hit)
+  const next = neighborCell(hit.table, at.row, at.cell, direction)
+  if (!next) {
+    if (direction < 0) return null
+    return insertRow('below')(state)
+  }
+  const blocks = hit.table.rows[next.row]?.cells[next.cell]?.blocks
+  if (!blocks) return null
+  const pos = firstPosIn(blocks)
+  if (!pos) return null
+  return setSelection(caret(pos))(state)
+}
+
+function tabCell(
+  state: EditorState,
+  hit: { rows: { start: number, end: number }, cell: number },
+): { row: number, cell: number } {
+  if (state.sel.kind === 'cells') {
+    const anchor = state.sel.anchor
+    const head = state.sel.head
+    const headLater = head.row > anchor.row || (head.row === anchor.row && head.cell >= anchor.cell)
+    const later = headLater ? head : anchor
+    return { row: later.row, cell: later.cell }
+  }
+  return { row: hit.rows.end, cell: hit.cell }
+}
+
+function neighborCell(
+  table: Table,
+  row: number,
+  cell: number,
+  direction: 1 | -1,
+): { row: number, cell: number } | null {
+  const rows = table.rows
+  if (direction > 0) {
+    const current = rows[row]
+    if (current && cell + 1 < current.cells.length) return { row, cell: cell + 1 }
+    if (row + 1 < rows.length && (rows[row + 1]?.cells.length ?? 0) > 0) return { row: row + 1, cell: 0 }
+    return null
+  }
+  if (cell > 0) return { row, cell: cell - 1 }
+  if (row <= 0) return null
+  const prev = rows[row - 1]
+  if (!prev || prev.cells.length === 0) return null
+  return { row: row - 1, cell: prev.cells.length - 1 }
+}
+
 export function toggleList(kind: 'bullet' | 'decimal'): Command {
   return (state) => {
     const touched = touchedParagraphs(state.doc, state.sel).filter(para => !para.lock)

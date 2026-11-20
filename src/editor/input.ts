@@ -9,6 +9,7 @@ import {
   move,
   selectAll,
   splitParagraph,
+  tabKey,
   toggleMark,
   wordRange,
 } from './edit.ts'
@@ -183,6 +184,8 @@ export function defaultKeymap(platform: Platform): Keymap {
     ['enter', run(splitParagraph)],
     ['shift+enter', run(insertLineBreak)],
     ['mod+enter', run(insertPageBreak)],
+    ['tab', run(tabKey(1))],
+    ['shift+tab', run(tabKey(-1))],
     ['backspace', run(deleteBackward('char'))],
     ['delete', run(deleteForward('char'))],
     [`${word}+backspace`, run(deleteBackward('word'))],

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { checkDoc, flatText } from '../model.ts'
 import type { Paragraph, Pos } from '../model.ts'
-import { apply, compositionDelete, initialState, insertText, selectedText, setSelection, splitParagraph, undo } from './edit.ts'
+import { apply, compositionDelete, initialState, insertTable, insertText, selectAll, selectedText, setSelection, splitParagraph, toggleList, undo } from './edit.ts'
 import type { EditorState } from './edit.ts'
 import {
   buildKeymap,
@@ -142,6 +142,10 @@ test('every command in the default keymap applies on a mid-document caret and ke
     for (const [chord, action] of keymaps[platform]) {
       if (action.kind !== 'command') continue
       const state = stateAt(second, 6)
+      if (chord === 'shift+tab') {
+        assert.equal(action.command(state), null, `${chord} does not apply in plain text on ${platform}`)
+        continue
+      }
       const tr = action.command(state)
       assert.ok(tr, `${chord} applies on ${platform}`)
       checkDoc(apply(state, tr, 0).doc)
@@ -517,6 +521,101 @@ test('replacing a selection with a composition is one typing entry', () => {
   const undone = undo(done)
   assert.ok(undone)
   assert.equal(selectedText(undone), 'llo')
+})
+
+test('tab indents a list, moves through table cells, appends a row, and inserts a tab in plain text', () => {
+  for (const platform of PLATFORMS) {
+    const tab = keyEvent('Tab')
+    const untab = keyEvent('Tab', shift)
+    assert.equal(chordOf(tab, platform), 'tab')
+    assert.equal(chordOf(untab, platform), 'shift+tab')
+
+    const plain = stateAt(second, 6)
+    const tabbed = press(plain, platform, tab)
+    const written = tabbed.doc.body[1]
+    assert.ok(written && written.kind === 'p')
+    assert.equal(flatText(written), 'second\t line', 'tab in plain text inserts a tab character')
+    assert.deepEqual(caretOf(tabbed), { p: second.id, o: 7 })
+    const shiftPlain = bound(platform, untab)
+    assert.ok(shiftPlain && shiftPlain.kind === 'command')
+    assert.equal(shiftPlain.command(plain), null, 'shift+tab in plain text does not change the document')
+
+    const items = [paragraph('a', [text('one')]), paragraph('b', [text('two')]), paragraph('c', [text('three')])]
+    let listed = initialState(makeDoc(items))
+    const all = selectAll(listed)
+    assert.ok(all)
+    listed = apply(listed, all, 0)
+    const numbered = toggleList('decimal')(listed)
+    assert.ok(numbered)
+    listed = apply(listed, numbered, 0)
+    const secondItem = items[1]
+    assert.ok(secondItem)
+    const atSecond = setSelection({ kind: 'text', anchor: { p: secondItem.id, o: 0 }, head: { p: secondItem.id, o: 0 } })(listed)
+    assert.ok(atSecond)
+    listed = apply(listed, atSecond, 0)
+    listed = press(listed, platform, tab)
+    const indented = listed.doc.body[1]
+    assert.ok(indented && indented.kind === 'p')
+    assert.equal(indented.props.numbering?.level, 1, 'tab in a list raises the level')
+    listed = press(listed, platform, untab)
+    const restored = listed.doc.body[1]
+    assert.ok(restored && restored.kind === 'p')
+    assert.equal(restored.props.numbering?.level, 0, 'shift+tab lowers the level')
+
+    let cells = initialState(makeDoc([paragraph('host', [text('ab')])]))
+    const made = insertTable(2, 2)(cells)
+    assert.ok(made)
+    cells = apply(cells, made, 0)
+    const table = cells.doc.body.find((block) => block.kind === 'table')
+    assert.ok(table && table.kind === 'table')
+    const cellId = (row: number, cell: number) => {
+      const block = table.rows[row]?.cells[cell]?.blocks[0]
+      assert.ok(block && block.kind === 'p')
+      return block.id
+    }
+    assert.equal(caretOf(cells).p, cellId(0, 0))
+    cells = press(cells, platform, tab)
+    assert.equal(caretOf(cells).p, cellId(0, 1), 'tab moves to the next cell')
+    cells = press(cells, platform, tab)
+    assert.equal(caretOf(cells).p, cellId(1, 0), 'tab wraps to the next row')
+    cells = press(cells, platform, untab)
+    assert.equal(caretOf(cells).p, cellId(0, 1), 'shift+tab moves to the previous cell')
+    const last = cellId(1, 1)
+    const atLast = setSelection({
+      kind: 'text',
+      anchor: { p: last, o: 0 },
+      head: { p: last, o: 0 },
+    })(cells)
+    assert.ok(atLast)
+    cells = apply(cells, atLast, 0)
+    const grown = press(cells, platform, tab)
+    const grownTable = grown.doc.body.find((block) => block.kind === 'table')
+    assert.ok(grownTable && grownTable.kind === 'table')
+    assert.equal(grownTable.rows.length, 3, 'tab in the last cell appends a row')
+    const fresh = grownTable.rows[2]?.cells[0]?.blocks[0]
+    assert.ok(fresh && fresh.kind === 'p')
+    assert.deepEqual(caretOf(grown), { p: fresh.id, o: 0 }, 'the caret moves into the new row')
+
+    let inside = initialState(makeDoc([paragraph('host', [text('ab')])]))
+    const nested = insertTable(2, 2)(inside)
+    assert.ok(nested)
+    inside = apply(inside, nested, 0)
+    const asList = toggleList('decimal')(inside)
+    assert.ok(asList)
+    inside = apply(inside, asList, 0)
+    const host = inside.doc.body.find((block) => block.kind === 'table')
+    assert.ok(host && host.kind === 'table')
+    const origin = host.rows[0]?.cells[0]?.blocks[0]
+    const neighbor = host.rows[0]?.cells[1]?.blocks[0]
+    assert.ok(origin && origin.kind === 'p' && neighbor && neighbor.kind === 'p')
+    assert.equal(origin.props.numbering?.level, 0)
+    inside = press(inside, platform, tab)
+    assert.equal(caretOf(inside).p, neighbor.id, 'tab in a list inside a cell still moves to the next cell')
+    const kept = inside.doc.body.find((block) => block.kind === 'table')
+    const level = kept && kept.kind === 'table' ? kept.rows[0]?.cells[0]?.blocks[0] : undefined
+    assert.ok(level && level.kind === 'p')
+    assert.equal(level.props.numbering?.level, 0, 'the cell list level stays')
+  }
 })
 
 test('detectPlatform treats Macintosh as mac and Linux, including Dopame, as other', () => {
