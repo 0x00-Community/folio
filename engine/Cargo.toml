@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 rdocx = { path = "../../rdocx-editing-kit/crates/rdocx", default-features = false }
 oxml-layout = { path = "../../rdocx-editing-kit/crates/oxml-layout", default-features = false }
+oxml-pdf = { path = "../../rdocx-editing-kit/crates/oxml-pdf" }
 wasm-bindgen = "=0.2.128"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

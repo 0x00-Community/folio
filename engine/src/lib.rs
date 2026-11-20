@@ -1,15 +1,22 @@
 pub mod import;
+pub mod print;
 pub mod verify;
 pub mod wire;
 pub mod write;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 
 struct StoredMedia {
     content_type: String,
     bytes: Vec<u8>,
+}
+
+struct CallerFont {
+    family: String,
+    bytes: Arc<[u8]>,
 }
 
 #[wasm_bindgen]
@@ -38,6 +45,8 @@ pub struct Session {
     sources: import::SourceMap,
     media: BTreeMap<String, StoredMedia>,
     ledger: verify::Ledger,
+    fonts: Vec<CallerFont>,
+    font_aliases: Vec<(String, String)>,
 }
 
 impl Session {
@@ -67,6 +76,8 @@ impl Session {
             sources: imported.sources,
             media,
             ledger: imported.ledger,
+            fonts: Vec::new(),
+            font_aliases: Vec::new(),
         }
     }
 
@@ -121,6 +132,69 @@ impl Session {
             .map_err(|error| wire::BridgeError::Write {
                 detail: error.to_string(),
             })
+    }
+
+    /// Keep `bytes` as the face for `family` until the session is dropped.
+    ///
+    /// The same bytes under two family names share one buffer. Adding a family
+    /// that is already stored replaces that face.
+    pub fn add_font(&mut self, family: &str, bytes: &[u8]) {
+        let stored = self
+            .fonts
+            .iter()
+            .find(|font| font.bytes.as_ref() == bytes)
+            .map(|font| Arc::clone(&font.bytes))
+            .unwrap_or_else(|| Arc::<[u8]>::from(bytes));
+        if let Some(slot) = self.fonts.iter_mut().find(|font| font.family == family) {
+            slot.bytes = stored;
+        } else {
+            self.fonts.push(CallerFont {
+                family: family.to_owned(),
+                bytes: stored,
+            });
+        }
+    }
+
+    /// Map a requested family onto a family passed to `add_font`.
+    ///
+    /// The same requested name replaces its previous target.
+    pub fn add_font_alias(&mut self, requested: &str, loaded: &str) {
+        if let Some(alias) = self
+            .font_aliases
+            .iter_mut()
+            .find(|(name, _)| name == requested)
+        {
+            alias.1 = loaded.to_owned();
+        } else {
+            self.font_aliases
+                .push((requested.to_owned(), loaded.to_owned()));
+        }
+    }
+
+    /// Lay out `patch_json` on a fresh copy of the opened document.
+    ///
+    /// The session document is left untouched. A patch `write` refuses carries
+    /// the same detail as `save_result`. Nothing is verified and no docx bytes
+    /// are produced.
+    pub fn print_layout(
+        &self,
+        patch_json: &str,
+    ) -> Result<print::PrintLayout, print::PrintFailure> {
+        let patch: wire::Patch = serde_json::from_str(patch_json)
+            .map_err(|error| print::PrintFailure::Write(error.to_string()))?;
+        let written = write::write(&self.doc, &self.sources, &self.imported, &patch)
+            .map_err(|error| print::PrintFailure::Write(error.detail()))?;
+        let fonts: Vec<(&str, &[u8])> = self
+            .fonts
+            .iter()
+            .map(|font| (font.family.as_str(), font.bytes.as_ref()))
+            .collect();
+        let aliases: Vec<(&str, &str)> = self
+            .font_aliases
+            .iter()
+            .map(|(requested, loaded)| (requested.as_str(), loaded.as_str()))
+            .collect();
+        print::lay_out(&written.document, &fonts, &aliases).map_err(print::PrintFailure::Print)
     }
 }
 
@@ -191,6 +265,21 @@ impl Session {
         serde_json::to_string(&look).expect("run look is JSON")
     }
 
+    #[wasm_bindgen(js_name = add_font)]
+    pub fn add_font_js(&mut self, family: &str, bytes: &[u8]) {
+        self.add_font(family, bytes);
+    }
+
+    #[wasm_bindgen(js_name = add_font_alias)]
+    pub fn add_font_alias_js(&mut self, requested: &str, loaded: &str) {
+        self.add_font_alias(requested, loaded);
+    }
+
+    #[wasm_bindgen(js_name = print_layout)]
+    pub fn print_layout_js(&self, patch_json: &str) -> Result<print::PrintLayout, JsValue> {
+        self.print_layout(patch_json).map_err(print_failure)
+    }
+
     pub fn para_look(&self, style: &str) -> String {
         let look = self
             .imported
@@ -250,6 +339,13 @@ fn default_para_look() -> wire::ParaLook {
 
 fn bridge_error(error: wire::BridgeError) -> JsValue {
     JsValue::from_str(&serde_json::to_string(&error).expect("bridge error is JSON"))
+}
+
+fn print_failure(error: print::PrintFailure) -> JsValue {
+    match error {
+        print::PrintFailure::Write(detail) => bridge_error(wire::BridgeError::Write { detail }),
+        print::PrintFailure::Print(error) => JsValue::from(error),
+    }
 }
 
 /// Drop one bookmark. With none to drop, rewrite the first run so the projection differs.

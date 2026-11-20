@@ -428,6 +428,9 @@ pub enum PatchBlock {
 }
 
 /// Save failure. `Open` is produced by `Session::open`; save returns `Write` or `Verify`.
+///
+/// A print layout whose patch `write` refuses returns `Write` with the same detail.
+/// Font, layout, and render failures are `crate::print::PrintError`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BridgeError {

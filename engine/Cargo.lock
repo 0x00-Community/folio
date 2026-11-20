@@ -963,6 +963,7 @@ name = "rdocx-word-engine"
 version = "0.1.0"
 dependencies = [
  "oxml-layout",
+ "oxml-pdf",
  "rdocx",
  "serde",
  "serde_json",
