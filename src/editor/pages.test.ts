@@ -75,6 +75,20 @@ function sig(layout: Layout): string[] {
   })
 }
 
+function pagesFor(layout: Layout, id: string): number[] {
+  const pages: number[] = []
+  layout.pages.forEach((page, index) => {
+    if (page.slices.some((slice) => slice.block === id)) pages.push(index)
+  })
+  return pages
+}
+
+function assertSamePages(actual: Layout, full: Layout, body: readonly Paragraph[]): void {
+  assert.equal(actual.pages.length, full.pages.length)
+  for (let i = 0; i < full.pages.length; i++) assert.deepEqual(actual.pages[i], full.pages[i])
+  for (const block of body) assert.deepEqual(pagesFor(actual, block.id), pagesFor(full, block.id), block.id)
+}
+
 function layoutOf(blocks: readonly Paragraph[], measures: Map<string, Measure>, height: number, previous: Layout | null = null, changed: readonly string[] = []): Layout {
   return paginate(
     docOf(blocks, [sectionBox(height)]),
@@ -406,4 +420,111 @@ test('a paragraph taller than a page splits on a line bottom inside the body', (
   const bottoms = Float32Array.from(lines)
   assert.ok(Array.from(bottoms).some((bottom) => bottom === first.y1), 'page 0 ends on a line bottom')
   assert.equal(next.y0, first.y1, 'page 1 starts at that line')
+})
+
+function fivePages(): { blocks: Paragraph[], measures: Map<string, Measure> } {
+  const blocks = [para('a'), para('b'), para('c'), para('d'), para('e')]
+  const measures = new Map(blocks.map((block) => [block.id, pm(100, [100])]))
+  return { blocks, measures }
+}
+
+test('a block inserted after an unchanged block on page 1 is placed on that page or the next', () => {
+  const { blocks, measures } = fivePages()
+  const previous = layoutOf(blocks, measures, 100)
+  assert.ok(previous.pages.length >= 3, 'the document covers at least three pages')
+  assert.deepEqual(pagesFor(previous, 'b'), [1], 'b is the block on page 1')
+  const inserted = para('n')
+  measures.set(inserted.id, pm(100, [100]))
+  const a = blocks[0]
+  const b = blocks[1]
+  const c = blocks[2]
+  const d = blocks[3]
+  const e = blocks[4]
+  assert.ok(a && b && c && d && e)
+  const next = [a, b, inserted, c, d, e]
+  const again = layoutOf(next, measures, 100, previous, [inserted.id])
+  const full = layoutOf(next, measures, 100)
+  const placed = pagesFor(again, inserted.id)
+  assert.ok(placed.some((page) => page === 1 || page === 2), `the new block is on page 1 or 2, got ${placed.join(',')}`)
+  assertSamePages(again, full, next)
+})
+
+test('a block inserted after an unchanged block on a middle page is placed on that page or the next', () => {
+  const { blocks, measures } = fivePages()
+  const previous = layoutOf(blocks, measures, 100)
+  assert.ok(previous.pages.length >= 5, 'a middle page is neither the first nor the last')
+  assert.deepEqual(pagesFor(previous, 'c'), [2], 'c is the block on the middle page')
+  const inserted = para('n')
+  measures.set(inserted.id, pm(100, [100]))
+  const a = blocks[0]
+  const b = blocks[1]
+  const c = blocks[2]
+  const d = blocks[3]
+  const e = blocks[4]
+  assert.ok(a && b && c && d && e)
+  const next = [a, b, c, inserted, d, e]
+  const again = layoutOf(next, measures, 100, previous, [inserted.id])
+  const full = layoutOf(next, measures, 100)
+  const placed = pagesFor(again, inserted.id)
+  assert.ok(placed.some((page) => page === 2 || page === 3), `the new block is on page 2 or 3, got ${placed.join(',')}`)
+  assertSamePages(again, full, next)
+})
+
+test('a block inserted at the start of the body is placed on the first page or the next', () => {
+  const { blocks, measures } = fivePages()
+  const previous = layoutOf(blocks, measures, 100)
+  assert.ok(previous.pages.length >= 3)
+  const inserted = para('n')
+  measures.set(inserted.id, pm(100, [100]))
+  const next = [inserted, ...blocks]
+  const again = layoutOf(next, measures, 100, previous, [inserted.id])
+  const full = layoutOf(next, measures, 100)
+  const placed = pagesFor(again, inserted.id)
+  assert.ok(placed.some((page) => page === 0 || page === 1), `the new block is on page 0 or 1, got ${placed.join(',')}`)
+  assertSamePages(again, full, next)
+})
+
+test('removing a block from page 1 whose neighbors are unchanged matches a layout from scratch', () => {
+  const a = para('a')
+  const b = para('b')
+  const c = para('c')
+  const d = para('d')
+  const measures = new Map<string, Measure>([
+    [a.id, pm(60, [60])],
+    [b.id, pm(100, [100])],
+    [c.id, pm(30, [30])],
+    [d.id, pm(100, [100])],
+  ])
+  const previous = layoutOf([a, b, c, d], measures, 100)
+  assert.ok(previous.pages.length >= 3, 'the document covers at least three pages')
+  assert.deepEqual(pagesFor(previous, b.id), [1], 'b is the block removed from page 1')
+  const next = [a, c, d]
+  assert.equal(next[0], a, 'the previous neighbor keeps its object')
+  assert.equal(next[1], c, 'the following neighbor keeps its object')
+  const again = layoutOf(next, measures, 100, previous, [c.id, d.id])
+  const full = layoutOf(next, measures, 100)
+  assert.equal(pagesFor(again, b.id).length, 0, 'the removed block is on no page')
+  assertSamePages(again, full, next)
+})
+
+test('removing a block that spans pages drops every slice of it', () => {
+  const a = para('a')
+  const b = para('b')
+  const c = para('c')
+  const measures = new Map<string, Measure>([
+    [a.id, pm(100, [100])],
+    [b.id, pm(250, [100, 200, 250])],
+    [c.id, pm(100, [100])],
+  ])
+  const previous = layoutOf([a, b, c], measures, 100)
+  assert.ok(previous.pages.length >= 3)
+  const bPages = pagesFor(previous, b.id)
+  assert.ok(bPages.includes(1) && bPages.length >= 2, 'b starts on page 1 and continues')
+  const next = [a, c]
+  assert.equal(next[0], a)
+  assert.equal(next[1], c)
+  const again = layoutOf(next, measures, 100, previous, [c.id])
+  const full = layoutOf(next, measures, 100)
+  assert.equal(pagesFor(again, b.id).length, 0, 'no page keeps a slice of the removed block')
+  assertSamePages(again, full, next)
 })
