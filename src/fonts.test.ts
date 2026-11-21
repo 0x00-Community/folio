@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliasChain, cssStack, installPrintFonts, installedFamilies, printFonts, selectNewPrintFonts } from './fonts.ts'
+import { PrintError } from './engine/print-error.ts'
+import { aliasChain, clearFontCatalog, cssStack, ensurePrintFonts, installPrintFonts, installedFamilies, printFonts, selectNewPrintFonts } from './fonts.ts'
 import type { PrintCatalogFace } from './fonts.ts'
 
 test('cssStack builds the 宋体 substitute list and ends in the generic family', () => {
@@ -103,6 +104,78 @@ test('printFonts adds the bold face, skips Calibri and CFF, and supplies 宋体 
   ])
   assert.deepEqual(han.aliases, [])
   assert.deepEqual(printFonts(['Calibri', 'Times New Roman'], catalog), { faces: [], aliases: [] })
+})
+
+test('ensurePrintFonts fetches one face at a time and reports the family that failed', async () => {
+  clearFontCatalog()
+  const catalog = [face('song', ['宋体']), face('hei', ['黑体'])]
+  let inFlight = 0
+  let maxInFlight = 0
+  let held = 0
+  let maxHeld = 0
+  const events: string[] = []
+  const previous = globalThis.fetch
+  const respond = (failHei: boolean) => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url === '/api/fonts') return { ok: true, json: async () => catalog } as Response
+      const id = decodeURIComponent(url.split('/').at(-2) ?? '')
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await Promise.resolve()
+      inFlight -= 1
+      if (failHei && id === 'hei') return { ok: false } as Response
+      const bytes = new Uint8Array([id === 'hei' ? 2 : 1])
+      return {
+        ok: true,
+        arrayBuffer: async () => {
+          held += 1
+          maxHeld = Math.max(maxHeld, held)
+          return bytes.buffer
+        },
+      } as Response
+    }) as typeof fetch
+  }
+  const source = () => ({
+    addFont(family: string) {
+      events.push(`font:${family}`)
+      held -= 1
+    },
+    addFontAlias(requested: string, loaded: string) {
+      events.push(`alias:${requested}=${loaded}`)
+    },
+  })
+  try {
+    respond(false)
+    await ensurePrintFonts(source(), ['宋体', 'SimSun', '黑体'], false)
+    assert.deepEqual(events, ['font:宋体', 'font:黑体', 'alias:SimSun=宋体'])
+    assert.equal(maxInFlight, 1)
+    assert.equal(maxHeld, 1)
+
+    clearFontCatalog()
+    inFlight = 0
+    maxInFlight = 0
+    held = 0
+    maxHeld = 0
+    events.length = 0
+    respond(true)
+    const failing = source()
+    await assert.rejects(
+      () => ensurePrintFonts(failing, ['宋体', '黑体'], false),
+      (error: unknown) => {
+        assert.ok(error instanceof PrintError)
+        assert.equal(error.kind, 'font')
+        assert.equal(error.family, '黑体')
+        return true
+      },
+    )
+    assert.deepEqual(events, ['font:宋体'])
+    assert.equal(maxInFlight, 1)
+    assert.equal(maxHeld, 1)
+  } finally {
+    globalThis.fetch = previous
+    clearFontCatalog()
+  }
 })
 
 test('a face the session already holds is not added again', () => {

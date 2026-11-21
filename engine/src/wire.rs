@@ -411,6 +411,8 @@ pub struct ParaStyle {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub based_on: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

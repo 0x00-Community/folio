@@ -139,8 +139,24 @@ function logMeasure(label, result) {
     return { used: memory.usedJSHeapSize, total: memory.totalJSHeapSize }
   })()`)
   const heapText = heap ? ` heap ${heap.used}/${heap.total}` : ' heap n/a'
+  const memory = result.memory
+  const faceBytes = typeof result.faceBytes === 'number' ? result.faceBytes : 0
+  let stageText = ` faceBytes ${faceBytes}`
+  if (memory) {
+    const order = ['baseline', 'afterFonts', 'afterLayout', 'afterPdf', 'afterPng']
+    let previous = memory.baseline
+    const parts = []
+    for (const stage of order) {
+      const value = memory[stage]
+      const growth = value - previous
+      const times = faceBytes === 0 ? 0 : growth / faceBytes
+      parts.push(`${stage} ${value} (+${growth}, ${times.toFixed(2)}x)`)
+      previous = value
+    }
+    stageText = ` ${parts.join(' ')}${stageText}`
+  }
   console.log(
-    `  ${label} boot ${result.bootMs.toFixed(1)} font ${result.fontMs.toFixed(1)} layout ${result.layoutMs.toFixed(1)} pdf ${result.pdfMs.toFixed(1)} png ${result.pngMs.toFixed(1)} ms pages ${result.pages} wasm ${result.memoryBefore} -> ${result.memoryAfter}${heapText}`,
+    `  ${label} boot ${result.bootMs.toFixed(1)} font ${result.fontMs.toFixed(1)} layout ${result.layoutMs.toFixed(1)} pdf ${result.pdfMs.toFixed(1)} png ${result.pngMs.toFixed(1)} ms pages ${result.pages} wasm ${result.memoryBefore} -> ${result.memoryAfter}${stageText}${heapText}`,
   )
 }
 

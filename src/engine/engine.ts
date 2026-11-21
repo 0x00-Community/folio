@@ -1,4 +1,7 @@
 import { isPrintBoldKey } from '../fonts.ts'
+import { PrintError } from './print-error.ts'
+
+export { PrintError }
 import init, { PrintLayout as WasmLayout, Session, type MediaFile } from './pkg/engine.js'
 import type {
   Atom,
@@ -72,25 +75,6 @@ export class SaveWriteError extends Error {
     super(detail)
     this.name = 'SaveWriteError'
     this.detail = detail
-  }
-}
-
-/**
- * Layout or a render of it failed.
- * `font` names the family, `layout` and `render` carry the engine's detail.
- * A patch `write` refuses is `SaveWriteError`, the same error as save.
- */
-export class PrintError extends Error {
-  readonly kind: 'font' | 'layout' | 'render'
-  readonly family: string | undefined
-  readonly detail: string | undefined
-
-  constructor(kind: 'font' | 'layout' | 'render', value: string) {
-    super(value)
-    this.name = 'PrintError'
-    this.kind = kind
-    this.family = kind === 'font' ? value : undefined
-    this.detail = kind === 'font' ? undefined : value
   }
 }
 
@@ -169,6 +153,12 @@ type SaveBaseline = {
 const baselines = new WeakMap<Source, SaveBaseline>()
 const tamperSaves = new WeakMap<Source, (doc: Doc) => Uint8Array>()
 const sessionMedia = new WeakMap<Source, Map<string, HeldMedia>>()
+const sessionFaceLogOf = new WeakMap<Source, { family: string; bytes: number }[]>()
+
+/** Faces `addFont` has stored on this session, in the order they were first added. */
+export function sessionFaces(source: Source): readonly { readonly family: string; readonly bytes: number }[] {
+  return (sessionFaceLogOf.get(source) ?? []).map((face) => ({ family: face.family, bytes: face.bytes }))
+}
 
 let bootMs = 0
 let wasmMemory: WebAssembly.Memory | undefined
@@ -254,6 +244,7 @@ function bindSource(
   const urls = new Map<string, string>()
   const added = new Map<string, HeldMedia>()
   const extraFonts: string[] = []
+  const sessionFaceLog: { family: string; bytes: number }[] = []
   let addedCount = 0
   const source: Source = {
     save(doc) {
@@ -271,12 +262,15 @@ function bindSource(
       }
     },
     fontsUsed(current) {
-      return collectFonts(current, looks.run, [...importedFonts, ...extraFonts])
+      return fontsUsedIn(current, looks.run, [...importedFonts, ...extraFonts])
     },
     addFont(family, bytes) {
       const trimmed = family.trim()
       if (trimmed === '') return
       session.add_font(trimmed, bytes)
+      const recorded = sessionFaceLog.find((face) => face.family === trimmed)
+      if (recorded === undefined) sessionFaceLog.push({ family: trimmed, bytes: bytes.byteLength })
+      else recorded.bytes = bytes.byteLength
       // The bold companion is the same family. Listing `${family} Bold` would put it in the font menu.
       if (isPrintBoldKey(trimmed) || extraFonts.includes(trimmed)) return
       extraFonts.push(trimmed)
@@ -324,6 +318,7 @@ function bindSource(
   }
   baselines.set(source, baseline)
   sessionMedia.set(source, added)
+  sessionFaceLogOf.set(source, sessionFaceLog)
   tamperSaves.set(source, (doc) => {
     try {
       return copyBytes(session.save_tampered(JSON.stringify(toPatch(doc, baseline, added))))
@@ -456,38 +451,111 @@ function defaultParaLook(): ParaLook {
   }
 }
 
-function collectFonts(doc: Doc, runLooks: ReadonlyMap<string, RunLook>, extra: readonly string[]): string[] {
+/**
+ * Families a print should load: the default face, the looks of text runs, and the
+ * paragraph styles used in the body, cells, headers and footers, including each
+ * `basedOn` parent. Styles that nothing in the document uses are left out.
+ * `extra` is the import-time list plus families the font box added later.
+ */
+export function fontsUsedIn(doc: Doc, runLooks: ReadonlyMap<string, RunLook>, extra: readonly string[] = []): string[] {
   const names = new Set<string>()
   const add = (name: string | undefined) => {
     if (name !== undefined && name !== '') names.add(name)
   }
-  for (const look of runLooks.values()) {
+  const addLook = (look: RunLook | undefined) => {
+    if (look === undefined) return
     add(look.fonts.ascii)
     add(look.fonts.hAnsi)
     add(look.fonts.eastAsia)
     add(look.fonts.cs)
   }
+  addLook(defaultRunLook())
+  const basedOn = new Map<string, string>()
+  for (const [id, style] of doc.styles.paragraph) {
+    if (style.basedOn) basedOn.set(id, style.basedOn)
+  }
+  const used = new Set<string>()
+  const addStyle = (id: string | undefined) => {
+    let current = id
+    while (current !== undefined && current !== '' && !used.has(current)) {
+      used.add(current)
+      current = basedOn.get(current)
+    }
+  }
+  addStyle(doc.styles.defaultParagraph)
+  const visitPara = (para: Paragraph) => {
+    addStyle(para.props.style ?? doc.styles.defaultParagraph)
+    for (const inline of para.inlines) {
+      if (inline.kind === 'text') {
+        add(inline.marks.font)
+        add(inline.marks.fontEastAsia)
+        continue
+      }
+      if (inline.kind !== 'atom' || inline.atom.type !== 'opaque' || inline.atom.label !== 'symbol') continue
+      const marker = inline.atom.display.lastIndexOf(' U+')
+      if (marker > 0) add(inline.atom.display.slice(0, marker))
+    }
+  }
   const visit = (blocks: readonly Block[]) => {
     for (const block of blocks) {
-      if (block.kind === 'p') {
-        for (const inline of block.inlines) {
-          if (inline.kind !== 'text') continue
-          add(inline.marks.font)
-          add(inline.marks.fontEastAsia)
-        }
-      } else if (block.kind === 'table') {
+      if (block.kind === 'p') visitPara(block)
+      else if (block.kind === 'table') {
         for (const row of block.rows) {
           for (const cell of row.cells) visit(cell.blocks)
         }
       } else {
-        visit(block.preview)
+        for (const para of block.preview) visitPara(para)
       }
     }
   }
   visit(doc.body)
   for (const blocks of doc.stories.values()) visit(blocks)
+  for (const style of used) {
+    const prefix = `${style}\0`
+    for (const [key, look] of runLooks) {
+      if (key.startsWith(prefix)) addLook(look)
+    }
+  }
   for (const name of extra) add(name)
   return [...names]
+}
+
+/** Whether any text run in the document contains a Han character. */
+export function documentHasHan(doc: Doc): boolean {
+  const han = /\p{Script=Han}/u
+  const visit = (blocks: readonly Block[]): boolean => {
+    for (const block of blocks) {
+      if (block.kind === 'p') {
+        for (const inline of block.inlines) {
+          if (inline.kind === 'text' && han.test(inline.text)) return true
+        }
+      } else if (block.kind === 'table') {
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            if (visit(cell.blocks)) return true
+          }
+        }
+      } else if (visit(block.preview)) {
+        return true
+      }
+    }
+    return false
+  }
+  if (visit(doc.body)) return true
+  for (const blocks of doc.stories.values()) {
+    if (visit(blocks)) return true
+  }
+  return false
+}
+
+/** Families and the Han flag `printFonts` needs, from one `session.import()` JSON string. */
+export function printFontRequest(importedJson: string): { families: readonly string[]; han: boolean } {
+  const imported = parseImported(JSON.parse(importedJson))
+  const built = toDoc(imported)
+  return {
+    families: fontsUsedIn(built.doc, built.looks.run, imported.fonts),
+    han: documentHasHan(built.doc),
+  }
 }
 
 type Ids = { para: number; table: number; opaque: number }
@@ -500,13 +568,15 @@ export function toDoc(imported: wire.Imported): { doc: Doc; looks: LookTables } 
   for (const entry of imported.runLooks) {
     runLooks.set(`${entry.para}\0${entry.character ?? ''}`, modelRunLook(entry.look))
   }
-  const paragraph = new Map<StyleId, { name: string; role: StyleRole | null; next: StyleId | null; look: ParaLook }>()
+  const paragraph = new Map<StyleId, { name: string; role: StyleRole | null; next: StyleId | null; basedOn?: StyleId | null; look: ParaLook }>()
   for (const style of imported.styles.paragraph) {
     const id = styleId(style.id)
+    const basedOn = style.basedOn
     paragraph.set(id, {
       name: style.name,
       role: styleRole(style.role),
       next: style.next === undefined || style.next === null ? null : styleId(style.next),
+      ...(typeof basedOn === 'string' && basedOn !== '' ? { basedOn: styleId(basedOn) } : {}),
       look: paraLooks.get(style.id) ?? defaultParaLook(),
     })
   }
@@ -1389,11 +1459,13 @@ function parseStyles(value: unknown): wire.StyleSheet {
 
 function parseParaStyle(value: unknown, path: string): wire.ParaStyle {
   const record = rec(value, path)
+  const basedOn = optText(record.basedOn, `${path}.basedOn`)
   return {
     id: text(record.id, `${path}.id`),
     name: text(record.name, `${path}.name`),
     role: optText(record.role, `${path}.role`),
     next: optText(record.next, `${path}.next`),
+    ...(typeof basedOn === 'string' ? { basedOn } : {}),
   }
 }
 

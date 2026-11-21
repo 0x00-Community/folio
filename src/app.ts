@@ -10,11 +10,11 @@ import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { drift } from './editor/drift.ts'
 import type { DriftReport } from './editor/drift.ts'
-import { OpenError, SaveVerifyError, SaveWriteError, engineBootMs, loadEngine, saveTampered, wasmMemoryBytes } from './engine/engine.ts'
+import { OpenError, SaveVerifyError, SaveWriteError, documentHasHan, engineBootMs, loadEngine, saveTampered, sessionFaces, wasmMemoryBytes } from './engine/engine.ts'
 import type { Opened, PrintFontInfo, PrintLayout } from './engine/engine.ts'
 import { ensurePrintFonts } from './fonts.ts'
 import { locale, t } from './i18n.ts'
-import type { Block, Doc, ParaId, Pt, StyleId } from './model.ts'
+import type { Doc, ParaId, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
 import { createToolbar } from './ui/toolbar.ts'
 import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
@@ -74,8 +74,24 @@ export type PrintMeasure = {
   readonly pngBytes: number
   readonly memoryBefore: number
   readonly memoryAfter: number
+  readonly memory: PrintMemory
+  readonly faceBytes: number
+  readonly faces: readonly PrintSessionFace[]
   readonly bootMs: number
   readonly fonts: readonly PrintFontInfo[]
+}
+
+export type PrintMemory = {
+  readonly baseline: number
+  readonly afterFonts: number
+  readonly afterLayout: number
+  readonly afterPdf: number
+  readonly afterPng: number
+}
+
+export type PrintSessionFace = {
+  readonly family: string
+  readonly bytes: number
 }
 
 type Pending = {
@@ -675,20 +691,27 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   async function measurePrint(): Promise<PrintMeasure> {
     const editorNow = current()
     const doc = editorNow.state.doc
-    const memoryBefore = wasmMemoryBytes()
+    const baseline = wasmMemoryBytes()
     const fontStarted = performance.now()
     await ensurePrintFonts(editorNow.source, editorNow.source.fontsUsed(doc), documentHasHan(doc))
     const fontMs = performance.now() - fontStarted
+    const afterFonts = wasmMemoryBytes()
+    const faces = sessionFaces(editorNow.source)
+    let faceBytes = 0
+    for (const face of faces) faceBytes += face.bytes
     const layoutStarted = performance.now()
     const layout = editorNow.source.printLayout(doc)
     const layoutMs = performance.now() - layoutStarted
+    const afterLayout = wasmMemoryBytes()
     try {
       const pdfStarted = performance.now()
       const pdf = layout.pdf()
       const pdfMs = performance.now() - pdfStarted
+      const afterPdf = wasmMemoryBytes()
       const pngStarted = performance.now()
       const png = layout.pagePng(0, 144)
       const pngMs = performance.now() - pngStarted
+      const afterPng = wasmMemoryBytes()
       return {
         pages: layout.pageCount(),
         pdfBase64: encodeBase64(pdf),
@@ -697,8 +720,11 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
         pdfMs,
         pngMs,
         pngBytes: png.byteLength,
-        memoryBefore,
-        memoryAfter: wasmMemoryBytes(),
+        memoryBefore: baseline,
+        memoryAfter: afterPng,
+        memory: { baseline, afterFonts, afterLayout, afterPdf, afterPng },
+        faceBytes,
+        faces,
         bootMs: engineBootMs(),
         fonts: layout.fonts(),
       }
@@ -813,33 +839,6 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     printLayout: measurePrint,
     drift: measureDrift,
   }
-}
-
-function documentHasHan(doc: Doc): boolean {
-  const han = /\p{Script=Han}/u
-  const visit = (blocks: readonly Block[]): boolean => {
-    for (const block of blocks) {
-      if (block.kind === 'p') {
-        for (const inline of block.inlines) {
-          if (inline.kind === 'text' && han.test(inline.text)) return true
-        }
-      } else if (block.kind === 'table') {
-        for (const row of block.rows) {
-          for (const cell of row.cells) {
-            if (visit(cell.blocks)) return true
-          }
-        }
-      } else if (visit(block.preview)) {
-        return true
-      }
-    }
-    return false
-  }
-  if (visit(doc.body)) return true
-  for (const blocks of doc.stories.values()) {
-    if (visit(blocks)) return true
-  }
-  return false
 }
 
 function required(selector: string): HTMLElement {

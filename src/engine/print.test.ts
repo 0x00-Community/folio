@@ -4,7 +4,9 @@ import { extname } from 'node:path'
 import { test } from 'node:test'
 import { aliasChain } from '../fonts.ts'
 import { extractFace, readFaces, readFontFile } from '../../server/fonts.ts'
-import { PrintError, createEngine } from './engine.ts'
+import { cell, makeDoc, paragraph, paraLook, pt, row, storyKey, styleId, table, text, NORMAL } from '../editor/testkit.ts'
+import type { Block, RunLook, StoryKey, StyleId, StyleSheet } from '../model.ts'
+import { PrintError, createEngine, fontsUsedIn } from './engine.ts'
 import { initSync } from './pkg/engine.js'
 
 const root = new URL('../../', import.meta.url)
@@ -43,6 +45,81 @@ test('addFont stores a bold companion without listing it', () => {
     const used = opened.source.fontsUsed(opened.doc)
     assert.equal(used.includes('宋体'), true)
     assert.equal(used.includes('宋体 Bold'), false)
+  } finally {
+    opened.source.free()
+  }
+})
+
+function faceLook(family: string): RunLook {
+  return {
+    fonts: { ascii: family, hAnsi: family, eastAsia: family, cs: family },
+    sizePt: pt(11),
+    bold: false,
+    italic: false,
+    underline: false,
+    strike: false,
+    color: 'auto',
+    caps: false,
+    charSpacingPt: pt(0),
+  }
+}
+
+function paraStyle(name: string, basedOn: StyleId | null = null): StyleSheet['paragraph'] extends ReadonlyMap<StyleId, infer Value> ? Value : never {
+  return { name, role: null, next: null, basedOn, look: paraLook() }
+}
+
+function sorted(names: readonly string[]): string[] {
+  return [...names].sort((left, right) => left.localeCompare(right))
+}
+
+test('fontsUsed names families of used styles, not every style in the table', () => {
+  const song = styleId('song')
+  const hei = styleId('hei')
+  const kai = styleId('kai')
+  const fang = styleId('fang')
+  const child = styleId('child')
+  const looks = new Map<string, RunLook>([
+    [`${song}\0`, faceLook('宋体')],
+    [`${hei}\0`, faceLook('黑体')],
+    [`${kai}\0`, faceLook('楷体')],
+    [`${fang}\0`, faceLook('仿宋')],
+    [`${child}\0`, faceLook('Calibri')],
+  ])
+  const tableStyles = (): StyleSheet => ({
+    paragraph: new Map([
+      [NORMAL, { name: 'Normal', role: 'normal', next: null, look: paraLook() }],
+      [song, paraStyle('Song')],
+      [hei, paraStyle('Hei')],
+      [kai, paraStyle('Kai')],
+      [fang, paraStyle('Fang')],
+      [child, paraStyle('Child', fang)],
+    ]),
+    character: new Map(),
+    defaultParagraph: NORMAL,
+    added: [],
+  })
+  const onlySong = makeDoc([paragraph('p1', [text('正文')], { style: song })], { styles: tableStyles() })
+  assert.deepEqual(sorted(fontsUsedIn(onlySong, looks)), sorted(['Calibri', '宋体']))
+
+  const stories = new Map<StoryKey, readonly Block[]>()
+  stories.set(storyKey('s0/header/default'), [paragraph('h1', [text('页眉')], { style: kai })])
+  const placed = makeDoc(
+    [
+      paragraph('p1', [text('正文')], { style: song }),
+      table('t1', [row([cell([paragraph('c1', [text('格')], { style: hei })])])]),
+    ],
+    { styles: tableStyles(), stories },
+  )
+  assert.deepEqual(sorted(fontsUsedIn(placed, looks)), sorted(['Calibri', '宋体', '楷体', '黑体']))
+
+  const chained = makeDoc([paragraph('p1', [text('子样式')], { style: child })], { styles: tableStyles() })
+  assert.deepEqual(sorted(fontsUsedIn(chained, looks)), sorted(['Calibri', '仿宋']))
+})
+
+test('fontsUsed on basic.docx is the families the text and the default style name', () => {
+  const opened = engine.open(fixture('basic.docx'))
+  try {
+    assert.deepEqual(sorted(opened.source.fontsUsed(opened.doc)), sorted(['Arial', 'Calibri', 'Times New Roman', '楷体', '宋体']))
   } finally {
     opened.source.free()
   }

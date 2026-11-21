@@ -1,3 +1,5 @@
+import { PrintError } from './engine/print-error.ts'
+
 // One alias table for font families, shared by the page (CSS stacks) and the font service (which file to serve).
 
 export const FAMILY_ALIASES: ReadonlyMap<string, readonly string[]> = new Map([
@@ -229,6 +231,11 @@ function listed(family: string, names: ReadonlySet<string>): boolean {
 
 let catalogPromise: Promise<unknown> | null = null
 
+/** Drop the cached `GET /api/fonts` body. The next reader fetches it again. */
+export function clearFontCatalog(): void {
+  catalogPromise = null
+}
+
 /** One read of `GET /api/fonts`. `installedNames` and `installedFamilies` both wait on it. */
 function fontCatalog(): Promise<unknown> {
   if (catalogPromise === null) catalogPromise = readFontCatalog()
@@ -423,30 +430,26 @@ export function installPrintFonts(source: PrintFontTarget, fetched: FetchedPrint
 /**
  * Fetch and add the caller faces for one print. Faces this session already holds are left as they are:
  * a second preview does not fetch them and does not pass the bytes into wasm again.
+ * Each face is fetched, added, and dropped before the next fetch starts.
+ * A face that fails to read throws `PrintError` of kind `font` and leaves the faces already added.
  */
 export async function ensurePrintFonts(source: PrintFontTarget, families: readonly string[], han: boolean): Promise<void> {
   const plan = printFonts(families, await readPrintCatalog(), han)
   const missing = selectNewPrintFonts(source, plan)
   if (missing.faces.length === 0 && missing.aliases.length === 0) return
-  const cached = new Map<string, Uint8Array>()
-  const faces: { family: string; bytes: Uint8Array }[] = []
-  for (const face of missing.faces) {
-    let bytes = cached.get(face.id)
-    if (bytes === undefined) {
-      const read = await readPrintFace(face.id)
-      if (read === undefined) continue
-      bytes = read
-      cached.set(face.id, bytes)
-    }
-    faces.push({ family: face.family, bytes })
-  }
-  const loaded = new Set(faces.map((face) => face.family))
+  const loaded = new Set<string>()
   const held = sessionFonts.get(source)
   if (held !== undefined) {
     for (const family of held.families) loaded.add(family)
   }
+  for (const face of missing.faces) {
+    const bytes = await readPrintFace(face.id)
+    if (bytes === undefined) throw new PrintError('font', face.family)
+    installPrintFonts(source, { faces: [{ family: face.family, bytes }], aliases: [] })
+    loaded.add(face.family)
+  }
   const aliases = missing.aliases.filter((pair) => loaded.has(pair[1]))
-  installPrintFonts(source, { faces, aliases })
+  installPrintFonts(source, { faces: [], aliases })
 }
 
 /** `printFonts` against `GET /api/fonts`, then one extracted face per id. A face that fails to read is omitted. */

@@ -161,6 +161,7 @@ export type ParaStyle = {
   name: string
   role?: string | null
   next?: string | null
+  basedOn?: string | null
 }
 
 export type ListDef = {

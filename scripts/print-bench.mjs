@@ -1,66 +1,103 @@
-// Release-wasm print timings. One JSON line on stdout.
-// Usage: node scripts/print-bench.mjs <doc.docx> family=path ...
+// Release-wasm print timings. One JSON line on stdout per document.
+// Usage: node scripts/print-bench.mjs [doc.docx ...] family=path ...
+// With no document, fixtures/basic.docx and fixtures/long.docx are measured.
+// WORD_TEST_DOC, when set, is measured too, in its own engine instance.
 // A .ttc or .otc is one extracted face, the same upright face resolveFont would pick.
-// When the document is WORD_TEST_DOC and WORD_TEST_REF_PDF is set, the line also has
-// refPages and the LCS ratio of the reference text inside the exported text.
-import { execFileSync } from 'node:child_process'
+// family=path files are the catalog. Only the faces printFonts selects are added,
+// one buffer at a time. When the document is WORD_TEST_DOC and WORD_TEST_REF_PDF
+// is set, the line also has refPages and the LCS ratio of the reference text.
+// WORD_BENCH_PDF, when set, is the path the PDF bytes are written to.
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { extname, isAbsolute, join, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
-import { aliasChain } from '../src/fonts.ts'
+import { aliasChain, isPrintBoldKey, printFonts } from '../src/fonts.ts'
+import { printFontRequest } from '../src/engine/engine.ts'
 import { initSync, Session } from '../src/engine/pkg/engine.js'
 import { extractFace, readFaces, readFontFile } from '../server/fonts.ts'
 
 const POPPLER = '/opt/homebrew/bin'
 const root = new URL('..', import.meta.url)
+const STAGES = ['baseline', 'afterFonts', 'afterLayout', 'afterPdf', 'afterPng']
 
-const docArg = process.argv[2]
-if (!docArg) {
-  console.error('usage: node scripts/print-bench.mjs <doc.docx> family=path ...')
-  process.exit(1)
+const args = process.argv.slice(2)
+const docs = []
+const pairSpecs = []
+for (const arg of args) {
+  if (arg.includes('=')) pairSpecs.push(arg)
+  else docs.push(arg)
+}
+if (docs.length === 0) {
+  docs.push(fileURLToPath(new URL('fixtures/basic.docx', root)))
+  docs.push(fileURLToPath(new URL('fixtures/long.docx', root)))
+}
+const extraDoc = process.env.WORD_TEST_DOC
+if (typeof extraDoc === 'string' && extraDoc !== '' && !docs.some((doc) => resolve(doc) === resolve(extraDoc))) {
+  docs.push(extraDoc)
+}
+if (process.env.WORD_BENCH_CHILD !== '1' && docs.length > 1) {
+  for (const doc of docs) {
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), doc, ...pairSpecs], {
+      env: { ...process.env, WORD_BENCH_CHILD: '1' },
+      encoding: 'utf8',
+    })
+    if (child.stdout) process.stdout.write(child.stdout)
+    if (child.stderr) process.stderr.write(child.stderr)
+    if (child.status !== 0) process.exit(child.status ?? 1)
+  }
+  process.exit(0)
 }
 
-const docPath = isAbsolute(docArg) ? docArg : resolve(docArg)
-const pairs = process.argv.slice(3).map(parsePair)
+const docPath = isAbsolute(docs[0]) ? docs[0] : resolve(docs[0])
+const pairs = pairSpecs.map(parsePair)
 
 const wasmFile = readFileSync(new URL('public/engine.wasm', root))
 const instantiateStarted = performance.now()
 const wasm = initSync({ module: wasmFile })
 const instantiateMs = elapsed(instantiateStarted)
-const memory = { instantiate: wasmBytes(wasm) }
 
 const docBytes = new Uint8Array(readFileSync(docPath))
 const openStarted = performance.now()
 const session = Session.open(docBytes)
 const openMs = elapsed(openStarted)
-memory.open = wasmBytes(wasm)
+const importedJson = session.import()
+const request = printFontRequest(importedJson)
+const catalog = pairs.map((pair, index) => catalogFace(pair, index))
+const plan = printFonts(request.families, catalog, request.han)
 
+const memory = { baseline: wasmBytes(wasm) }
 let fontBytes = 0
-for (const pair of pairs) {
-  const face = faceBytes(pair.family, pair.path)
-  fontBytes += face.byteLength
-  session.add_font(pair.family, face)
+const faces = []
+for (const planned of plan.faces) {
+  const spec = catalog[Number(planned.id)]
+  let bytes = faceBytes(spec.family, spec.path)
+  session.add_font(planned.family, bytes)
+  fontBytes += bytes.byteLength
+  faces.push({ family: planned.family, bytes: bytes.byteLength })
+  bytes = null
 }
-memory.font = wasmBytes(wasm)
+for (const [requested, loaded] of plan.aliases) session.add_font_alias(requested, loaded)
+memory.afterFonts = wasmBytes(wasm)
 
-const imported = JSON.parse(session.import())
+const imported = JSON.parse(importedJson)
 const patch = keepPatch(imported)
 const layoutStarted = performance.now()
 const layout = session.print_layout(patch)
 const layoutMs = elapsed(layoutStarted)
 const pages = layout.page_count()
-memory.layout = wasmBytes(wasm)
+memory.afterLayout = wasmBytes(wasm)
 
 const pdfStarted = performance.now()
 const pdf = layout.pdf()
 const pdfMs = elapsed(pdfStarted)
-memory.pdf = wasmBytes(wasm)
+memory.afterPdf = wasmBytes(wasm)
 
 const pngStarted = performance.now()
 const png = layout.page_png(0, 144)
 const pngMs = elapsed(pngStarted)
-memory.png = wasmBytes(wasm)
+memory.afterPng = wasmBytes(wasm)
 
 const line = {
   instantiateMs: round(instantiateMs),
@@ -72,8 +109,14 @@ const line = {
   pngMs: round(pngMs),
   pngBytes: png.byteLength,
   fontBytes,
+  faceBytes: fontBytes,
+  faces,
+  memoryBefore: memory.baseline,
+  memoryAfter: memory.afterPng,
   memory,
 }
+reportStages(basename(docPath), memory, fontBytes)
+if (process.env.WORD_BENCH_PDF) writeFileSync(process.env.WORD_BENCH_PDF, pdf)
 
 const reference = referenceRatio(docPath, pdf)
 if (reference) {
@@ -84,6 +127,35 @@ if (reference) {
 layout.free()
 session.free()
 console.log(JSON.stringify(line))
+
+function catalogFace(pair, index) {
+  const bold = isPrintBoldKey(pair.family)
+  const family = bold ? pair.family.replace(/ Bold$/, '') : pair.family
+  return {
+    id: String(index),
+    families: [family],
+    bold,
+    italic: false,
+    cjk: true,
+    truetype: true,
+    weight: bold ? 700 : 400,
+    path: pair.path,
+    family: pair.family,
+  }
+}
+
+function reportStages(label, stages, faceBytes) {
+  let previous = stages.baseline
+  const parts = []
+  for (const stage of STAGES) {
+    const value = stages[stage]
+    const growth = value - previous
+    const times = faceBytes === 0 ? 0 : growth / faceBytes
+    parts.push(`${stage} ${value} (+${growth}, ${times.toFixed(2)}x)`)
+    previous = value
+  }
+  console.error(`${label} ${parts.join(' ')} faceBytes ${faceBytes}`)
+}
 
 function parsePair(spec) {
   const at = spec.indexOf('=')

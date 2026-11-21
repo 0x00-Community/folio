@@ -264,7 +264,7 @@ export interface ParaLook {
 }
 
 export interface StyleSheet {
-  readonly paragraph: ReadonlyMap<StyleId, { readonly name: string; readonly role: StyleRole | null; readonly next: StyleId | null; readonly look: ParaLook }>
+  readonly paragraph: ReadonlyMap<StyleId, { readonly name: string; readonly role: StyleRole | null; readonly next: StyleId | null; readonly basedOn?: StyleId | null; readonly look: ParaLook }>
   readonly character: ReadonlyMap<StyleId, { readonly name: string }>
   readonly defaultParagraph: StyleId
   /** Built-in styles the editor applied but the pristine document lacks. write.rs adds each with add_style. */

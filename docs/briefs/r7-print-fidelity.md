@@ -3,6 +3,22 @@
 Status: units 1 and 4 pass their checks on `r7/print-fidelity` (2026-11-22). Unit 3 has its measurement and the
 editing view's fixes and does not reach its pass mark yet. Unit 2 is not started.
 
+Unit 2, first part (2026-11-22). Measured in the runtime with `scripts/e2e/print.mjs`, kit unchanged:
+
+| Document | Faces passed | After adding the faces | After the layout | High-water mark |
+| --- | --- | --- | --- | --- |
+| `basic.docx` | 72.7 MB | +2.00 x | +4.52 x | 490 MB |
+| private document | 199.3 MB | (already added) | +3.71 x | 1,228 MB |
+
+- Finding 12 is settled: nothing is unexplained. The earlier count used the wrong face bytes. Adding a face costs
+  twice its size (the copy that crosses into wasm and the session's own), and a layout costs 3.7 to 6 times more,
+  which is the copies of finding 8. PDF and page images add nothing.
+- `fontsUsed` now returns the families of the styles and runs the document uses, with each style's `basedOn`
+  chain, and `ensurePrintFonts` holds one face at a time. On the fixtures the faces passed did not change, so
+  their high-water marks did not move. The private document needs 199 MB of faces, so only the kit's shared
+  bytes can bring it under 512 MB.
+- Finding 13 stays open: the private document reaches 1.2 GB against `heapMb: 512` and nothing fails or logs.
+
 Unit 1 as built (kit `work/editing-kit-grok` at `8df76d45`):
 
 - Finding 4 held. A merged cell's content now divides at the page end and continues in the next row of its span,

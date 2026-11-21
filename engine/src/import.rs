@@ -95,7 +95,7 @@ struct Ctx {
 }
 
 pub fn import(doc: &Document) -> Import {
-    let read = read_stories(doc);
+    let mut read = read_stories(doc);
     let styles = stylesheet(doc);
     let mut ctx = Ctx {
         sources: SourceMap {
@@ -116,6 +116,7 @@ pub fn import(doc: &Document) -> Import {
         ctx.pairs.insert((style.id.clone(), String::new()));
     }
     let body = walk_body(doc, &mut ctx);
+    ctx.fonts.append(&mut read.fonts);
     // A relationship id shared with a header keeps the main-part image.
     for (key, value) in read.media {
         ctx.media.entry(key).or_insert(value);
@@ -128,7 +129,19 @@ pub fn import(doc: &Document) -> Import {
     );
     let para_looks = para_looks(doc, &styles, &mut ctx);
     let run_looks = run_looks(doc, &ctx);
+    // Looks are seeded for every paragraph style so a style applied later still resolves.
+    // The font list is only the styles paragraphs use, plus each style they are based on.
+    let used = used_paragraph_styles(
+        &body,
+        &stories,
+        &read.story_styles,
+        &styles,
+        &ctx.default_style,
+    );
     for entry in &run_looks {
+        if !used.contains(&entry.para) {
+            continue;
+        }
         for font in [
             &entry.look.fonts.ascii,
             &entry.look.fonts.h_ansi,
@@ -184,10 +197,19 @@ impl StoryKey {
     }
 }
 
+struct StoryParagraph {
+    style: Option<String>,
+    text: String,
+}
+
 struct StoryWalk {
-    paragraphs: HashMap<StoryKey, Vec<String>>,
+    paragraphs: HashMap<StoryKey, Vec<StoryParagraph>>,
     header_stories: Vec<StoryKey>,
     footer_stories: Vec<StoryKey>,
+    /// Paragraph styles named in a header or footer, including ones nested in a table.
+    story_styles: BTreeSet<String>,
+    /// Direct run fonts in a header or footer. The story model keeps only the paragraph text.
+    fonts: BTreeSet<String>,
     media: BTreeMap<String, (String, Vec<u8>)>,
 }
 
@@ -198,6 +220,8 @@ fn read_stories(doc: &Document) -> StoryWalk {
         paragraphs: HashMap::new(),
         header_stories: Vec::new(),
         footer_stories: Vec::new(),
+        story_styles: BTreeSet::new(),
+        fonts: BTreeSet::new(),
         media: BTreeMap::new(),
     };
     let Ok(paragraphs) = doc.story_range_paragraphs() else {
@@ -209,9 +233,17 @@ fn read_stories(doc: &Document) -> StoryWalk {
         if story.kind() != StoryKind::Body {
             remember_story_media(doc, story, xml, &mut walk.media);
         }
-        if !matches!(story.kind(), StoryKind::Header | StoryKind::Footer)
-            || location.index_path().len() != 1
-        {
+        if !matches!(story.kind(), StoryKind::Header | StoryKind::Footer) {
+            continue;
+        }
+        let style = paragraph_style_id(xml);
+        if let Some(id) = &style {
+            walk.story_styles.insert(id.clone());
+        }
+        for font in paragraph_font_names(xml) {
+            walk.fonts.insert(font);
+        }
+        if location.index_path().len() != 1 {
             continue;
         }
         let key = StoryKey::from_story(story);
@@ -225,7 +257,10 @@ fn read_stories(doc: &Document) -> StoryWalk {
         walk.paragraphs
             .entry(key)
             .or_default()
-            .push(paragraph_text(xml));
+            .push(StoryParagraph {
+                style,
+                text: paragraph_text(xml),
+            });
     }
     walk
 }
@@ -277,6 +312,51 @@ fn attribute_values(xml: &[u8], local_name: &[u8]) -> Vec<String> {
         start = index + local_name.len();
     }
     values
+}
+
+fn next_element_tag<'a>(xml: &'a [u8], needle: &[u8], start: usize) -> Option<(&'a [u8], usize)> {
+    let mut from = start;
+    while let Some(offset) = xml[from..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let index = from + offset;
+        let preceded = index > 0 && matches!(xml[index - 1], b':' | b'<');
+        let next = index + needle.len();
+        if preceded
+            && let Some(tag_end) = xml
+                .get(next..)
+                .and_then(|rest| rest.iter().position(|byte| *byte == b'>'))
+        {
+            return Some((&xml[next..next + tag_end], next));
+        }
+        from = next;
+    }
+    None
+}
+
+/// `w:pStyle w:val` on a header or footer paragraph. Absent when the paragraph uses the default.
+fn paragraph_style_id(xml: &[u8]) -> Option<String> {
+    let mut start = 0;
+    while let Some((tag, next)) = next_element_tag(xml, b"pStyle", start) {
+        if let Some(value) = attribute_values(tag, b"val").into_iter().next() {
+            return Some(value);
+        }
+        start = next;
+    }
+    None
+}
+
+fn paragraph_font_names(xml: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut start = 0;
+    while let Some((tag, next)) = next_element_tag(xml, b"rFonts", start) {
+        for local in [b"ascii".as_slice(), b"hAnsi", b"eastAsia", b"cs"] {
+            names.extend(attribute_values(tag, local));
+        }
+        start = next;
+    }
+    names
 }
 
 const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -781,6 +861,7 @@ fn stylesheet(doc: &Document) -> StyleSheet {
                     name: name.clone(),
                     role: role_of(&name).map(str::to_string),
                     next: style.next_style().map(str::to_string),
+                    based_on: style.based_on().map(str::to_string),
                 });
             }
             StyleType::Character => character.push((
@@ -1700,7 +1781,7 @@ fn alloc_cell(ctx: &mut Ctx, table: u32, row: usize, cell: usize) -> u32 {
 
 fn sections_and_stories(
     doc: &Document,
-    paragraphs: &HashMap<StoryKey, Vec<String>>,
+    paragraphs: &HashMap<StoryKey, Vec<StoryParagraph>>,
     header_stories: &[StoryKey],
     footer_stories: &[StoryKey],
 ) -> (Vec<wire::Section>, Vec<(String, Vec<Block>)>) {
@@ -1845,7 +1926,7 @@ fn note_refs<'a>(
 fn linked_stories(
     stories: &mut Vec<(String, Vec<Block>)>,
     seen: &mut BTreeSet<String>,
-    paragraphs: &HashMap<StoryKey, Vec<String>>,
+    paragraphs: &HashMap<StoryKey, Vec<StoryParagraph>>,
     effective: &[Option<(usize, String)>; 3],
     stories_of: &HashMap<String, StoryKey>,
     kind_name: &str,
@@ -1935,39 +2016,102 @@ fn section_grid(section: &rdocx::SectionRef<'_>) -> Option<(String, f64, Option<
     ))
 }
 
-fn story_paragraphs(doc: &Document, story: &StoryId) -> Vec<String> {
+fn story_paragraphs(doc: &Document, story: &StoryId) -> Vec<StoryParagraph> {
     let Ok(items) = doc.story_items(story) else {
         return Vec::new();
     };
     items
         .into_iter()
         .filter(|item| item.kind() == StoryItemKind::Paragraph)
-        .map(|item| item.text().ok().flatten().unwrap_or_default())
+        .map(|item| StoryParagraph {
+            style: None,
+            text: item.text().ok().flatten().unwrap_or_default(),
+        })
         .collect()
 }
 
-fn import_story(paragraphs: &[String]) -> Vec<Block> {
+fn import_story(paragraphs: &[StoryParagraph]) -> Vec<Block> {
     let mut blocks = Vec::new();
-    for text in paragraphs {
-        let inlines = if text.is_empty() {
+    for para in paragraphs {
+        let inlines = if para.text.is_empty() {
             Vec::new()
         } else {
             vec![Inline::Text {
-                text: text.clone(),
+                text: para.text.clone(),
                 marks: Marks::default(),
                 src: None,
             }]
         };
+        let props = ParaProps {
+            style: para.style.clone(),
+            ..ParaProps::default()
+        };
         // Header and footer stories are read-only, so they do not take a write-back src.
-        blocks.push(Block::P(Para::new(
-            None,
-            ParaProps::default(),
-            inlines,
-            None,
-            None,
-        )));
+        blocks.push(Block::P(Para::new(None, props, inlines, None, None)));
     }
     blocks
+}
+
+fn used_paragraph_styles(
+    body: &[Block],
+    stories: &[(String, Vec<Block>)],
+    story_styles: &BTreeSet<String>,
+    styles: &wire::StyleSheet,
+    default_style: &str,
+) -> BTreeSet<String> {
+    let mut pending = Vec::new();
+    pending.push(default_style.to_string());
+    pending.extend(story_styles.iter().cloned());
+    collect_paragraph_styles(body, &mut pending);
+    for (_, blocks) in stories {
+        collect_paragraph_styles(blocks, &mut pending);
+    }
+    let based_on: HashMap<&str, &str> = styles
+        .paragraph
+        .iter()
+        .filter_map(|style| {
+            style
+                .based_on
+                .as_deref()
+                .map(|parent| (style.id.as_str(), parent))
+        })
+        .collect();
+    let mut used = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !used.insert(id.clone()) {
+            continue;
+        }
+        if let Some(parent) = based_on.get(id.as_str()) {
+            pending.push((*parent).to_string());
+        }
+    }
+    used
+}
+
+fn collect_paragraph_styles(blocks: &[Block], pending: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            Block::P(para) => {
+                if let Some(style) = &para.props.style {
+                    pending.push(style.clone());
+                }
+            }
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_paragraph_styles(&cell.blocks, pending);
+                    }
+                }
+            }
+            Block::Opaque(opaque) => {
+                for para in &opaque.preview {
+                    if let Some(style) = &para.props.style {
+                        pending.push(style.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn para_looks(doc: &Document, styles: &StyleSheet, ctx: &mut Ctx) -> Vec<wire::ParaLookEntry> {
