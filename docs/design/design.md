@@ -83,42 +83,62 @@ Each unit ends in a check that must pass before its result merges. Code is writt
 | 3 | Save (`write.rs`, verify), save as, dirty state, close guard | Grok | e2e plus native: edit fixtures, save, reopen, text and marks match; unmodeled-item multiset unchanged |
 | 4 | Tables, images, page setup, lists UI | Grok | e2e per feature, round-trip through save |
 | 5 | PDF export through caller fonts, print preview | Grok | Chinese fixture PDF embeds SimSun, `pdftotext` matches |
-| 6 | Automation interface: operate the document and read its structure (planned, see below) | Grok | a script edits `basic.docx` through the interface alone and reads back the outline, saved bytes match |
+| 6 | Automation interface: operate the document and read its structure (see below) | Grok | a script edits `basic.docx` through the interface alone and reads back the outline, saved bytes match |
 
-## Round 6 (planned): an automation interface
+## Round 6: an automation interface
 
-Requested on 2026-11-20. Not designed yet. This section records the request and what a design has to settle.
+Requested on 2026-11-20, designed on 2026-11-21. A caller that is not a person at the keyboard (an agent, a test,
+later another app) operates the open document and reads its structure.
 
-A caller that is not a person at the keyboard (an agent, a test, another app) needs two things from the editor.
+### What acde 0.0.10 can carry (read from its guides, not guessed)
 
-1. **Operate the document.** Click at a place, press Enter, type text, insert a table, an image or a page break, and
-   the other edits the toolbar offers.
-2. **Read the document.** Three views of the same model:
-   - the document structure: blocks in order with their kind (paragraph, table, image, opaque), sections and pages;
-   - the text structure: each paragraph's text, runs and marks, list level and number, and table cells;
-   - the chapter structure: the outline built from heading styles, with each heading's level, number, text, page
-     and the range of blocks it covers.
+| Channel | Reaches the page | Carries an answer back | Where it exists |
+| --- | --- | --- | --- |
+| `acde eval` and the MCP `eval` tool | yes, runs code in the page | yes, the awaited value as JSON | `acde dev` sessions |
+| App requests (`open('word', { kind })`, `appWindow.on('request')`) | yes, one structured-cloneable object | no. `open` resolves with `{ window }` only | everywhere |
+| The app's backend (`server.ts`) | only from this app's own page | not reachable by another app | everywhere |
+| A desktop service (`acde:<name>`) | belongs to the desktop package, not to an app | yes | desktops that ship it |
+| `acde:inspect` (`snapshot`, `act`, `query`) | the accessibility tree, mounted pages only | text of the tree | the desktop and its services |
 
-What exists today and why it is not this interface:
+No channel lets another app ask this app a question and get the answer. So the interface is a page object with
+JSON in and JSON out, and the transport is a thin wrapper that comes later.
 
-- `acde inspect` and `acde act` drive the real window. They see only mounted pages, name a paragraph by its flat
-  text, and cannot address a position inside one.
-- `window.__word` (`src/main.ts`) is a dev hook for the e2e scripts. It exists in dev builds only, has no stable
-  shape, and gives out the internal model objects.
+### Decisions
 
-What a design has to settle before any code:
+- **Surface.** `window.word`, in every build: `{ version: 1, call(request): Promise<Response> }`. A request is one
+  JSON object with an `op`. A response is one JSON object. Nothing else crosses: no model objects, no `src`
+  identities, no functions. Code lives in `src/automation/` and reaches the editor only through `Editor`'s public
+  methods and the commands of `src/editor/edit.ts`.
+- **Transport this round.** `acde eval word 'word.call({...})'` and the MCP `eval` tool. That serves tests and
+  coding agents. The app declares no `requests` this round, because a request cannot answer and half an interface
+  (writes with no result, no reads) is worse than none. When acde gains a channel that answers, it wraps `call`
+  unchanged.
+- **Addressing.** A place is `{ para: ParaId, offset }`: the editor's own `Pos`. `offset` is a UTF-16 offset into
+  the paragraph's flat text where an atom counts one, or `'end'`. Paragraph, table and opaque ids are minted per
+  session, never reused, and survive every edit that does not remove their block, so an id a caller holds stays
+  valid across edits it did not make. Every other way to name a place is a read that returns addresses: `outline`
+  gives heading ids, `find` gives `{ para, start, end }` ranges, `blocks` gives block ids by index and page, and
+  `hitTest` turns a window point into an address for mounted pages (the only view-dependent call).
+- **Operations are commands.** Every operation builds a `Command` and runs it through `Editor.run`, so it lands in
+  the undo history and in save as a keystroke does. "Click" is `select`. An edit may carry `at` (an address or a
+  range), which sets the selection first. The selection step has intent `none` and adds no undo entry.
+- **Reads.** Three views of the same `Doc`, all pure functions of the model plus a page lookup:
+  `blocks` (document structure), `text` (text structure), `outline` (chapter structure), with `info`, `selection`
+  and `find` beside them. `blocks` and `text` take `from` and `count` over body block indexes and answer `total` and
+  `next`. One call returns at most 500 blocks. Headings are paragraphs whose style's `w:name` is `heading 1` to
+  `heading 9`, at the top level of the body.
+- **Results.** An edit answers `{ ok: true, rev, selection, created, removed }`: the selection after it and the ids
+  of blocks that appeared and disappeared. A refusal is `{ ok: false, error: { code, message } }` with a closed set
+  of codes: `bad-request`, `unknown-op`, `unsupported-version`, `unknown-address`, `out-of-range`, `locked`,
+  `read-only-story`, `busy`, `refused`. `rev` counts document changes from any source, so a caller can tell that
+  someone else edited between two of its calls.
+- **Consent and what the user sees.** This round only something that can already run code in the page reaches the
+  interface, so there is no second party to ask about. Automated edits are not hidden: they run through
+  `Editor.run`, so the caret moves, the view scrolls to it, and Ctrl+Z takes each one back. While the print preview
+  or a dialog is open, or an IME composition is in progress, edits answer `busy` and reads still work. A prompt or
+  a visible "being edited by" mark is a decision for the round that adds a cross-app transport.
+- **`window.__word` stays** as the test hook for what is not part of the interface: loading fixture bytes, save
+  bytes, the tampered save, memory and timing probes. It keeps no editing helpers once the e2e scripts that use
+  them move to `word.call`. Moving them is not part of this round.
 
-- **Addressing.** How a caller names a place: a paragraph id and an offset (`Pos` in `src/model.ts`), a heading
-  path, a text search result, or a page and a point. Ids must stay valid across edits the caller did not make.
-- **Operations as commands, not events.** Every operation should run a `Command` from `src/editor/edit.ts`
-  through `Editor.run`, so it lands in the undo history and in save exactly as a keystroke does. "Click" then means
-  "set the selection at an address", and a click at a pixel is a separate, view-dependent call.
-- **Transport.** Which runtime channel carries it: app requests (`appWindow.on('request')`, kinds declared in
-  `acde.config.jsonc`), an MCP surface, or the app's backend. Read the acde guides `agents.md`, `mcp.md` and
-  `open.md` first. Do not guess the API.
-- **A stable, versioned shape** for the three read views that does not leak `src` origins or other internals, and a
-  size bound for long documents (a page or block range per call).
-- **Results.** Each operation answers with what changed (the new selection, the ids of blocks created or removed) or
-  a typed refusal (a locked paragraph, an address that no longer exists).
-- **Consent and safety.** Whether another app may edit an open document without the user seeing it, and what the
-  user sees while it happens.
+The data shapes and the checks are in `docs/briefs/r6-automation.md`.
