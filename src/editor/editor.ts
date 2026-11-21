@@ -17,7 +17,7 @@ import {
   listMarkers,
   withCaretParagraph,
 } from './derive.ts'
-import { PageView } from './pages.ts'
+import { pageOfBlock, PageView } from './pages.ts'
 import type { Decoration, RenderContext } from './render.ts'
 
 export interface EditorOptions {
@@ -206,6 +206,16 @@ export class Editor implements EditingSurface {
     }
   }
 
+  /**
+   * 0-based page of a top-level body block, read from the layout the view already holds.
+   * Null when that block has no slice, which includes every block past the measured part
+   * while the layout is incomplete.
+   */
+  pageOf(id: string): number | null {
+    if (this.destroyed) return null
+    return pageOfBlock(this.view.layout, id)
+  }
+
   setZoom(zoom: number): void {
     if (this.destroyed) return
     this.view.setZoom(zoom)
@@ -216,6 +226,11 @@ export class Editor implements EditingSurface {
     if (this.destroyed) return
     if (!this.sink.isConnected) this.host.append(this.sink)
     this.sink.focus()
+  }
+
+  /** True while the input layer has an IME composition open. */
+  get composing(): boolean {
+    return this.input?.composing ?? false
   }
 
   /** Where a pointer click lands, or null when it misses the pages. */

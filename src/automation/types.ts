@@ -606,7 +606,7 @@ export type EditRequest = { at?: Place } & (
     table?: string
   }
   | {
-    /** Decode `base64` and insert it as an image. The content type must be `image/png`, `image/jpeg`, or `image/gif`. */
+    /** Decode `base64` and insert it as an image. The content type must be `image/png` or `image/jpeg`. */
     op: 'insertImage'
     /** Standard base64, without a data-URL prefix. */
     base64: string

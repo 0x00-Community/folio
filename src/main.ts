@@ -1,4 +1,5 @@
 import { window as appWindow } from 'acde:window'
+import type { Word } from './automation/api.ts'
 import type { PrintMeasure } from './app.ts'
 import type { Editor } from './editor/editor.ts'
 import { insertText, setSelection } from './editor/edit.ts'
@@ -18,7 +19,10 @@ if (location.hash === '#view-demo') {
   const host = document.querySelector('#pages')
   if (!(host instanceof HTMLElement)) throw new Error('missing #pages')
   const { boot } = await import('./app.ts')
-  installHook(await boot(host))
+  const app = await boot(host)
+  // The automation interface, in every build. `__word` stays the test hook.
+  window.word = app.word
+  installHook(app)
 }
 
 function installHook(app: {
@@ -72,6 +76,7 @@ function bytesFromBase64(base64: string): Uint8Array {
 
 declare global {
   interface Window {
+    word?: Word
     __word?: {
       editor: Editor
       platform: Editor['platform']

@@ -1,14 +1,18 @@
 // Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
+import { createInterface } from './automation/api.ts'
+import type { Word } from './automation/api.ts'
+import type { Host } from './automation/host.ts'
 import { Editor } from './editor/editor.ts'
 import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertImage, insertRow, insertTable, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { listMarkers } from './editor/derive.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, engineBootMs, loadEngine, saveTampered, wasmMemoryBytes } from './engine/engine.ts'
 import type { Opened, PrintFontInfo, PrintLayout } from './engine/engine.ts'
 import { ensurePrintFonts } from './fonts.ts'
 import { locale, t } from './i18n.ts'
-import type { Block, Doc, Pt, StyleId } from './model.ts'
+import type { Block, Doc, ParaId, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
 import { createToolbar } from './ui/toolbar.ts'
 import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
@@ -30,6 +34,8 @@ export interface OpenFile {
 
 export interface WordApp {
   readonly editor: Editor
+  /** `window.word`. JSON in, JSON out, in every build. */
+  readonly word: Word
   openBytes(bytes: Uint8Array, name?: string): Promise<void>
   /** Bytes from `source.save`, timed around that call only. Does not write a file or clear the dirty bit. */
   save(): { base64: string; ms: number }
@@ -80,6 +86,12 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   let tail: Promise<void> = Promise.resolve()
   let pending: Pending | null = null
   let lastPageSetupMs = 0
+  // listMarkers already caches on the document. read.ts keeps its outline only while the map
+  // object is the same, so this map is what `markers()` hands out for a given Doc.
+  const markersByDoc = new WeakMap<Doc, ReadonlyMap<ParaId, string>>()
+  const changeListeners = new Set<() => void>()
+  let watchedEditor: Editor | null = null
+  let unwatchEditor: (() => void) | null = null
 
   const toolbarRoot = required('#toolbar')
   const statusRoot = required('#status')
@@ -206,6 +218,25 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   function current(): Editor {
     if (!editor) throw new Error('editor is not ready')
     return editor
+  }
+
+  // boot assigns `editor` once. load() replaces `source` on that object, so current() is the
+  // same Editor for the life of the page. Calls still go through current(), and the change
+  // subscription moves if a later edit of boot makes current() return another object.
+  function rebindWatch(): void {
+    const next = current()
+    if (next === watchedEditor) return
+    unwatchEditor?.()
+    watchedEditor = next
+    unwatchEditor = next.on('change', () => {
+      for (const listener of [...changeListeners]) listener()
+    })
+  }
+
+  function editorNow(): Editor {
+    const next = current()
+    if (changeListeners.size > 0 && next !== watchedEditor) rebindWatch()
+    return next
   }
 
   function renderChrome(): void {
@@ -669,8 +700,82 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     }
   }
 
+  const wordHost: Host = {
+    state() {
+      return editorNow().state
+    },
+    run(command) {
+      return editorNow().run(command)
+    },
+    undo() {
+      return editorNow().undo()
+    },
+    redo() {
+      return editorNow().redo()
+    },
+    pageOf(id) {
+      return editorNow().pageOf(id)
+    },
+    status() {
+      return editorNow().status()
+    },
+    busy() {
+      // A dialog covers the editor. A preview that is preparing, shown, exporting, or
+      // cancelling does too. failed and unusable have put the editor back on screen.
+      if (isDialogOpen()) return 'dialog'
+      const phase = machine.phase
+      if (phase === 'preparing' || phase === 'cancelling' || phase === 'open' || phase === 'exporting') return 'preview'
+      if (editorNow().composing) return 'composition'
+      return null
+    },
+    async addMedia(blob) {
+      // The rejection reaches word.call, which answers refused. Do not show the error band.
+      const media = await editorNow().source.addMedia(blob)
+      return {
+        key: media.key,
+        contentType: media.contentType,
+        widthPx: media.widthPt / 0.75,
+        heightPx: media.heightPt / 0.75,
+      }
+    },
+    hitTest(clientX, clientY) {
+      return editorNow().positionAtPoint(clientX, clientY)
+    },
+    file() {
+      const open = file
+      const live = editorNow()
+      return {
+        name: open?.name ?? t('untitled'),
+        dirty: isDirty(live.state.doc, open),
+        session: live.source,
+      }
+    },
+    markers() {
+      const doc = editorNow().state.doc
+      const cached = markersByDoc.get(doc)
+      if (cached) return cached
+      const listed = listMarkers(doc)
+      markersByDoc.set(doc, listed)
+      return listed
+    },
+    watch(listener) {
+      changeListeners.add(listener)
+      rebindWatch()
+      return () => {
+        changeListeners.delete(listener)
+        if (changeListeners.size === 0) {
+          unwatchEditor?.()
+          unwatchEditor = null
+          watchedEditor = null
+        }
+      }
+    },
+  }
+  const word = createInterface(wordHost)
+
   return {
     editor,
+    word,
     openBytes,
     save: timedSave,
     saveTampered: failSave,

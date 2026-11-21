@@ -532,11 +532,27 @@ interface Cursor {
   y0: number
 }
 
-function pageContaining(layout: Layout, id: BlockId): number {
+/**
+ * 0-based page of a block's first slice.
+ * Null when the layout has not placed that id: a block past the measured part of an
+ * incomplete layout, a nested paragraph, or an id the document does not have.
+ * `PageView.pageOf` answers 0 when it cannot find a paragraph, so callers that need
+ * "not placed" use this instead.
+ */
+export function pageOfBlock(layout: Layout, id: string): number | null {
   for (let i = 0; i < layout.pages.length; i++) {
-    if (layout.pages[i]?.slices.some((slice) => slice.block === id)) return i
+    const page = layout.pages[i]
+    if (!page) continue
+    for (const slice of page.slices) {
+      if (slice.block === id) return i
+    }
   }
-  return -1
+  return null
+}
+
+function pageContaining(layout: Layout, id: BlockId): number {
+  const page = pageOfBlock(layout, id)
+  return page === null ? -1 : page
 }
 
 function changedAhead(body: readonly Block[], index: number, changed: ReadonlySet<BlockId>): boolean {

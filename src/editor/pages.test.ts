@@ -3,8 +3,8 @@ import { test } from 'node:test'
 import type { Block, BlockId, Doc, Paragraph, Pt, Section, StoryKey, StyleId } from '../model.ts'
 import { listMarkers } from './derive.ts'
 import { apply, deleteBackward, initialState, selectAll, setPageSetup, setSelection, toggleList } from './edit.ts'
-import { layoutPlan, paginate, type Layout, type Measure } from './pages.ts'
-import { makeDoc, paragraph, text } from './testkit.ts'
+import { layoutPlan, pageOfBlock, paginate, type Layout, type Measure } from './pages.ts'
+import { cell, makeDoc, opaqueBlock, paragraph, row, table, text } from './testkit.ts'
 
 function pt(n: number): Pt {
   return n as Pt
@@ -527,4 +527,38 @@ test('removing a block that spans pages drops every slice of it', () => {
   const full = layoutOf(next, measures, 100)
   assert.equal(pagesFor(again, b.id).length, 0, 'no page keeps a slice of the removed block')
   assertSamePages(again, full, next)
+})
+
+test('pageOfBlock is the page of the first slice, or null when the layout has not placed the id', () => {
+  const body = para('p')
+  const inner = para('in-cell')
+  const grid = table('t', [row([cell([inner])])])
+  const box = opaqueBlock('o', [para('preview')], true)
+  const later = para('later')
+  const measures = new Map<string, Measure>([
+    [body.id, pm(80, [80])],
+    [grid.id, pm(80, [], { rowBottoms: Float32Array.from([80]) })],
+    [box.id, pm(80, [80])],
+  ])
+  const blocks = [body, grid, box, later]
+  const doc = docOf(blocks, [sectionBox(100)])
+  const incomplete = paginate(doc, (block) => measures.get(block.id), null, [])
+  assert.equal(incomplete.complete, false)
+  assert.equal(incomplete.pages.length, 3, sig(incomplete).join(' / '))
+  assert.equal(pageOfBlock(incomplete, body.id), 0, 'the paragraph is on the first page')
+  assert.equal(pageOfBlock(incomplete, grid.id), 1, 'the table is on the second page')
+  assert.equal(pageOfBlock(incomplete, box.id), 2, 'the opaque block is on the third page')
+  assert.equal(pageOfBlock(incomplete, later.id), null, 'a block past the measured part is unplaced')
+  assert.equal(pageOfBlock(incomplete, inner.id), null, 'a cell paragraph is not its own slice')
+  assert.equal(pageOfBlock(incomplete, 'missing'), null)
+
+  measures.set(later.id, pm(80, [80]))
+  const complete = paginate(doc, (block) => measures.get(block.id), incomplete, [later.id])
+  assert.equal(complete.complete, true)
+  assert.equal(pageOfBlock(complete, later.id), 3)
+  assert.equal(pageOfBlock(complete, inner.id), null)
+
+  const split = layoutOf([para('s')], new Map([['s', pm(80, [40, 80])]]), 50)
+  assert.deepEqual(sig(split), ['s:0-40', 's:40-80'])
+  assert.equal(pageOfBlock(split, 's'), 0, 'a block that continues answers the page of its first slice')
 })

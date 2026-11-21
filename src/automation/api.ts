@@ -71,7 +71,7 @@ const TABLE_COLS = 63
 const FIND_DEFAULT = 100
 const FIND_MAX = 1000
 const ID_MAX = 500
-const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif'])
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg'])
 
 // Own keys only. A plain object would treat `constructor` and other prototype names as real ops.
 export const KEYS: ReadonlyMap<string, readonly string[]> = new Map([

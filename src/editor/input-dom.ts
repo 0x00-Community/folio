@@ -38,6 +38,8 @@ export interface EditingSurface {
 }
 
 export interface InputBinding {
+  /** True from compositionstart until compositionend, blur, or reset. */
+  readonly composing: boolean
   detach(): void
   reset(): void
 }
@@ -334,6 +336,9 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   host.addEventListener('mousedown', onMouseDown, { capture: true, signal })
 
   return {
+    get composing() {
+      return mode.kind === 'composing'
+    },
     detach() {
       endDrag()
       controller.abort()
