@@ -325,14 +325,18 @@ pub fn plan(
                 items.push(item_from_block(&slots[position].block, true)?);
             }
             PatchBlock::Changed(block) => {
-                // A split repeats the surviving paragraph src. Tables and opaque blocks do not.
+                // A split repeats the surviving paragraph src, and so does Enter at
+                // either end of a paragraph this patch also keeps. The keep is still
+                // that paragraph's own bytes; the changed paragraph is the other
+                // half. Tables and opaque blocks do not repeat a src.
                 if let Some(src) = block_src(block) {
-                    let repeated_paragraph = matches!(block, Block::P(_));
-                    if repeated_paragraph {
-                        if seen_src.contains(&src) {
-                            return Err(contract(format!("block {src} appears twice")));
-                        }
-                    } else if !seen_src.insert(src) {
+                    let repeated_paragraph = matches!(block, Block::P(_))
+                        && by_src.get(&src).is_some_and(|position| {
+                            matches!(slots[*position].kind, SlotKind::Para)
+                        });
+                    // A kept paragraph is already in `seen_src`. Repeating it from a
+                    // changed paragraph is the split, not a second copy of the block.
+                    if !repeated_paragraph && !seen_src.insert(src) {
                         return Err(contract(format!("block {src} appears twice")));
                     }
                     if !by_src.contains_key(&src) {

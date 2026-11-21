@@ -51,6 +51,33 @@ function bodyParas(doc: Doc): Paragraph[] {
   return doc.body.filter((block): block is Paragraph => block.kind === 'p')
 }
 
+function cellParagraph(doc: Doc): Paragraph {
+  for (const block of doc.body) {
+    if (block.kind !== 'table') continue
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        const para = cell.blocks.find((inner): inner is Paragraph => inner.kind === 'p' && flatText(inner) === 'Apples')
+        if (para) return para
+      }
+    }
+  }
+  assert.fail('Apples cell')
+}
+
+function stepPath(path: readonly number[]): number[] {
+  const next = path.slice()
+  const last = next.length - 1
+  next[last] = (next[last] ?? 0) + 1
+  return next
+}
+
+function blockAt(doc: Doc, path: readonly number[]): Block | undefined {
+  if (path.length === 1) return doc.body[path[0] ?? 0]
+  const table = doc.body[path[0] ?? 0]
+  if (!table || table.kind !== 'table' || path.length !== 4) return undefined
+  return table.rows[path[1] ?? 0]?.cells[path[2] ?? 0]?.blocks[path[3] ?? 0]
+}
+
 function paraByText(doc: Doc, text: string): Paragraph {
   const found = bodyParas(doc).find((para) => flatText(para) === text)
   assert.ok(found, text)
@@ -227,6 +254,54 @@ test('a split keeps the paragraph src on both halves, and a join keeps the side 
     assert.ok(patch.body.slice(1).every((block) => isKeep(block)))
   } finally {
     opened.source.free()
+  }
+})
+
+test('enter at the end of an unedited paragraph saves and reopens', () => {
+  const cases: { label: string, pick: (doc: Doc) => Paragraph }[] = [
+    { label: 'plain paragraph', pick: (doc) => paraByText(doc, 'Centered paragraph.') },
+    {
+      label: 'page break paragraph',
+      pick: (doc) => {
+        const para = doc.body.find((block): block is Paragraph => (
+          block.kind === 'p' && block.src === 26 && block.inlines.some((inline) => inline.kind === 'atom' && inline.atom.type === 'pageBreak')
+        ))
+        assert.ok(para, 'body block 26 carries the page break')
+        return para
+      },
+    },
+    { label: 'table cell', pick: cellParagraph },
+  ]
+  for (const { label, pick } of cases) {
+    const opened = engine.open(fixture('basic.docx'))
+    let again: Opened | undefined
+    try {
+      const para = pick(opened.doc)
+      assert.ok(flatText(para).length > 0, `${label} has text`)
+      let state = caret(initialState(opened.doc), para, flatText(para).length)
+      state = run(state, splitParagraph)
+      const split = indexOf(state.doc).get(para.id)
+      assert.equal(split.para, para, `${label} head is the untouched paragraph`)
+      const tail = blockAt(state.doc, stepPath(split.path))
+      if (!tail || tail.kind !== 'p') assert.fail(`${label} tail`)
+      assert.equal(tail.src, para.src, `${label} tail repeats the paragraph src`)
+      assert.equal(flatText(tail), '', `${label} tail is empty`)
+      const patch = documentPatch(opened.source, state.doc)
+      if (split.path.length === 1) {
+        const kept = patch.body[split.path[0] ?? 0]
+        if (!kept || !isKeep(kept)) assert.fail(`${label} patch keeps the head`)
+        assert.equal(kept.keep, para.src, `${label} keep src`)
+        const changed = patch.body[(split.path[0] ?? 0) + 1]
+        if (!changed || !('kind' in changed) || changed.kind !== 'p') assert.fail(`${label} patch repeats the src`)
+        assert.equal(changed.src, para.src, `${label} changed src`)
+      }
+      const bytes = opened.source.save(state.doc)
+      again = engine.open(bytes)
+      same(project(again.doc), project(state.doc), label)
+    } finally {
+      again?.source.free()
+      opened.source.free()
+    }
   }
 })
 

@@ -2719,3 +2719,98 @@ fn table_with_cell<'a>(body: &'a [Block], needle: &str) -> &'a Table {
         })
         .unwrap_or_else(|| panic!("table containing {needle}"))
 }
+
+fn paragraph_xml(xml: &str, text: &str) -> String {
+    let at = xml
+        .find(text)
+        .unwrap_or_else(|| panic!("document has no {text:?}"));
+    let start = xml[..at]
+        .rfind("<w:p")
+        .unwrap_or_else(|| panic!("no paragraph element before {text:?}"));
+    let end = xml[at..]
+        .find("</w:p>")
+        .unwrap_or_else(|| panic!("no paragraph end after {text:?}"))
+        + at
+        + "</w:p>".len();
+    xml[start..end].to_string()
+}
+
+fn paragraph_count(body: &[Block]) -> usize {
+    body.iter()
+        .filter(|block| matches!(block, Block::P(_)))
+        .count()
+}
+
+/// A kept body paragraph followed by, or following, an empty changed paragraph of the same src.
+fn keep_with_empty(
+    imported: &rdocx_word_engine::wire::Imported,
+    src: u32,
+    empty_first: bool,
+) -> Patch {
+    let para = para_by_src(&imported.body, src);
+    let empty = Para::new(para.src, para.props.clone(), Vec::new(), None, None);
+    let mut blocks = vec![PatchBlock::Keep { keep: src }, changed_para(empty)];
+    if empty_first {
+        blocks.reverse();
+    }
+    patch_replacing(imported, src, blocks)
+}
+
+fn assert_keep_with_empty_saves(empty_first: bool) {
+    let (session, before) = opened("basic.docx");
+    let src = 3;
+    let text = "Centered paragraph.";
+    assert_eq!(text_of(body_para(&before, src)), text);
+    let patch = keep_with_empty(&before.imported, src, empty_first);
+    let written = save(&session, &patch);
+    let original = paragraph_xml(&document_xml(&fixture("basic.docx")), text);
+    let saved = paragraph_xml(&document_xml(&written), text);
+    assert_eq!(saved, original, "kept paragraph xml");
+    let after = reopen(&written);
+    assert_eq!(
+        paragraph_count(&after.imported.body),
+        paragraph_count(&before.imported.body) + 1
+    );
+    let index = after
+        .imported
+        .body
+        .iter()
+        .position(|block| text_of_block(block) == text)
+        .expect("kept paragraph");
+    let neighbor = if empty_first {
+        index
+            .checked_sub(1)
+            .expect("empty paragraph precedes the kept one")
+    } else {
+        index + 1
+    };
+    assert_eq!(text_of_block(&after.imported.body[neighbor]), "");
+    assert_eq!(
+        after.ledger.counts, before.ledger.counts,
+        "an empty paragraph adds no unmodeled item"
+    );
+}
+
+#[test]
+fn kept_paragraph_followed_by_empty_paragraph_of_the_same_src() {
+    assert_keep_with_empty_saves(false);
+}
+
+#[test]
+fn empty_paragraph_of_the_same_src_precedes_kept_paragraph() {
+    assert_keep_with_empty_saves(true);
+}
+
+#[test]
+fn two_keeps_of_one_src_are_refused() {
+    let (session, before) = opened("basic.docx");
+    let src = 3;
+    let mut patch = keep_patch(&before.imported);
+    let index = patch
+        .body
+        .iter()
+        .position(|block| matches!(block, PatchBlock::Keep { keep } if *keep == src))
+        .expect("keep");
+    patch.body.insert(index, PatchBlock::Keep { keep: src });
+    assert_contract(&session, &before, &patch, "block 3 appears twice");
+}
