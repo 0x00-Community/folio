@@ -216,7 +216,7 @@ pub enum LineSpacing {
     AtLeast { pt: f64 },
 }
 
-/// A line, or `None` when the file says the edge has no line (`nil` or `none`).
+/// A line, or `None` when the file says the edge has no line (`nil`). A cell edge of `none` is omitted instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BorderEdge {
@@ -252,8 +252,8 @@ pub struct TableBorders {
     pub inside_v: Option<BorderEdge>,
 }
 
-/// `None` omits the key (the file does not mention the edge). `Some(None)` is
-/// JSON null: the file says that edge has no line.
+/// `None` omits the key (the file does not mention the edge, or a cell edge is `none`).
+/// `Some(None)` is JSON null: the file says that edge has no line (`nil`).
 ///
 /// Serde reads a JSON null as the outer `None`, so the field module puts the
 /// null back into the inner `None` when the key is present.

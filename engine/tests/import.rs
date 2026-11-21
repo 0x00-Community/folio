@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
 use rdocx::{
-    BodyItemRef, BorderStyle, CellBorderEdge, CellItemRef, Document, HdrFtrType, HeaderFooterKind,
-    StoryId, StoryItemKind, TableBorderEdge,
+    BodyItemRef, BorderStyle, CellBorderEdge, CellItemRef, ContentLocation, Document, HdrFtrType,
+    HeaderFooterKind, StoryId, StoryItemKind, StoryKind, TableBorderEdge,
 };
 use rdocx_word_engine::Session;
-use rdocx_word_engine::wire::{Atom, Block, BorderEdge, BorderStyleName, Imported, Inline};
+use rdocx_word_engine::wire::{
+    Atom, Block, BorderEdge, BorderStyleName, Imported, Inline, LineSpacing,
+};
 use serde_json::Value;
 
 fn golden(name: &str) -> String {
@@ -459,7 +461,7 @@ fn tables_docx_borders_follow_direct_style_and_cell() {
         .as_ref()
         .expect("cell override");
     assert!(over.top.is_none() && over.left.is_none() && over.bottom.is_none());
-    assert_eq!(over.right, Some(None), "the named right edge is no line");
+    assert_eq!(over.right, Some(None), "a nil right edge is no line");
     assert!(tables[3].rows[0].cells[1].borders.is_none());
     assert!(
         tables[3].rows[1]
@@ -470,10 +472,10 @@ fn tables_docx_borders_follow_direct_style_and_cell() {
 }
 
 #[test]
-fn nil_and_none_are_null_and_an_unnamed_style_is_single() {
+fn nil_is_null_none_is_unset_and_an_unnamed_style_is_single() {
     let mut doc = Document::new();
     {
-        let mut table = doc.add_table(1, 1);
+        let mut table = doc.add_table(1, 2);
         table
             .set_border_checked(TableBorderEdge::Top, BorderStyle::Thick, 8, "auto")
             .expect("top");
@@ -482,9 +484,16 @@ fn nil_and_none_are_null_and_an_unnamed_style_is_single() {
             .expect("left");
         if let Some(mut cell) = table.cell(0, 0) {
             cell.set_border_checked(CellBorderEdge::Right, BorderStyle::None, 0, "00ff00")
-                .expect("cell");
+                .expect("nil cell");
+        }
+        if let Some(mut cell) = table.cell(0, 1) {
+            cell.set_border_checked(CellBorderEdge::Right, BorderStyle::None, 0, "auto")
+                .expect("none cell");
+            cell.set_border_checked(CellBorderEdge::Top, BorderStyle::Single, 8, "FF0000")
+                .expect("none cell top");
         }
     }
+    set_cell_edge_nil(&mut doc, 0, 0);
     let bytes = doc.to_bytes().expect("bytes");
     let session = Session::from_bytes(&bytes).expect("session");
     let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
@@ -496,14 +505,83 @@ fn nil_and_none_are_null_and_an_unnamed_style_is_single() {
     assert_eq!(top.style, BorderStyleName::Single);
     assert_eq!(top.width_pt, 1.0);
     assert_eq!(top.color, "000000");
-    assert!(borders.left.is_none(), "none is no line");
+    assert!(borders.left.is_none(), "a table edge of none is no line");
     assert!(
         borders.bottom.is_none(),
         "an omitted edge of a present set is no line"
     );
-    let cell = table.rows[0].cells[0].borders.as_ref().expect("cell edge");
-    assert_eq!(cell.right, Some(None));
-    assert!(cell.top.is_none() && cell.left.is_none() && cell.bottom.is_none());
+    let nil_cell = table.rows[0].cells[0].borders.as_ref().expect("nil edge");
+    assert_eq!(nil_cell.right, Some(None), "nil stays no line");
+    assert!(nil_cell.top.is_none() && nil_cell.left.is_none() && nil_cell.bottom.is_none());
+    let none_cell = table.rows[0].cells[1]
+        .borders
+        .as_ref()
+        .expect("the top edge is still an override");
+    assert!(
+        none_cell.right.is_none(),
+        "none is unset so the table edge shows"
+    );
+    let none_top = none_cell
+        .top
+        .as_ref()
+        .and_then(|edge| edge.as_ref())
+        .expect("top line");
+    assert_eq!(none_top.color, "FF0000");
+}
+
+#[test]
+fn direct_exact_line_spacing_imports_as_exact() {
+    let mut doc = Document::new();
+    doc.add_paragraph("exact").set_line_spacing(16.0);
+    doc.add_paragraph("auto").set_line_spacing_multiple(1.5);
+    doc.add_paragraph("plain");
+    let bytes = doc.to_bytes().expect("bytes");
+    let session = Session::from_bytes(&bytes).expect("session");
+    let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
+    let Block::P(exact) = &imported.body[0] else {
+        panic!("exact paragraph");
+    };
+    assert_eq!(exact.props.line, Some(LineSpacing::Exact { pt: 16.0 }));
+    let Block::P(auto) = &imported.body[1] else {
+        panic!("auto paragraph");
+    };
+    assert_eq!(auto.props.line, Some(LineSpacing::Auto { multiple: 1.5 }));
+    let Block::P(plain) = &imported.body[2] else {
+        panic!("plain paragraph");
+    };
+    assert!(
+        plain.props.line.is_none(),
+        "a style rule is not a direct rule"
+    );
+}
+
+/// `BorderStyle` has no nil. The cell edge is written as `none`, then the attribute is rewritten.
+fn set_cell_edge_nil(doc: &mut Document, row: usize, cell: usize) {
+    let location = last_table_location(doc);
+    let xml = doc
+        .cell_element_xml(&location, row, cell)
+        .expect("cell xml");
+    let text = String::from_utf8(xml).expect("cell xml is utf-8");
+    let next = text.replacen("w:val=\"none\"", "w:val=\"nil\"", 1);
+    assert_ne!(next, text, "the cell edge was not w:val=\"none\": {text}");
+    doc.replace_cell_xml(&location, row, cell, &next)
+        .expect("replace nil edge");
+}
+
+fn last_table_location(doc: &Document) -> ContentLocation {
+    let stories = doc.stories().expect("stories");
+    let body = stories
+        .iter()
+        .find(|story| story.kind() == StoryKind::Body)
+        .expect("body story");
+    let items = doc.story_items(body).expect("story items");
+    items
+        .iter()
+        .rev()
+        .find(|item| item.kind() == StoryItemKind::Table)
+        .expect("table")
+        .location()
+        .clone()
 }
 
 fn line(style: BorderStyleName, width_pt: f64, color: &str) -> BorderEdge {

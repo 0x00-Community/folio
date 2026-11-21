@@ -76,6 +76,7 @@ export default {
         id: resolved.id,
         family: resolved.family,
         faceIndex: resolved.faceIndex,
+        cjk: resolved.cjk,
         metrics: resolved.metrics,
       })
     }

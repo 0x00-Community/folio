@@ -194,6 +194,7 @@ export type FaceMetrics = {
   hheaAscender: number
   hheaDescender: number
   hheaLineGap: number
+  useTypoMetrics: boolean
 }
 
 export type ResolvedFont = {
@@ -201,6 +202,7 @@ export type ResolvedFont = {
   family: string
   faceIndex: number
   path: string
+  cjk: boolean
   metrics: FaceMetrics
 }
 
@@ -274,6 +276,7 @@ export function readFaceMetrics(read: Reader, faceIndex: number): FaceMetrics | 
     hheaAscender,
     hheaDescender,
     hheaLineGap,
+    useTypoMetrics: useTypo,
   }
 }
 
@@ -292,7 +295,7 @@ export function resolveFont(family: string, faces: readonly FontFace[]): Resolve
     try {
       const metrics = readFaceMetrics(reader.read, face.faceIndex)
       if (metrics === undefined) continue
-      return { id: face.id, family: name, faceIndex: face.faceIndex, path: face.path, metrics }
+      return { id: face.id, family: name, faceIndex: face.faceIndex, path: face.path, cjk: face.cjk, metrics }
     } finally {
       reader.close()
     }

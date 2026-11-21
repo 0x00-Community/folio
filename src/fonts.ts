@@ -66,12 +66,17 @@ export type FontMetrics = {
   readonly hheaAscender: number
   readonly hheaDescender: number
   readonly hheaLineGap: number
+  /** OS/2 fsSelection bit 7. Word then measures the typographic metrics instead of the Windows extent. */
+  readonly useTypoMetrics: boolean
+  /** The resolved face has CJK glyphs. False means Han in this family paints with 宋体. */
+  readonly cjk: boolean
 }
 
 type ResolvedFace = {
   id: string
   family: string
   faceIndex: number
+  cjk?: boolean
   metrics: {
     unitsPerEm: number
     ascender: number
@@ -85,6 +90,7 @@ type ResolvedFace = {
     hheaAscender?: number
     hheaDescender?: number
     hheaLineGap?: number
+    useTypoMetrics?: boolean
   }
 }
 
@@ -138,11 +144,53 @@ function metric(resolved: ResolvedFace, name: keyof ResolvedFace['metrics'], fal
   return typeof value === 'number' ? value : fallback
 }
 
-/**
- * Units and the vertical metrics the resolver read. The honored triple fills any slot the response omits.
- * Families the index does not list are skipped: a 404 for a missing face is a console error, and line height falls back.
- */
-export async function fetchMetrics(families: readonly string[]): Promise<ReadonlyMap<string, FontMetrics>> {
+const SONG_FAMILY = '宋体'
+
+function numberTriple(
+  a: number | undefined,
+  b: number | undefined,
+  c: number | undefined,
+): readonly [number, number, number] | undefined {
+  if (typeof a !== 'number' || typeof b !== 'number' || typeof c !== 'number') return undefined
+  return [a, b, c]
+}
+
+function sameTriple(left: readonly [number, number, number], right: readonly [number, number, number]): boolean {
+  return left[0] === right[0] && left[1] === right[1] && left[2] === right[2]
+}
+
+/** The flag when the service sent it. An older response is typographic only when the honored triple is the typo triple and not hhea. */
+function useTypoMetricsOf(resolved: ResolvedFace): boolean {
+  if (typeof resolved.metrics.useTypoMetrics === 'boolean') return resolved.metrics.useTypoMetrics
+  const typo = numberTriple(resolved.metrics.typoAscender, resolved.metrics.typoDescender, resolved.metrics.typoLineGap)
+  const hhea = numberTriple(resolved.metrics.hheaAscender, resolved.metrics.hheaDescender, resolved.metrics.hheaLineGap)
+  if (typo === undefined || hhea === undefined) return false
+  const honored: readonly [number, number, number] = [resolved.metrics.ascender, resolved.metrics.descender, resolved.metrics.lineGap]
+  return sameTriple(honored, typo) && !sameTriple(honored, hhea)
+}
+
+function metricsOf(resolved: ResolvedFace): FontMetrics {
+  const { ascender, descender, lineGap, unitsPerEm } = resolved.metrics
+  return {
+    unitsPerEm,
+    ascender,
+    descender,
+    lineGap,
+    winAscent: metric(resolved, 'winAscent', Math.abs(ascender)),
+    winDescent: metric(resolved, 'winDescent', Math.abs(descender)),
+    typoAscender: metric(resolved, 'typoAscender', ascender),
+    typoDescender: metric(resolved, 'typoDescender', descender),
+    typoLineGap: metric(resolved, 'typoLineGap', lineGap),
+    hheaAscender: metric(resolved, 'hheaAscender', ascender),
+    hheaDescender: metric(resolved, 'hheaDescender', descender),
+    hheaLineGap: metric(resolved, 'hheaLineGap', lineGap),
+    useTypoMetrics: useTypoMetricsOf(resolved),
+    // Missing means the response did not say this face lacks CJK glyphs.
+    cjk: resolved.cjk !== false,
+  }
+}
+
+async function readMetricMap(families: readonly string[]): Promise<Map<string, FontMetrics>> {
   const installed = await installedNames()
   const out = new Map<string, FontMetrics>()
   if (installed === null) return out
@@ -151,24 +199,26 @@ export async function fetchMetrics(families: readonly string[]): Promise<Readonl
     try {
       const resolved = await resolveFamily(family)
       if (resolved === undefined) continue
-      const { ascender, descender, lineGap, unitsPerEm } = resolved.metrics
-      out.set(family, {
-        unitsPerEm,
-        ascender,
-        descender,
-        lineGap,
-        winAscent: metric(resolved, 'winAscent', Math.abs(ascender)),
-        winDescent: metric(resolved, 'winDescent', Math.abs(descender)),
-        typoAscender: metric(resolved, 'typoAscender', ascender),
-        typoDescender: metric(resolved, 'typoDescender', descender),
-        typoLineGap: metric(resolved, 'typoLineGap', lineGap),
-        hheaAscender: metric(resolved, 'hheaAscender', ascender),
-        hheaDescender: metric(resolved, 'hheaDescender', descender),
-        hheaLineGap: metric(resolved, 'hheaLineGap', lineGap),
-      })
+      out.set(family, metricsOf(resolved))
     } catch {
       // One face that fails to read leaves the others usable.
     }
+  }
+  return out
+}
+
+/**
+ * Units and the vertical metrics the resolver read. The honored triple fills any slot the response omits.
+ * Families the index does not list are skipped: a 404 for a missing face is a console error, and line height falls back.
+ * A resolved face with no CJK glyphs also loads 宋体 in this same call, so typing Han later does not fetch.
+ */
+export async function fetchMetrics(families: readonly string[]): Promise<ReadonlyMap<string, FontMetrics>> {
+  const out = await readMetricMap(families)
+  const needsSong = [...out.values()].some((face) => !face.cjk)
+  const askedSong = families.some((family) => family === SONG_FAMILY)
+  if (needsSong && !askedSong && !out.has(SONG_FAMILY)) {
+    const song = await readMetricMap([SONG_FAMILY])
+    for (const [family, face] of song) out.set(family, face)
   }
   return out
 }

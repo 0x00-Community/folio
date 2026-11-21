@@ -15,14 +15,20 @@ Finding 17 held in part. rdocx draws the Latin text of a run that mixes Latin an
 18.15 pt against 16.62 pt for a line of Chinese only. With no caller face the same layout is 67 pages. That is
 a kit defect and is not fixed yet. The editing view's 50 pages were not explained by a test.
 
+Unit 3, second step (2026-11-22): the editing view gives Han text in a font without Han glyphs the face and
+line box of 宋体, uses the line box rdocx computes (Windows ascent and descent plus leading), imports a direct
+`exact` rule as `exact`, leaves `exact` lines off the grid, and collapses adjacent paragraph spacing to the larger
+value. Drift after it, with the kit unchanged: `long.docx` 0.12 (55 pages against 59), the private document 0.69
+(33 against 37), `basic.docx` 0.91. The pass mark is not reached. It is measured again after the kit fixes of
+unit 1 and of the mixed run's face.
+
 Unit 4 as built:
 
 - A line between two cells comes from both facing edges, as rdocx paints it: it is drawn when either cell has it,
   and when both do and differ, the right or lower cell's edge is the one drawn. The owner cell still paints it once.
 - Dashed, dotted and double edges are drawn as one solid band, because an inset shadow is one band.
 - Conditional regions of a table style (first row, banding) are not imported.
-- Open: rdocx treats a cell edge of `none` as unset and falls back to the table's edge, and only `nil` removes
-  the line. The importer stores both as no line.
+- A cell edge of `none` is unset and the table's edge shows. Only `nil` removes the line, as in rdocx.
 
 ## Goal
 

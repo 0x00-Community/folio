@@ -56,6 +56,8 @@ function face(over: Partial<FaceMetrics> = {}): FaceMetrics {
     hheaAscender: 800,
     hheaDescender: -200,
     hheaLineGap: 200,
+    useTypoMetrics: false,
+    cjk: true,
     ...over,
   }
 }
@@ -206,7 +208,7 @@ function near(actual: number, expected: number, message: string): void {
   assert.ok(Math.abs(actual - expected) < 1e-6, `${message}: ${actual}`)
 }
 
-test('lineHeightPx uses the honored font box and falls back when the face is missing', () => {
+test('lineHeightPx uses the Word line box and falls back when the face is missing', () => {
   const metrics = face()
   const size = pt(10)
   near(lineHeightPx(metrics, size, { rule: 'auto', multiple: 1 }), 16, '1200/1000 of 10pt is 16px')
@@ -218,10 +220,61 @@ test('lineHeightPx uses the honored font box and falls back when the face is mis
   assert.equal(lineHeightPx(undefined, pt(12), { rule: 'auto', multiple: 2 }), fallback, 'a missing face uses 1.3 em')
   assert.equal(lineHeightPx(face({ unitsPerEm: 0 }), pt(12), { rule: 'auto', multiple: 1 }), 12 * (4 / 3) * 1.3)
   assert.equal(
-    lineHeightPx(face({ ascender: 0, descender: 0, lineGap: 0 }), pt(12), { rule: 'auto', multiple: 1 }),
+    lineHeightPx(
+      face({
+        ascender: 0,
+        descender: 0,
+        lineGap: 0,
+        winAscent: 0,
+        winDescent: 0,
+        hheaAscender: 0,
+        hheaDescender: 0,
+        hheaLineGap: 0,
+        typoAscender: 0,
+        typoDescender: 0,
+        typoLineGap: 0,
+      }),
+      pt(12),
+      { rule: 'auto', multiple: 1 },
+    ),
     12 * (4 / 3) * 1.3,
     'a zero line box falls back',
   )
+})
+
+test('lineHeightPx uses the Windows extent, and typographic metrics when the face asks', () => {
+  const windows = face({
+    unitsPerEm: 2048,
+    ascender: 1536,
+    descender: -512,
+    lineGap: 0,
+    hheaAscender: 1536,
+    hheaDescender: -512,
+    hheaLineGap: 0,
+    winAscent: 1950,
+    winDescent: 550,
+    typoAscender: 1536,
+    typoDescender: -512,
+    typoLineGap: 0,
+  })
+  const size = pt(11)
+  near(lineHeightPx(windows, size, { rule: 'auto', multiple: 1 }), 11 * (4 / 3) * (2500 / 2048), 'windows ascent, descent and no extra leading')
+  const typo = face({
+    unitsPerEm: 2048,
+    useTypoMetrics: true,
+    winAscent: 1348,
+    winDescent: 558,
+    typoAscender: 896,
+    typoDescender: -408,
+    typoLineGap: -50,
+    hheaAscender: 900,
+    hheaDescender: -400,
+    hheaLineGap: 0,
+    ascender: 896,
+    descender: -408,
+    lineGap: -50,
+  })
+  near(lineHeightPx(typo, size, { rule: 'auto', multiple: 1 }), 11 * (4 / 3) * (1304 / 2048), 'a negative typographic gap is zero')
 })
 
 test('document grid pitch is one value, and mixed sections do not snap', () => {

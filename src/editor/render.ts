@@ -34,8 +34,13 @@ export interface RenderContext {
   /** List marker text for a paragraph, derived from document order. Null when not in a list. */
   marker(id: ParaId): string | null
   imageUrl(key: MediaKey): string
-  /** Section grid line pitch in px, or null. Line heights snap up to a multiple of it. */
+  /** Section grid line pitch in px, or null. Exact spacing stays absolute; other rules snap up to a whole number of rows. */
   gridPitchPx: number | null
+  /**
+   * Whether the resolved face for this family has CJK glyphs. Undefined until metrics have loaded.
+   * An east-asian segment whose face has none is painted with 宋体.
+   */
+  cjkGlyphs?: (family: string) => boolean | undefined
   /** Text inside page-number fields, set per page by pages.ts for header and footer stories. */
   pageField?: { page: number; pages: number }
 }
@@ -85,33 +90,76 @@ function isComplex(cp: number): boolean {
   )
 }
 
+export type ScriptSlot = 'eastAsia' | 'ascii' | 'hAnsi' | 'cs'
+
+function slotFor(cp: number): ScriptSlot {
+  if (isEastAsian(cp)) return 'eastAsia'
+  if (isComplex(cp)) return 'cs'
+  if (cp <= 0x7f) return 'ascii'
+  return 'hAnsi'
+}
+
 function familyFor(cp: number, look: RunLook): string {
-  if (isEastAsian(cp)) return look.fonts.eastAsia
-  if (isComplex(cp)) return look.fonts.cs
-  if (cp <= 0x7f) return look.fonts.ascii
+  const slot = slotFor(cp)
+  if (slot === 'eastAsia') return look.fonts.eastAsia
+  if (slot === 'cs') return look.fonts.cs
+  if (slot === 'ascii') return look.fonts.ascii
   return look.fonts.hAnsi
+}
+
+export interface ScriptSegment {
+  readonly text: string
+  readonly family: string
+  readonly slot: ScriptSlot
 }
 
 /**
  * Split text into segments that each use one font slot, the way Word and rdocx classify characters: CJK ideographs,
  * kana, hangul and full-width forms use the East Asian slot; the rest use ASCII, high ANSI or complex script slots.
  */
-export function scriptSegments(text: string, look: RunLook): readonly { text: string; family: string }[] {
-  const out: { text: string; family: string }[] = []
+export function scriptSegments(text: string, look: RunLook): readonly ScriptSegment[] {
+  const out: ScriptSegment[] = []
   let buf = ''
   let family = ''
+  let slot: ScriptSlot = 'ascii'
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0
+    const nextSlot = slotFor(cp)
     const next = familyFor(cp, look)
-    if (buf.length > 0 && next !== family) {
-      out.push({ text: buf, family })
+    if (buf.length > 0 && (next !== family || nextSlot !== slot)) {
+      out.push({ text: buf, family, slot })
       buf = ''
     }
     family = next
+    slot = nextSlot
     buf += ch
   }
-  if (buf.length > 0) out.push({ text: buf, family })
+  if (buf.length > 0) out.push({ text: buf, family, slot })
   return out
+}
+
+/**
+ * The family that paints one segment. Han in a face with no CJK glyphs takes 宋体; Latin in the same run keeps its own face.
+ * `cjk` undefined means the metrics have not loaded, so the segment stays on the run's family.
+ */
+export function paintFamily(family: string, slot: ScriptSlot, cjk: boolean | undefined): string {
+  if (slot === 'eastAsia' && cjk === false) return '宋体'
+  return family
+}
+
+/** Grid snap from `restore_word_line_heights`: exact spacing is the author's height, and other rules take whole rows. */
+export function snapLinePx(height: number, pitch: number | null, rule: LineSpacing): number {
+  if (rule.rule === 'exact' || pitch === null || !(pitch > 0)) return height
+  return Math.max(1, Math.ceil(height / pitch - 1e-9)) * pitch
+}
+
+/**
+ * Space before a cell paragraph adds below the previous paragraph. The first paragraph of a cell, and one
+ * after a nested table, keep the full space before. Between two paragraphs the gap is the larger of the two.
+ */
+export function collapsedSpaceBefore(beforePx: number, previousAfterPx: number | null): number {
+  if (previousAfterPx === null) return Math.max(0, beforePx)
+  return Math.max(0, beforePx - previousAfterPx)
 }
 
 function px(pt: number): number {
@@ -143,10 +191,11 @@ function decoFor(block: Block, deco: Decoration | undefined): Decoration | undef
 
 function lineHeight(ctx: RenderContext, para: Paragraph, family: string, sizePt: Pt): number {
   const rule = ctx.paraLook(para).spacing.line
-  let height = ctx.lineHeightPx(family, sizePt, rule)
-  const pitch = ctx.gridPitchPx
-  if (pitch !== null && pitch > 0) height = Math.ceil(height / pitch - 1e-9) * pitch
-  return height
+  return snapLinePx(ctx.lineHeightPx(family, sizePt, rule), ctx.gridPitchPx, rule)
+}
+
+function paintedFamily(ctx: RenderContext, family: string, slot: ScriptSlot): string {
+  return paintFamily(family, slot, ctx.cjkGlyphs?.(family))
 }
 
 function applyRun(
@@ -181,9 +230,9 @@ function firstLinePx(ctx: RenderContext, para: Paragraph, look: ParaLook): numbe
   return px(look.indent.firstLine)
 }
 
-function applyParaBox(el: HTMLElement, ctx: RenderContext, para: Paragraph): ParaLook {
+function applyParaBox(el: HTMLElement, ctx: RenderContext, para: Paragraph, beforePx?: number): ParaLook {
   const look = ctx.paraLook(para)
-  const before = px(look.spacing.before)
+  const before = beforePx ?? px(look.spacing.before)
   const after = px(look.spacing.after)
   const left = px(look.indent.left)
   const hanging = px(look.indent.hanging)
@@ -262,6 +311,7 @@ interface TextPiece {
   readonly o: number
   readonly look: RunLook
   readonly family: string
+  readonly slot: ScriptSlot
   readonly marks: Marks
 }
 
@@ -280,7 +330,7 @@ function piecesOf(para: Paragraph, ctx: RenderContext): Piece[] {
     if (inline.kind === 'text') {
       const look = ctx.look(para, inline.marks)
       for (const seg of scriptSegments(inline.text, look)) {
-        pieces.push({ kind: 'text', text: seg.text, o, look, family: seg.family, marks: inline.marks })
+        pieces.push({ kind: 'text', text: seg.text, o, look, family: seg.family, slot: seg.slot, marks: inline.marks })
         o += seg.text.length
       }
     } else {
@@ -295,7 +345,7 @@ function appendText(parent: HTMLElement, ctx: RenderContext, para: Paragraph, pi
   const span = document.createElement('span')
   span.dataset.o = String(piece.o)
   span.textContent = piece.text
-  applyRun(span, ctx, para, piece.look, piece.family, piece.marks)
+  applyRun(span, ctx, para, piece.look, paintedFamily(ctx, piece.family, piece.slot), piece.marks)
   parent.append(span)
 }
 
@@ -305,7 +355,9 @@ function appendPreedit(parent: HTMLElement, ctx: RenderContext, para: Paragraph,
   span.dataset.o = String(deco.pos.o)
   span.textContent = deco.text
   const look = ctx.look(para, {})
-  applyRun(span, ctx, para, look, isMostlyEastAsian(deco.text) ? look.fonts.eastAsia : look.fonts.ascii, {})
+  const slot: ScriptSlot = isMostlyEastAsian(deco.text) ? 'eastAsia' : 'ascii'
+  const family = slot === 'eastAsia' ? look.fonts.eastAsia : look.fonts.ascii
+  applyRun(span, ctx, para, look, paintedFamily(ctx, family, slot), {})
   parent.append(span)
 }
 
@@ -316,11 +368,12 @@ function isMostlyEastAsian(text: string): boolean {
   return false
 }
 
-function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration | undefined): HTMLElement {
+function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration | undefined, beforePx?: number): HTMLElement {
   const el = document.createElement('div')
   el.className = 'blk p'
   el.dataset.id = para.id
-  const look = applyParaBox(el, ctx, para)
+  const look = applyParaBox(el, ctx, para, beforePx)
+  const before = beforePx ?? px(look.spacing.before)
   const marker = ctx.marker(para.id)
   if (marker) {
     const span = document.createElement('span')
@@ -330,7 +383,7 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
     const left = px(look.indent.left)
     const hanging = px(look.indent.hanging)
     span.style.left = `${Math.max(0, left - hanging)}px`
-    span.style.top = `${px(look.spacing.before)}px`
+    span.style.top = `${before}px`
     if (hanging > 0) span.style.width = `${hanging}px`
     const run = ctx.look(para, {})
     applyRun(span, ctx, para, run, run.fonts.eastAsia, {})
@@ -572,6 +625,20 @@ function cssPx(value: number): string {
   return `${Math.round(value * 1000) / 1000}px`
 }
 
+function appendCellBlocks(td: HTMLElement, blocks: readonly Block[], ctx: RenderContext, deco: Decoration | undefined): void {
+  let previousAfter: number | null = null
+  for (const child of blocks) {
+    if (child.kind !== 'p') {
+      td.append(renderBlock(child, ctx, decoFor(child, deco)))
+      previousAfter = null
+      continue
+    }
+    const before = collapsedSpaceBefore(px(ctx.paraLook(child).spacing.before), previousAfter)
+    td.append(renderParagraph(child, ctx, decoFor(child, deco), before))
+    previousAfter = px(ctx.paraLook(child).spacing.after)
+  }
+}
+
 function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefined): HTMLElement {
   const el = document.createElement('div')
   el.className = 'blk t'
@@ -623,7 +690,7 @@ function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefi
       if (cell.shading) td.style.backgroundColor = `#${cell.shading}`
       if (cell.vAlign === 'center') td.style.verticalAlign = 'middle'
       else if (cell.vAlign) td.style.verticalAlign = cell.vAlign
-      for (const child of cell.blocks) td.append(renderBlock(child, ctx, decoFor(child, deco)))
+      appendCellBlocks(td, cell.blocks, ctx, deco)
       tr.append(td)
       col += cell.span
     }

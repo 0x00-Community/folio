@@ -301,19 +301,35 @@ function fit(
   }
 }
 
+/** How much of the measured space before this slice skips. Page top drops all of it; elsewhere only the overlap with the previous block's space after. */
+function spaceSkip(atTop: boolean, m: Measure, previousAfterPx: number): number {
+  if (!(m.spaceBeforePx > 0)) return 0
+  const wanted = atTop ? m.spaceBeforePx : Math.min(m.spaceBeforePx, Math.max(0, previousAfterPx))
+  if (!(wanted > 0)) return 0
+  return Math.min(wanted, Math.max(0, m.heightPx - 0.01))
+}
+
+function spaceAfterBefore(body: readonly Block[], sectionOf: readonly number[], index: number, measure: MeasureFn, doc: Doc): number {
+  if (index === 0) return 0
+  const prev = body[index - 1]
+  const section = doc.sections[sectionOf[index - 1] ?? 0]
+  if (!prev || !section) return 0
+  return measure(prev, section)?.spaceAfterPx ?? 0
+}
+
 function placeLines(
   id: BlockId,
   m: Measure,
   y0: number,
   available: number,
   atTop: boolean,
-  suppress: boolean,
+  skip: number,
   pageBody: number,
 ): Placed | null {
   const bottoms = m.lineBottoms
   const n = bottoms.length
   let start = y0
-  if (suppress && start <= EPS && m.spaceBeforePx > 0) start = Math.min(m.spaceBeforePx, Math.max(0, m.heightPx - 0.01))
+  if (skip > 0 && start <= EPS) start = skip
   if (m.keepLines && !atTop && start <= EPS && m.heightPx - start <= pageBody + EPS && m.heightPx - start > available + EPS) {
     return null
   }
@@ -358,7 +374,7 @@ function placeTable(
   y0: number,
   available: number,
   atTop: boolean,
-  suppress: boolean,
+  skip: number,
 ): Placed | null {
   const rows = m.rowBottoms
   if (!rows || rows.length === 0) return null
@@ -366,7 +382,7 @@ function placeTable(
   const headerRows = Math.min(m.headerRows, n)
   const headerBottom = headerRows > 0 ? (rows[headerRows - 1] ?? 0) : 0
   let start = y0
-  if (suppress && start <= EPS && m.spaceBeforePx > 0) start = Math.min(m.spaceBeforePx, Math.max(0, m.heightPx - 0.01))
+  if (skip > 0 && start <= EPS) start = skip
   const continuation = headerRows > 0 && start >= headerBottom - EPS && start > EPS
   const repeat = continuation ? headerRows : 0
   const repeatH = continuation ? headerBottom : 0
@@ -403,9 +419,9 @@ function placeTable(
   return fit(id, start, end, repeat, consumed, end)
 }
 
-function placeAtomic(id: BlockId, m: Measure, y0: number, available: number, atTop: boolean, suppress: boolean): Placed | null {
+function placeAtomic(id: BlockId, m: Measure, y0: number, available: number, atTop: boolean, skip: number): Placed | null {
   let start = y0
-  if (suppress && start <= EPS && m.spaceBeforePx > 0) start = Math.min(m.spaceBeforePx, m.heightPx)
+  if (skip > 0 && start <= EPS) start = skip
   const consumed = m.heightPx - start
   if (consumed <= available + EPS || atTop) return fit(id, start, m.heightPx, 0, Math.max(0, consumed), null)
   return null
@@ -417,12 +433,12 @@ function placeBlock(
   y0: number,
   available: number,
   atTop: boolean,
-  suppress: boolean,
+  skip: number,
   pageBody: number,
 ): Placed | null {
-  if (m.rowBottoms && m.rowBottoms.length > 0) return placeTable(id, m, y0, available, atTop, suppress)
-  if (m.lineBottoms.length > 0) return placeLines(id, m, y0, available, atTop, suppress, pageBody)
-  return placeAtomic(id, m, y0, available, atTop, suppress)
+  if (m.rowBottoms && m.rowBottoms.length > 0) return placeTable(id, m, y0, available, atTop, skip)
+  if (m.lineBottoms.length > 0) return placeLines(id, m, y0, available, atTop, skip, pageBody)
+  return placeAtomic(id, m, y0, available, atTop, skip)
 }
 
 function chainFit(
@@ -432,9 +448,11 @@ function chainFit(
   measure: MeasureFn,
   doc: Doc,
   pageBody: number,
+  anchorAfter: number,
 ): { here: number; fresh: number } | null {
   let here = 0
   let fresh = 0
+  let prevAfter = anchorAfter
   for (let i = index, guard = 0; i < body.length && guard < 40; i++, guard++) {
     if (i > index && (sectionOf[i] ?? 0) !== (sectionOf[index] ?? 0)) break
     const block = body[i]
@@ -443,8 +461,11 @@ function chainFit(
     const measured = measure(block, section)
     if (!measured) return null
     if (i > index && measured.pageBreakBefore) break
-    here += measured.heightPx
-    fresh += i === index ? Math.max(0, measured.heightPx - measured.spaceBeforePx) : measured.heightPx
+    const before = Math.max(0, measured.spaceBeforePx)
+    const overlap = Math.min(before, Math.max(0, prevAfter))
+    here += Math.max(0, measured.heightPx - overlap)
+    fresh += Math.max(0, measured.heightPx - (i === index ? before : overlap))
+    prevAfter = measured.spaceAfterPx
     if (!measured.keepNext || fresh > pageBody) break
   }
   return { here, fresh }
@@ -745,8 +766,10 @@ function wantsBlank(breakType: 'evenPage' | 'oddPage', pageNumber: number): bool
 
 /**
  * Word's block-level page rules over cached measures: pageBreakBefore, keepNext chains (capped at one page),
- * keepLines, widow and orphan control, section breaks, rows that cannot split, header rows, and space-before
- * suppression at the top of a page after a soft break.
+ * keepLines, widow and orphan control, section breaks, rows that cannot split, header rows, and paragraph
+ * spacing. The top of a page drops space before. Between two blocks the gap is the larger of the first's
+ * space after and the second's space before. The measured height stays the block's own; the skip is applied
+ * when the slice is placed.
  *
  * Incremental: with `previous` and `changed`, starts at the page holding the first changed block and stops at the first
  * page whose start (block, y0) equals the previous layout's page start at the same index, reusing the rest.
@@ -847,8 +870,9 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
     }
 
     const atTop = pending.slices.length === 0
+    const earlierAfter = atTop ? 0 : spaceAfterBefore(body, sectionOf, index, measure, doc)
     if (!atTop && cursor.y0 === 0 && measured.keepNext) {
-      const chain = chainFit(body, sectionOf, index, measure, doc, pending.bodyHeight)
+      const chain = chainFit(body, sectionOf, index, measure, doc, pending.bodyHeight, earlierAfter)
       if (chain && chain.fresh <= pending.bodyHeight + EPS && chain.here > pending.remaining() + EPS) {
         pages.push(pending.toPage())
         pending = null
@@ -857,8 +881,8 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
       }
     }
 
-    const suppress = pending.softTop && atTop && cursor.y0 === 0
-    let placed = placeBlock(block.id, measured, cursor.y0, pending.remaining(), atTop, suppress, pending.bodyHeight)
+    const skip = cursor.y0 === 0 ? spaceSkip(atTop, measured, earlierAfter) : 0
+    let placed = placeBlock(block.id, measured, cursor.y0, pending.remaining(), atTop, skip, pending.bodyHeight)
     if (!placed) {
       if (!atTop) {
         pages.push(pending.toPage())

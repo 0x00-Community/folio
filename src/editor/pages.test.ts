@@ -140,9 +140,9 @@ test('without widow control a single line may stay at the bottom', () => {
   assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-70|b:0-20', 'b:20-80'])
 })
 
-test('space before is kept on the first page and suppressed after a soft break', () => {
+test('space before is dropped at the top of a page', () => {
   const only = new Map([['b', pm(40, [25, 40], { spaceBeforePx: 10 })]])
-  assert.equal(sig(layoutOf([para('b')], only, 100))[0], 'b:0-40')
+  assert.equal(sig(layoutOf([para('b')], only, 100))[0], 'b:10-40')
   const measures = new Map([
     ['a', pm(80, [80])],
     ['b', pm(40, [25, 40], { spaceBeforePx: 10 })],
@@ -150,12 +150,29 @@ test('space before is kept on the first page and suppressed after a soft break',
   assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-80', 'b:10-40'])
 })
 
-test('pageBreakBefore starts a new page and keeps space before', () => {
+test('pageBreakBefore starts a new page and drops the whole space before', () => {
   const measures = new Map([
-    ['a', pm(40, [40])],
+    ['a', pm(40, [40], { spaceAfterPx: 4 })],
     ['b', pm(30, [20, 30], { pageBreakBefore: true, spaceBeforePx: 10 })],
   ])
-  assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-40', 'b:0-30'])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-40', 'b:10-30'])
+})
+
+test('adjacent body paragraphs keep the larger of space after and space before', () => {
+  const measures = new Map([
+    ['a', pm(40, [28], { spaceAfterPx: 12 })],
+    ['b', pm(30, [22], { spaceBeforePx: 8 })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-40|b:8-30'])
+})
+
+test('keepNext measures the collapsed gap, so an overlap that fits stays on the page', () => {
+  const measures = new Map([
+    ['a', pm(60, [60], { spaceAfterPx: 30 })],
+    ['b', pm(50, [50], { spaceBeforePx: 30, keepNext: true })],
+    ['c', pm(20, [20])],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b'), para('c')], measures, 100)), ['a:0-60|b:30-50|c:0-20'])
 })
 
 test('keepNext moves a chain that fits on an empty page but not in the remaining space', () => {

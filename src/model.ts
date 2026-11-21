@@ -155,7 +155,7 @@ export interface BorderLine {
   readonly color: Hex
 }
 
-/** A line, or null when the file says that edge has no line (`nil` or `none`). */
+/** A line, or null when the file says that edge has no line (`nil`). A cell edge of `none` is omitted. */
 export type BorderEdge = BorderLine | null
 
 export interface TableBorders {

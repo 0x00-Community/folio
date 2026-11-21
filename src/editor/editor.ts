@@ -339,6 +339,7 @@ export class Editor implements EditingSurface {
       paraLook: (para) => this.session.paraLook(para, this.current.doc.lists),
       fontStack: (family) => cssStack(family, cssGeneric(family)),
       lineHeightPx: (family, sizePt, rule) => lineHeightPx(this.metrics.get(family), sizePt, rule),
+      cjkGlyphs: (family) => this.metrics.get(family)?.cjk,
       marker: (id) => this.markers.get(id) ?? null,
       imageUrl: (key) => {
         try {
@@ -380,6 +381,7 @@ export class Editor implements EditingSurface {
     for (const family of missing) this.pendingFonts.delete(family)
     if (!failed) {
       for (const family of missing) this.knownFonts.add(family)
+      for (const family of fetched.keys()) this.knownFonts.add(family)
       if (fetched.size > 0) {
         const merged = new Map(this.metrics)
         for (const [family, value] of fetched) merged.set(family, value)

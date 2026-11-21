@@ -2,7 +2,7 @@
 
 use rdocx::{
     Alignment, BorderStyle, BreakKind, CellBorderEdge, Document, Length, ListLevel, RunPosition,
-    RunRange,
+    RunRange, StoryItemKind, StoryKind,
 };
 use std::path::Path;
 
@@ -18,10 +18,19 @@ fn main() -> rdocx::Result<()> {
 
 fn picture() -> rdocx::Result<Vec<u8>> {
     let mut source = Document::new();
-    source.add_paragraph("rdocx").set_alignment(Alignment::Center);
+    source
+        .add_paragraph("rdocx")
+        .set_alignment(Alignment::Center);
     source.set_page_size(Length::inches(2.0), Length::inches(1.0));
-    source.set_margins(Length::inches(0.1), Length::inches(0.1), Length::inches(0.1), Length::inches(0.1));
-    Ok(source.render_page_to_png_deterministic(0, 96.0)?.expect("one page"))
+    source.set_margins(
+        Length::inches(0.1),
+        Length::inches(0.1),
+        Length::inches(0.1),
+        Length::inches(0.1),
+    );
+    Ok(source
+        .render_page_to_png_deterministic(0, 96.0)?
+        .expect("one page"))
 }
 
 fn basic(path: &Path) -> rdocx::Result<()> {
@@ -42,8 +51,10 @@ fn basic(path: &Path) -> rdocx::Result<()> {
         p.add_run("highlighted, ").set_highlight("yellow");
         p.add_run("Arial.").set_font("Arial");
     }
-    doc.add_paragraph("Centered paragraph.").set_alignment(Alignment::Center);
-    doc.add_paragraph("Right aligned paragraph.").set_alignment(Alignment::Right);
+    doc.add_paragraph("Centered paragraph.")
+        .set_alignment(Alignment::Center);
+    doc.add_paragraph("Right aligned paragraph.")
+        .set_alignment(Alignment::Right);
     doc.add_paragraph(
         "Justified paragraph that is long enough to wrap onto a second line so that justification is visible on the first line of the paragraph.",
     )
@@ -51,7 +62,11 @@ fn basic(path: &Path) -> rdocx::Result<()> {
     doc.add_paragraph("Lists").set_style("Heading2");
     let bullets = doc.add_list_definition(&[ListLevel::bullet(), ListLevel::bullet()]);
     let numbers = doc.add_list_definition(&[ListLevel::decimal(), ListLevel::decimal()]);
-    for (text, level) in [("First bullet", 0), ("Nested bullet", 1), ("Second bullet", 0)] {
+    for (text, level) in [
+        ("First bullet", 0),
+        ("Nested bullet", 1),
+        ("Second bullet", 0),
+    ] {
         doc.add_paragraph(text).set_numbering(bullets, level);
     }
     for text in ["Step one", "Step two", "Step three"] {
@@ -60,7 +75,14 @@ fn basic(path: &Path) -> rdocx::Result<()> {
     doc.add_paragraph("Table").set_style("Heading2");
     {
         let mut table = doc.add_table(3, 3);
-        for (row, cells) in [["Item", "Qty", "Price"], ["Apples", "3", "1.20"], ["Pears", "5", "2.40"]].iter().enumerate() {
+        for (row, cells) in [
+            ["Item", "Qty", "Price"],
+            ["Apples", "3", "1.20"],
+            ["Pears", "5", "2.40"],
+        ]
+        .iter()
+        .enumerate()
+        {
             for (col, text) in cells.iter().enumerate() {
                 if let Some(mut cell) = table.cell(row, col) {
                     cell.set_text(text);
@@ -69,18 +91,25 @@ fn basic(path: &Path) -> rdocx::Result<()> {
         }
     }
     doc.add_paragraph("Picture").set_style("Heading2");
-    doc.add_picture(&picture()?, "picture.png", Length::inches(2.0), Length::inches(1.0));
+    doc.add_picture(
+        &picture()?,
+        "picture.png",
+        Length::inches(2.0),
+        Length::inches(1.0),
+    );
     doc.add_paragraph("").add_run("").add_break(BreakKind::Page);
     doc.add_paragraph("第二章 中文内容").set_style("Heading1");
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("这是一段宋体正文，用来检查中文排版、换行和光标定位是否正确。").set_slot_font(rdocx::RunFontSlot::EastAsia, Some("宋体"));
+        p.add_run("这是一段宋体正文，用来检查中文排版、换行和光标定位是否正确。")
+            .set_slot_font(rdocx::RunFontSlot::EastAsia, Some("宋体"));
         p.add_run("这一句是黑体加粗。").set_bold(true);
         p.add_run("Mixed 中英文 text 混排。");
     }
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("楷体段落：天津大学本科毕业设计（论文）答辩记录。").set_font("楷体");
+        p.add_run("楷体段落：天津大学本科毕业设计（论文）答辩记录。")
+            .set_font("楷体");
     }
     for i in 1..=12 {
         doc.add_paragraph(&format!(
@@ -94,11 +123,13 @@ fn long(path: &Path, pages: usize) -> rdocx::Result<()> {
     let mut doc = Document::new();
     for i in 0..pages * 6 {
         if i % 18 == 0 {
-            doc.add_paragraph(&format!("Chapter {}", i / 18 + 1)).set_style("Heading1");
+            doc.add_paragraph(&format!("Chapter {}", i / 18 + 1))
+                .set_style("Heading1");
         }
         let mut p = doc.add_paragraph("");
         p.add_run(&format!("Paragraph {i}. "));
-        p.add_run("The quick brown fox jumps over the lazy dog. ").set_bold(i % 3 == 0);
+        p.add_run("The quick brown fox jumps over the lazy dog. ")
+            .set_bold(i % 3 == 0);
         p.add_run("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. 这是一段中文内容，用来测试长文档的排版性能。");
     }
     doc.save(path)
@@ -134,8 +165,37 @@ fn tables(path: &Path) -> rdocx::Result<()> {
             cell.set_border_checked(CellBorderEdge::Right, BorderStyle::None, 0, "auto")?;
         }
     }
+    // The override must stay an override. `none` is unset and would let the table edge show,
+    // and BorderStyle has no nil, so the written `none` is rewritten to `nil`.
+    write_cell_nil(&mut doc)?;
     doc.add_paragraph("Insert here.");
     doc.save(path)
+}
+
+fn write_cell_nil(doc: &mut Document) -> rdocx::Result<()> {
+    let location = {
+        let stories = doc.stories()?;
+        let body = stories
+            .iter()
+            .find(|story| story.kind() == StoryKind::Body)
+            .ok_or_else(|| rdocx::Error::Other("body story is missing".into()))?;
+        let items = doc.story_items(body)?;
+        let table = items
+            .iter()
+            .rev()
+            .find(|item| item.kind() == StoryItemKind::Table)
+            .ok_or_else(|| rdocx::Error::Other("cell override table is missing".into()))?;
+        table.location().clone()
+    };
+    let xml = doc.cell_element_xml(&location, 0, 0)?;
+    let text = String::from_utf8(xml).map_err(|error| rdocx::Error::Other(error.to_string()))?;
+    let next = text.replacen("w:val=\"none\"", "w:val=\"nil\"", 1);
+    if next == text {
+        return Err(rdocx::Error::Other(
+            "cell override right edge is not w:val=\"none\"".into(),
+        ));
+    }
+    doc.replace_cell_xml(&location, 0, 0, &next)
 }
 
 fn heading(doc: &mut Document, text: &str) {
@@ -152,9 +212,17 @@ fn fill(table: &mut rdocx::Table<'_>, texts: &[&str]) {
 
 fn preserve(path: &Path) -> rdocx::Result<()> {
     let mut doc = Document::new();
-    doc.add_paragraph("Preservation fixture").set_style("Heading1");
+    doc.add_paragraph("Preservation fixture")
+        .set_style("Heading1");
     doc.add_paragraph("A paragraph with a comment anchored on these words.");
-    doc.add_comment_on_text("these words", 0, "Reviewer", Some("R"), "Keep this comment.", None)?;
+    doc.add_comment_on_text(
+        "these words",
+        0,
+        "Reviewer",
+        Some("R"),
+        "Keep this comment.",
+        None,
+    )?;
     {
         let mut p = doc.add_paragraph("Page field: ");
         p.add_run("").add_field("PAGE", "1")?;
@@ -168,7 +236,16 @@ fn preserve(path: &Path) -> rdocx::Result<()> {
     doc.add_paragraph("Bookmarked paragraph.");
     doc.add_bookmark(
         "kept_bookmark",
-        RunRange { start: RunPosition { body_index, run_index: 0 }, end: RunPosition { body_index, run_index: 1 } },
+        RunRange {
+            start: RunPosition {
+                body_index,
+                run_index: 0,
+            },
+            end: RunPosition {
+                body_index,
+                run_index: 1,
+            },
+        },
     )?;
     doc.add_paragraph("An editable paragraph after the preserved content.");
     doc.save(path)

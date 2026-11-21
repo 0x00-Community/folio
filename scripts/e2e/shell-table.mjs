@@ -553,6 +553,7 @@ await check('tables.docx draws each file\'s borders, and an inserted table keeps
     ['No borders', null, null, []],
     ['Direct borders', SIX(RED), null, ['top', 'left', 'bottom', 'right']],
     ['Table Grid', SIX(BLACK), null, ['top', 'left', 'bottom', 'right']],
+    // The cell's right edge is nil. Null is no line, so the table's blue edge shows on that side.
     ['Cell override', SIX(BLUE), { right: null }, ['top', 'left', 'bottom', 'right']],
   ]
   for (const [heading, borders, cell, wantSides] of cases) {

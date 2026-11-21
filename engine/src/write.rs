@@ -2463,11 +2463,11 @@ impl Story for BodyLoc<'_> {
             .doc
             .paragraph_index_of_content(index)
             .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
-        let paragraph = self
-            .doc
+        let doc: &Document = self.doc;
+        let paragraph = doc
             .paragraph(paragraph_index)
             .ok_or_else(|| contract(format!("body index {index} is not a paragraph")))?;
-        Ok(import::direct_props(&paragraph))
+        Ok(import::direct_props(doc, &paragraph))
     }
 
     fn embed(&mut self, bytes: &[u8], name: &str) -> String {
@@ -2524,8 +2524,8 @@ impl Story for CellLoc<'_> {
     }
 
     fn direct_props(&mut self, index: usize) -> Result<ParaProps, WriteError> {
-        let table = self
-            .doc
+        let doc: &Document = self.doc;
+        let table = doc
             .table(self.ordinal)
             .ok_or_else(|| contract("table is out of range"))?;
         let cell = table
@@ -2534,7 +2534,7 @@ impl Story for CellLoc<'_> {
         let paragraph = cell
             .paragraph(index)
             .ok_or_else(|| contract("cell paragraph is out of range"))?;
-        Ok(import::direct_props(&paragraph))
+        Ok(import::direct_props(doc, &paragraph))
     }
 
     fn embed(&mut self, bytes: &[u8], name: &str) -> String {

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { BorderEdge, BorderLine, CellBorders, Pt, RunLook, Section, Table, TableBorders } from '../model.ts'
+import type { BorderEdge, BorderLine, CellBorders, LineSpacing, Pt, RunLook, Section, Table, TableBorders } from '../model.ts'
 import { cell, paragraph, pt, row, table, text, hex } from './testkit.ts'
-import { cellBoxShadow, cellEdges, pageBoxStyle, paintedCellEdges, scriptSegments } from './render.ts'
+import { cellBoxShadow, cellEdges, collapsedSpaceBefore, pageBoxStyle, paintFamily, paintedCellEdges, scriptSegments, snapLinePx } from './render.ts'
 
 const look = {
   fonts: { ascii: 'Times', hAnsi: 'TimesHigh', eastAsia: 'SimSun', cs: 'Naskh' },
@@ -19,17 +19,48 @@ const look = {
 test('scriptSegments gives CJK the east Asia font and Latin the ASCII font', () => {
   const segments = scriptSegments('Hello世界', look)
   assert.deepEqual(segments, [
-    { text: 'Hello', family: 'Times' },
-    { text: '世界', family: 'SimSun' },
+    { text: 'Hello', family: 'Times', slot: 'ascii' },
+    { text: '世界', family: 'SimSun', slot: 'eastAsia' },
   ])
+})
+
+test('Han in a face without CJK glyphs takes 宋体, and Latin in that run keeps its face', () => {
+  const mixed = { ...look, fonts: { ascii: 'Calibri', hAnsi: 'Calibri', eastAsia: 'Calibri', cs: 'Calibri' } }
+  const segments = scriptSegments('A中', mixed)
+  const latin = segments[0]
+  const han = segments[1]
+  if (latin === undefined || han === undefined) throw new Error('segments')
+  assert.equal(paintFamily(latin.family, latin.slot, false), 'Calibri')
+  assert.equal(paintFamily(han.family, han.slot, false), '宋体')
+  assert.equal(paintFamily(han.family, han.slot, true), 'Calibri', 'an east Asia face that has the glyphs keeps them')
+  assert.equal(paintFamily(han.family, han.slot, undefined), 'Calibri', 'unloaded metrics stay on the run face')
 })
 
 test('scriptSegments keeps fullwidth forms on the east Asia font and high ANSI on hAnsi', () => {
   const segments = scriptSegments('A１é', look)
   assert.equal(segments.map((segment) => segment.text).join(''), 'A１é')
   assert.equal(segments[0]?.family, 'Times')
+  assert.equal(segments[0]?.slot, 'ascii')
   assert.equal(segments[1]?.family, 'SimSun')
+  assert.equal(segments[1]?.slot, 'eastAsia')
   assert.equal(segments[2]?.family, 'TimesHigh')
+  assert.equal(segments[2]?.slot, 'hAnsi')
+})
+
+test('exact line spacing is not snapped to the document grid', () => {
+  const exact: LineSpacing = { rule: 'exact', pt: pt(14) }
+  assert.equal(snapLinePx(14 * (4 / 3), 20, exact), 14 * (4 / 3))
+  assert.equal(snapLinePx(15, 20, { rule: 'auto', multiple: 1 }), 20)
+  assert.equal(snapLinePx(15, 20, { rule: 'atLeast', pt: pt(10) }), 20)
+  assert.equal(snapLinePx(20, 20, { rule: 'auto', multiple: 1 }), 20)
+  assert.equal(snapLinePx(15, null, { rule: 'auto', multiple: 1 }), 15)
+})
+
+test('cell paragraphs collapse facing spacing, and the first paragraph keeps its space before', () => {
+  assert.equal(collapsedSpaceBefore(10, null), 10)
+  assert.equal(collapsedSpaceBefore(8, 12), 0)
+  assert.equal(collapsedSpaceBefore(10, 6), 4)
+  assert.equal(collapsedSpaceBefore(10, 0), 10)
 })
 
 test('pageBoxStyle converts points to px at 4/3', () => {

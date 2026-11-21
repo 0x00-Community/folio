@@ -53,8 +53,8 @@ export function cssGeneric(family: string): 'serif' | 'sans-serif' {
 
 /**
  * Word's single-spacing box times the paragraph's spacing rule.
- * `metrics` is the line box the resolver honors (OS/2 typo metrics when USE_TYPO_METRICS is set, otherwise hhea);
- * `descender` is negative. A face that did not resolve uses the 1.3 em box the page view used before metrics existed.
+ * The box is the Windows ascent, descent and external leading, or the typographic metrics when
+ * `useTypoMetrics` is set. A face that did not resolve uses the 1.3 em box the page view used before metrics existed.
  */
 export function lineHeightPx(metrics: FontMetrics | undefined, sizePt: Pt, rule: LineSpacing): number {
   const sizePx = (sizePt as number) * PT_TO_PX
@@ -117,9 +117,25 @@ export function withCaretParagraph(doc: Doc): Doc {
 
 function lineBoxRatio(metrics: FontMetrics | undefined): number {
   if (metrics === undefined || !(metrics.unitsPerEm > 0)) return FALLBACK_RATIO
-  const box = metrics.ascender - metrics.descender + metrics.lineGap
+  const box = wordLineBox(metrics)
   if (!(box > 0)) return FALLBACK_RATIO
   return box / metrics.unitsPerEm
+}
+
+/**
+ * Design units of one line, matching `FontManager::word_line_metrics`: typographic metrics when the face asks,
+ * otherwise usWinAscent + usWinDescent plus the hhea line gap the Windows extent does not already cover.
+ * A negative gap is zero. A face with no Windows extent falls back to the honored triple.
+ */
+function wordLineBox(metrics: FontMetrics): number {
+  if (metrics.useTypoMetrics) {
+    return metrics.typoAscender - metrics.typoDescender + Math.max(0, metrics.typoLineGap)
+  }
+  const extent = metrics.winAscent + metrics.winDescent
+  if (!(extent > 0)) return metrics.ascender - metrics.descender + Math.max(0, metrics.lineGap)
+  const hheaExtent = metrics.hheaAscender - metrics.hheaDescender
+  const leading = Math.max(0, metrics.hheaLineGap - (extent - hheaExtent))
+  return extent + leading
 }
 
 function hasParagraph(blocks: readonly Block[]): boolean {

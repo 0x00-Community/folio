@@ -1065,7 +1065,16 @@ fn cell_borders(cell: &rdocx::CellRef<'_>) -> Option<wire::CellBorders> {
 }
 
 fn specified_edge(edge: Option<TableBorderRef<'_>>) -> wire::SpecifiedEdge {
-    edge.map(edge_from_ref)
+    let edge = edge?;
+    // `none` is unset: the table edge shows. `nil` stays null, which is no line.
+    if edge.style() == "none" {
+        return None;
+    }
+    Some(edge_from_parts(
+        edge.style(),
+        edge.size_eighths_pt(),
+        edge.color(),
+    ))
 }
 
 fn edge_from_ref(edge: TableBorderRef<'_>) -> Option<wire::BorderEdge> {
@@ -1155,7 +1164,7 @@ fn import_paragraph(
     }
     Para::new(
         Some(src),
-        direct_props(paragraph),
+        direct_props(doc, paragraph),
         inlines,
         lock,
         section_end,
@@ -1488,7 +1497,7 @@ pub(crate) fn direct_marks(run: &RunRef<'_>) -> Marks {
     marks
 }
 
-pub(crate) fn direct_props(paragraph: &ParagraphRef<'_>) -> ParaProps {
+pub(crate) fn direct_props(doc: &Document, paragraph: &ParagraphRef<'_>) -> ParaProps {
     let (first_line, hanging) = match paragraph.first_line_indent().map(Length::to_pt) {
         Some(value) if value < 0.0 => (None, Some(-value)),
         Some(value) => (Some(value), None),
@@ -1496,12 +1505,17 @@ pub(crate) fn direct_props(paragraph: &ParagraphRef<'_>) -> ParaProps {
     };
     let line = if let Some(multiple) = paragraph.line_spacing_multiple() {
         Some(LineSpacing::Auto { multiple })
-    } else {
-        paragraph.line_spacing().map(|length| {
-            // The public getter does not split exact from atLeast; exact is the rarer rule
-            // and atLeast matches Word's "at least" line box. Resolved looks carry the rule.
-            LineSpacing::AtLeast { pt: length.to_pt() }
+    } else if let Some(length) = paragraph.line_spacing() {
+        // `line_spacing()` is Some only for a direct exact or atLeast length. That direct
+        // rule is merged last into the effective properties, which is where the facade names it.
+        let rule = doc.effective_paragraph_properties(paragraph).line_rule;
+        let pt = length.to_pt();
+        Some(match rule.as_deref() {
+            Some("exact") => LineSpacing::Exact { pt },
+            _ => LineSpacing::AtLeast { pt },
         })
+    } else {
+        None
     };
     ParaProps {
         style: paragraph.style_id().map(str::to_string),
