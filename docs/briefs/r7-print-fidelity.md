@@ -10,6 +10,25 @@ before). Drift after it: `long.docx` 0.97 (55 pages on both sides), `basic.docx`
 (33 against 37, first difference at block 40). `long.docx` and `basic.docx` reach the pass mark. The private
 document does not.
 
+Unit 3, diagnosis of the private document (2026-11-22, `scripts/drift-probe.mjs` in Node and the height report
+of `scripts/e2e/drift.mjs` on the host). Summed block heights: 17,778 pt in the editing view against 18,286 pt in
+the preview. The 167 paragraphs differ by 5 pt in total. The 13 tables differ by 502 pt, 290 of them in the last
+table. Causes, in the order of the pages they move:
+
+1. The editing view breaks a table only between rows (`placeTable` in `pages.ts`). Two rows of the last table are
+   taller than a landscape page (about 1,734 pt and 833 pt against a 442 pt body) and each stays on one page. This
+   is the gap of about four pages to the preview. Not fixed: continuing a row on the next page is a change to the
+   page view's shape, and waits for a decision.
+2. An inline page break (the atom) does not start a page in the editing view. Only `pageBreakBefore` does. The
+   private document has two. In `basic.docx` this is the whole difference (0.91, first difference at block 18).
+3. Row heights are not imported (`w:trHeight`), so exact rows take their content's height.
+4. Cell padding is fixed in `view.css` (2.25 pt and 3.75 pt) where the file's cell margins are 0 and 5.4 pt.
+5. On the preview's side: 13 paragraphs with an `auto` line rule in `linesAndChars` sections are snapped to the
+   28.95 pt grid pitch and are 218 pt taller than in the editing view. Word's PDF has the same baseline pitches
+   as the preview for the body (27.5 pt and 17 pt), so whether Word snaps these 13 is not settled.
+
+`charSpace`, `snapToGrid`, tab stops and footnotes are not among the causes on this document.
+
 Unit 2, first part (2026-11-22). Measured in the runtime with `scripts/e2e/print.mjs`, kit unchanged:
 
 | Document | Faces passed | After adding the faces | After the layout | High-water mark |

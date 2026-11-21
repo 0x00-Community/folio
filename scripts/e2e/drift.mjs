@@ -1,6 +1,7 @@
 // Prints the drift report for the open document. Records numbers only.
 // A low share is a measurement, not a failure. The sandbox cannot reach acde.
 import { readFileSync } from 'node:fs'
+import { heightDrift } from '../../src/editor/drift.ts'
 import { ensureDev, evaluate, until, check, assert, summary } from './acde.mjs'
 
 const ARG_LIMIT = 100 * 1024
@@ -89,12 +90,73 @@ function printReport(label, report) {
   }
 }
 
+function runHeights() {
+  evaluate(`(() => {
+    window.__heights = null
+    window.__heightsError = ''
+    const edit = window.__word.blockHeights()
+    Promise.resolve(window.__word.printHeights()).then(
+      (print) => { window.__heights = { edit, print } },
+      (error) => {
+        window.__heightsError = String(error && error.message || error)
+        window.__heights = { failed: true }
+      },
+    )
+    return 1
+  })()`)
+  return until(`window.__heights !== null`, { timeout: 180000, label: 'heights' })
+}
+
+function takeHeights() {
+  const error = evaluate(`window.__heightsError || ''`)
+  assert(!error, String(error || ''))
+  const raw = evaluate(`window.__heights`)
+  assert(raw && raw.failed !== true, 'heights returned nothing')
+  assert(Array.isArray(raw.edit), 'edit heights')
+  assert(Array.isArray(raw.print), 'print heights')
+  return heightDrift(raw.edit, raw.print)
+}
+
+function roundPt(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'null'
+  return (Math.round(value * 100) / 100).toFixed(2)
+}
+
+function printHeights(label, report) {
+  let edit = 0
+  let print = 0
+  let editN = 0
+  let printN = 0
+  for (const row of report.blocks) {
+    if (typeof row.editPt === 'number') {
+      edit += row.editPt
+      editN += 1
+    }
+    if (typeof row.printPt === 'number') {
+      print += row.printPt
+      printN += 1
+    }
+  }
+  console.log(`${label} height editPt ${roundPt(edit)} n ${editN} printPt ${roundPt(print)} n ${printN}`)
+  for (const kind of report.byKind) {
+    const n = report.blocks.filter((row) => row.kind === kind.kind && row.delta !== null).length
+    console.log(`  ${kind.kind} n ${n} delta ${roundPt(kind.delta)}`)
+  }
+  for (const row of report.largest) {
+    console.log(
+      `  largest ${row.index} ${row.kind} edit ${roundPt(row.editPt)} print ${roundPt(row.printPt)} delta ${roundPt(row.delta)}`,
+    )
+  }
+}
+
 async function measure(label, base64, name) {
   await openDocument(base64, name)
   const opened = evaluate(`window.__wordError || ''`)
   assert(!opened, opened)
   await runDrift()
   printReport(label, takeDrift())
+  await runHeights()
+  printHeights(label, takeHeights())
 }
 
 for (const name of FIXTURES) {

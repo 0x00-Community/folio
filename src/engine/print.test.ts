@@ -150,6 +150,25 @@ test('printLayout of basic.docx with the Songti face returns pages and a PDF', (
     const last = blockPages[blockPages.length - 1]
     assert.ok(last)
     assert.equal(last.lastPage, printed.pageCount() - 1)
+    const boxes = printed.blockBoxes()
+    assert.equal(boxes.length, blockPages.length)
+    for (const entry of boxes) {
+      const placed = blockPages[entry.index]
+      assert.ok(placed)
+      assert.equal(entry.index, placed.index)
+      let previous = -1
+      for (const fragment of entry.fragments) {
+        assert.equal(fragment.height > 0, true, 'fragment height')
+        assert.equal(Number.isFinite(fragment.y), true, 'fragment y')
+        assert.equal(fragment.page >= previous, true, 'page order')
+        previous = fragment.page
+      }
+      if (placed.firstPage === null) assert.equal(entry.fragments.length, 0)
+      else {
+        assert.equal(entry.fragments[0]?.page, placed.firstPage)
+        assert.equal(entry.fragments[entry.fragments.length - 1]?.page, placed.lastPage)
+      }
+    }
     const pdf = printed.pdf()
     assert.equal(Buffer.from(pdf.subarray(0, 5)).toString('latin1'), '%PDF-')
     const png = printed.pagePng(0, 144)

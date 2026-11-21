@@ -1,6 +1,6 @@
 import { window as appWindow } from 'acde:window'
 import type { Word } from './automation/api.ts'
-import type { PrintMeasure } from './app.ts'
+import type { BlockHeight, PrintBlockHeight, PrintMeasure } from './app.ts'
 import type { DriftReport } from './editor/drift.ts'
 import type { Editor } from './editor/editor.ts'
 import { insertText, setSelection } from './editor/edit.ts'
@@ -36,6 +36,8 @@ function installHook(app: {
   memoryBytes(): number
   printLayout(): Promise<PrintMeasure>
   drift(): Promise<DriftReport>
+  blockHeights(): readonly BlockHeight[]
+  printHeights(): Promise<readonly PrintBlockHeight[]>
 }): void {
   // There is no production build flag. These hooks are how the e2e reaches save, a forced verify
   // failure, and beforeclose. `acde act w1 close` waits until the window is gone, so a handler that
@@ -69,6 +71,12 @@ function installHook(app: {
     drift() {
       return app.drift()
     },
+    blockHeights() {
+      return app.blockHeights()
+    },
+    printHeights() {
+      return app.printHeights()
+    },
   }
 }
 
@@ -95,6 +103,8 @@ declare global {
       memoryBytes(): number
       printLayout(): Promise<PrintMeasure>
       drift(): Promise<DriftReport>
+      blockHeights(): readonly BlockHeight[]
+      printHeights(): Promise<readonly PrintBlockHeight[]>
     }
   }
 }

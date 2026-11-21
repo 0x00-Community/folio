@@ -90,6 +90,19 @@ export type BlockPageInfo = {
   readonly lastPage: number | null
 }
 
+/** One placed fragment. `page` is 0-based. `y` and `height` are points. */
+export type BlockFragmentInfo = {
+  readonly page: number
+  readonly y: number
+  readonly height: number
+}
+
+/** Fragments of one body block, in page order. Empty when the block was not placed. */
+export type BlockBoxInfo = {
+  readonly index: number
+  readonly fragments: readonly BlockFragmentInfo[]
+}
+
 /** One layout. Preview and PDF both read it. `free` drops the wasm object. */
 export type PrintLayout = {
   pageCount(): number
@@ -98,6 +111,7 @@ export type PrintLayout = {
   pdf(): Uint8Array
   fonts(): readonly PrintFontInfo[]
   blockPages(): readonly BlockPageInfo[]
+  blockBoxes(): readonly BlockBoxInfo[]
   free(): void
 }
 
@@ -1719,6 +1733,13 @@ function wrapLayout(layout: WasmLayout): PrintLayout {
         throw asPrintError(error)
       }
     },
+    blockBoxes() {
+      try {
+        return parseBlockBoxes(layout.block_boxes())
+      } catch (error) {
+        throw asPrintError(error)
+      }
+    },
     free() {
       layout.free()
     },
@@ -1745,6 +1766,33 @@ function parseBlockPages(json: string): BlockPageInfo[] {
       lastPage: pageOrNull(item.lastPage),
     }
   })
+}
+
+function parseBlockBoxes(json: string): BlockBoxInfo[] {
+  const parsed = parseJson(json)
+  if (!Array.isArray(parsed)) throw renderError('block boxes')
+  return parsed.map((item, index) => {
+    if (!isRecord(item) || item.index !== index || !Array.isArray(item.fragments)) throw renderError('block boxes')
+    let previous = -1
+    const fragments = item.fragments.map((fragment) => {
+      if (!isRecord(fragment)) throw renderError('block boxes')
+      const page = pageIndex(fragment.page)
+      if (page < previous) throw renderError('block boxes')
+      previous = page
+      return { page, y: finiteNumber(fragment.y), height: finiteNumber(fragment.height) }
+    })
+    return { index, fragments }
+  })
+}
+
+function pageIndex(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throw renderError('block boxes')
+  return value
+}
+
+function finiteNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw renderError('block boxes')
+  return value
 }
 
 function pageOrNull(value: unknown): number | null {

@@ -57,6 +57,29 @@ pub struct BlockPage {
     pub last_page: Option<u32>,
 }
 
+/// One placed fragment of a body block.
+///
+/// `page` is 0-based, matching [`BlockPage`]. `y` and `height` are the
+/// fragment's top and size in points, copied from `body_layout_fragments`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockFragment {
+    pub page: u32,
+    pub y: f64,
+    pub height: f64,
+}
+
+/// One model body block and the fragments the layout placed, in page order.
+///
+/// The list is empty when nothing was placed, the same case as a [`BlockPage`]
+/// with both pages absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockBox {
+    pub index: u32,
+    pub fragments: Vec<BlockFragment>,
+}
+
 /// One glyph run as the PDF paints it. Baseline is points from the page top.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaintedSpan {
@@ -72,6 +95,7 @@ pub struct PaintedSpan {
 pub struct PrintLayout {
     layout: oxml_layout::LayoutResult,
     block_pages: Vec<BlockPage>,
+    block_boxes: Vec<BlockBox>,
 }
 
 impl PrintLayout {
@@ -124,6 +148,11 @@ impl PrintLayout {
 
     pub fn block_pages(&self) -> &[BlockPage] {
         &self.block_pages
+    }
+
+    /// Fragments of each body block, in body order. See [`BlockBox`].
+    pub fn block_boxes(&self) -> &[BlockBox] {
+        &self.block_boxes
     }
 
     /// Glyph runs in paint order, with the face the PDF embeds for each.
@@ -239,6 +268,15 @@ impl PrintLayout {
             })
         })
     }
+
+    #[wasm_bindgen(js_name = block_boxes)]
+    pub fn block_boxes_js(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.block_boxes).map_err(|error| {
+            JsValue::from(PrintError::Render {
+                detail: format!("block boxes json: {error}"),
+            })
+        })
+    }
 }
 
 impl From<PrintError> for JsValue {
@@ -269,25 +307,54 @@ pub(crate) fn lay_out(
     let laid = document
         .layout_with_fonts_aliases_and_bundled_fallback(fonts, aliases)
         .map_err(classify)?;
-    let block_pages = (0..body_blocks)
-        .map(|index| {
-            let (first_page, last_page) = match laid.body_layout_fragments(index) {
-                Some(fragments) => {
-                    pages_from_physical(fragments.iter().map(|fragment| fragment.physical_page))
-                }
-                None => (None, None),
-            };
-            BlockPage {
-                index: u32::try_from(index).expect("body index fits in u32"),
-                first_page,
-                last_page,
+    let mut block_pages = Vec::with_capacity(body_blocks);
+    let mut block_boxes = Vec::with_capacity(body_blocks);
+    for index in 0..body_blocks {
+        let index_u32 = u32::try_from(index).expect("body index fits in u32");
+        let found = laid.body_layout_fragments(index);
+        let (first_page, last_page) = match &found {
+            Some(fragments) => {
+                pages_from_physical(fragments.iter().map(|fragment| fragment.physical_page))
             }
-        })
-        .collect();
+            None => (None, None),
+        };
+        let mut placed = Vec::new();
+        if let Some(fragments) = &found {
+            for fragment in fragments.iter() {
+                if let Some(placed_fragment) =
+                    placed_fragment(fragment.physical_page, fragment.y, fragment.height)
+                {
+                    placed.push(placed_fragment);
+                }
+            }
+        }
+        placed.sort_by_key(|fragment| fragment.page);
+        block_pages.push(BlockPage {
+            index: index_u32,
+            first_page,
+            last_page,
+        });
+        block_boxes.push(BlockBox {
+            index: index_u32,
+            fragments: placed,
+        });
+    }
     Ok(PrintLayout {
         layout: laid.layout,
         block_pages,
+        block_boxes,
     })
+}
+
+/// A 1-based physical page and a finite box become one fragment. Page 0 is
+/// not placed. Non-finite coordinates are left out rather than invented.
+fn placed_fragment(physical_page: usize, y: f64, height: f64) -> Option<BlockFragment> {
+    let page = physical_page.checked_sub(1)?;
+    let page = u32::try_from(page).ok()?;
+    if !y.is_finite() || !height.is_finite() {
+        return None;
+    }
+    Some(BlockFragment { page, y, height })
 }
 
 /// 1-based physical pages become a 0-based first and last. A page number of 0
@@ -354,6 +421,7 @@ mod tests {
         PrintLayout {
             layout: oxml_layout::LayoutResult::new(vec![page], Vec::new(), None, Vec::new()),
             block_pages: Vec::new(),
+            block_boxes: Vec::new(),
         }
     }
 
@@ -393,6 +461,7 @@ mod tests {
         assert_eq!((width, height), (612.0, 792.0));
         assert_eq!(layout.page_count(), 1);
         assert!(layout.block_pages().is_empty());
+        assert!(layout.block_boxes().is_empty());
     }
 
     #[test]
@@ -416,5 +485,39 @@ mod tests {
         assert_eq!(pages_from_physical([1, 3, 2]), (Some(0), Some(2)));
         assert_eq!(pages_from_physical([0]), (None, None));
         assert_eq!(pages_from_physical(std::iter::empty()), (None, None));
+    }
+
+    #[test]
+    fn block_box_json_lists_fragments_in_the_order_they_were_stored() {
+        let placed = BlockBox {
+            index: 1,
+            fragments: vec![BlockFragment {
+                page: 0,
+                y: 72.0,
+                height: 18.5,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&placed).expect("json"),
+            "{\"index\":1,\"fragments\":[{\"page\":0,\"y\":72.0,\"height\":18.5}]}"
+        );
+        let empty = BlockBox {
+            index: 4,
+            fragments: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).expect("json"),
+            "{\"index\":4,\"fragments\":[]}"
+        );
+        assert_eq!(placed_fragment(0, 10.0, 12.0), None);
+        assert_eq!(placed_fragment(1, f64::NAN, 12.0), None);
+        assert_eq!(
+            placed_fragment(2, 36.0, 15.0),
+            Some(BlockFragment {
+                page: 1,
+                y: 36.0,
+                height: 15.0,
+            })
+        );
     }
 }

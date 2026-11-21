@@ -536,6 +536,56 @@ fn render_song(label: &str, face: &[u8]) -> Result<String, String> {
     ))
 }
 
+fn assert_block_boxes(layout: &PrintLayout, body_len: usize) {
+    let boxes = layout.block_boxes();
+    let pages = layout.block_pages();
+    assert_eq!(boxes.len(), body_len, "one box list per body block");
+    assert_eq!(pages.len(), boxes.len());
+    for (index, entry) in boxes.iter().enumerate() {
+        assert_eq!(entry.index as usize, index);
+        let page = &pages[index];
+        assert_eq!(page.index, entry.index);
+        let mut previous = None;
+        for fragment in &entry.fragments {
+            assert!(
+                fragment.height > 0.0,
+                "block {index} fragment height {}",
+                fragment.height
+            );
+            assert!(fragment.y.is_finite(), "block {index} y is not finite");
+            assert!(
+                fragment.page < layout.page_count(),
+                "block {index} fragment page {} is past the last page",
+                fragment.page
+            );
+            if let Some(earlier) = previous {
+                assert!(
+                    fragment.page >= earlier,
+                    "block {index} fragment page {} follows {earlier}",
+                    fragment.page
+                );
+            }
+            previous = Some(fragment.page);
+        }
+        match (
+            page.first_page,
+            entry.fragments.first(),
+            entry.fragments.last(),
+        ) {
+            (None, None, None) => {}
+            (Some(first), Some(start), Some(end)) => {
+                assert_eq!(start.page, first, "block {index} first fragment");
+                assert_eq!(
+                    end.page,
+                    page.last_page.expect("last page"),
+                    "block {index} last fragment"
+                );
+            }
+            _ => panic!("block {index} pages and fragments disagree"),
+        }
+    }
+}
+
 fn assert_block_pages(layout: &PrintLayout, body_len: usize) {
     let pages = layout.block_pages();
     assert_eq!(pages.len(), body_len, "one entry per body block");
@@ -645,6 +695,7 @@ fn block_pages_follow_the_body_and_an_insert_at_index_3() {
         .print_layout(&patch_json(&keep_patch(&imported)))
         .unwrap_or_else(|error| panic!("{error:?}"));
     assert_block_pages(&layout, imported.body.len());
+    assert_block_boxes(&layout, imported.body.len());
     let pdf = write_pdf("basic-block-pages", &layout.pdf().expect("pdf"));
     assert_paragraph_on_page(layout.block_pages(), &imported.body, OLD_SENTENCE, &pdf);
 

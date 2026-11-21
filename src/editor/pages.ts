@@ -1608,6 +1608,24 @@ export class PageView {
     if (this.host.style.overflowAnchor === 'none') this.host.style.overflowAnchor = ''
   }
 
+  /**
+   * Height in points of each body block, from the measure cache the paginator reads.
+   * Does not measure. A block the paginator has not reached is null. Blocks already
+   * measured into the hidden host are present even when their page is not mounted.
+   */
+  blockHeights(): readonly { index: number; kind: 'p' | 'table' | 'opaque'; heightPt: number | null }[] {
+    const doc = this.doc
+    if (!doc) return []
+    return doc.body.map((block, index) => {
+      const heightPx = this.measures.get(block)?.heightPx
+      return {
+        index,
+        kind: block.kind,
+        heightPt: heightPx !== undefined && Number.isFinite(heightPx) ? heightPx / PT_TO_PX : null,
+      }
+    })
+  }
+
   /** Page index (0-based) holding a position, from the layout, without touching the DOM. */
   pageOf(pos: Pos): number {
     const place = this.index().get(pos.p)

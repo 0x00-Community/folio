@@ -216,6 +216,15 @@ export class Editor implements EditingSurface {
     return pageOfBlock(this.view.layout, id)
   }
 
+  /**
+   * Cached block heights in points. Reads the paginator's measure cache and does not
+   * measure, so a block past the measured chunk is null.
+   */
+  blockHeights(): readonly { index: number; kind: 'p' | 'table' | 'opaque'; heightPt: number | null }[] {
+    if (this.destroyed) return []
+    return this.view.blockHeights()
+  }
+
   setZoom(zoom: number): void {
     if (this.destroyed) return
     this.view.setZoom(zoom)

@@ -8,8 +8,8 @@ import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, ins
 import { listMarkers } from './editor/derive.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
-import { drift } from './editor/drift.ts'
-import type { DriftReport } from './editor/drift.ts'
+import { drift, heightKind } from './editor/drift.ts'
+import type { DriftReport, HeightKind } from './editor/drift.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, documentHasHan, engineBootMs, loadEngine, saveTampered, sessionFaces, wasmMemoryBytes } from './engine/engine.ts'
 import type { Opened, PrintFontInfo, PrintLayout } from './engine/engine.ts'
 import { ensurePrintFonts } from './fonts.ts'
@@ -62,6 +62,27 @@ export interface WordApp {
    * view's page per body block. Nothing calls it until the hook does.
    */
   drift(): Promise<DriftReport>
+  /**
+   * Dev hook: cached body-block heights in points, and the kind. Does not measure.
+   * A block the paginator has not reached is a null height.
+   */
+  blockHeights(): readonly BlockHeight[]
+  /**
+   * Dev hook: one print layout, and the summed fragment height of each body block.
+   * Null when that block was not placed. Nothing calls it until the hook does.
+   */
+  printHeights(): Promise<readonly PrintBlockHeight[]>
+}
+
+export type BlockHeight = {
+  readonly index: number
+  readonly kind: HeightKind
+  readonly heightPt: number | null
+}
+
+export type PrintBlockHeight = {
+  readonly index: number
+  readonly heightPt: number | null
 }
 
 export type PrintMeasure = {
@@ -733,6 +754,34 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     }
   }
 
+  function measuredBlockHeights(): readonly BlockHeight[] {
+    return current().blockHeights().map((row) => ({
+      index: row.index,
+      kind: heightKind(row.kind),
+      heightPt: row.heightPt,
+    }))
+  }
+
+  async function measurePrintHeights(): Promise<readonly PrintBlockHeight[]> {
+    await whenLaidOut(current())
+    const editorNow = current()
+    const doc = editorNow.state.doc
+    await ensurePrintFonts(editorNow.source, editorNow.source.fontsUsed(doc), documentHasHan(doc))
+    const layout = editorNow.source.printLayout(doc)
+    try {
+      return layout.blockBoxes().map((box) => {
+        let heightPt: number | null = null
+        if (box.fragments.length > 0) {
+          heightPt = 0
+          for (const fragment of box.fragments) heightPt += fragment.height
+        }
+        return { index: box.index, heightPt }
+      })
+    } finally {
+      layout.free()
+    }
+  }
+
   async function measureDrift(): Promise<DriftReport> {
     await whenLaidOut(current())
     const editorNow = current()
@@ -838,6 +887,8 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     memoryBytes: () => wasmMemoryBytes(),
     printLayout: measurePrint,
     drift: measureDrift,
+    blockHeights: measuredBlockHeights,
+    printHeights: measurePrintHeights,
   }
 }
 
