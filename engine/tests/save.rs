@@ -1629,6 +1629,8 @@ fn blank_row(template: &Row) -> Row {
         src: None,
         header: false,
         cant_split: false,
+        height_pt: None,
+        height_rule: None,
         cells: template
             .cells
             .iter()
@@ -1638,6 +1640,7 @@ fn blank_row(template: &Row) -> Row {
                 v_merge: None,
                 blocks: vec![Block::P(empty_para())],
                 borders: None,
+                margins: None,
             })
             .collect(),
     }
@@ -1656,6 +1659,8 @@ fn fresh_table(rows: usize, cols: usize, width: f64) -> Table {
             src: None,
             header: false,
             cant_split: false,
+            height_pt: None,
+            height_rule: None,
             cells: (0..cols)
                 .map(|_| Cell {
                     src: None,
@@ -1663,6 +1668,7 @@ fn fresh_table(rows: usize, cols: usize, width: f64) -> Table {
                     v_merge: None,
                     blocks: vec![Block::P(empty_para())],
                     borders: None,
+                    margins: None,
                 })
                 .collect(),
         });
@@ -1838,6 +1844,7 @@ fn insert_grid_column(table: &mut Table, at: usize) {
             v_merge: None,
             blocks: vec![Block::P(empty_para())],
             borders: None,
+            margins: None,
         };
         row.cells.insert(at.min(row.cells.len()), cell);
     }

@@ -386,6 +386,30 @@ fn basic_without_caller_font_uses_bundled_substitutes() {
 }
 
 #[test]
+fn layout_shares_session_font_bytes() {
+    let mut session = open("basic.docx");
+    let face = song_face(&cjk_font());
+    add_song(&mut session, &face);
+    session.add_font("UnusedFace", b"unused-face-bytes-not-shared");
+    let imported = imported_of(&session);
+    let layout = session
+        .print_layout(&patch_json(&keep_patch(&imported)))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    let used = session.font_strong_count("宋体").expect("song face");
+    let unused = session
+        .font_strong_count("UnusedFace")
+        .expect("unused face");
+    assert!(
+        used > 1,
+        "a face the text uses stays shared while the layout is alive: {used}"
+    );
+    assert_eq!(unused, 1, "an unused face is not held by the layout");
+    drop(layout);
+    assert_eq!(session.font_strong_count("宋体"), Some(1));
+    assert_eq!(session.font_strong_count("UnusedFace"), Some(1));
+}
+
+#[test]
 fn basic_with_songti_face_embeds_the_face_and_the_text() {
     let collection = cjk_font();
     let face = song_face(&collection);

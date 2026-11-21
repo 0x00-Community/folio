@@ -9,6 +9,7 @@ import type {
   BorderEdge,
   Cell,
   CellBorders,
+  CellMargins,
   Doc,
   Hex,
   HighlightName,
@@ -780,6 +781,7 @@ function toWireTable(table: Table): wire.Table {
   const out: wire.Table = { kind: 'table', gridPt: [...table.grid], rows: table.rows.map(toWireRow) }
   if (table.src !== null) out.src = table.src
   if (table.props.borders) out.borders = toWireTableBorders(table.props.borders)
+  if (table.props.margins) out.margins = toWireMargins(table.props.margins)
   return out
 }
 
@@ -806,6 +808,8 @@ function toWireRow(row: Row): wire.Row {
     cells: row.cells.map(toWireCell),
   }
   if (row.src !== null) out.src = row.src
+  if (row.props.heightPt !== undefined) out.heightPt = row.props.heightPt
+  if (row.props.heightRule !== undefined) out.heightRule = row.props.heightRule
   return out
 }
 
@@ -814,6 +818,16 @@ function toWireCell(cell: Cell): wire.Cell {
   if (cell.src !== null) out.src = cell.src
   if (cell.vMerge) out.vMerge = cell.vMerge
   if (cell.borders) out.borders = toWireCellBorders(cell.borders)
+  if (cell.margins) out.margins = toWireMargins(cell.margins)
+  return out
+}
+
+function toWireMargins(margins: CellMargins): wire.CellMargins {
+  const out: wire.CellMargins = {}
+  if (margins.top !== undefined) out.top = margins.top
+  if (margins.right !== undefined) out.right = margins.right
+  if (margins.bottom !== undefined) out.bottom = margins.bottom
+  if (margins.left !== undefined) out.left = margins.left
   return out
 }
 
@@ -1001,11 +1015,15 @@ function modelSpacing(props: wire.ParaProps): ParaProps['spacing'] | undefined {
 function modelTable(table: wire.Table, ids: Ids): Table {
   ids.table += 1
   const borders = table.borders ? modelTableBorders(table.borders) : undefined
+  const margins = table.margins ? modelMargins(table.margins) : undefined
   return {
     kind: 'table',
     id: tableId(`t${ids.table}`),
     src: typeof table.src === 'number' ? (table.src as TableSrc) : null,
-    props: borders === undefined ? {} : { borders },
+    props: {
+      ...(borders === undefined ? {} : { borders }),
+      ...(margins === undefined ? {} : { margins }),
+    },
     grid: table.gridPt.map(pt),
     rows: table.rows.map((row) => modelRow(row, ids)),
   }
@@ -1028,22 +1046,41 @@ function modelEdge(edge: wire.BorderEdge): BorderEdge {
 }
 
 function modelRow(row: wire.Row, ids: Ids): Row {
+  const heightPt = typeof row.heightPt === 'number' ? pt(row.heightPt) : undefined
+  const heightRule = row.heightRule === 'exact' || row.heightRule === 'atLeast' ? row.heightRule : undefined
   return {
     src: typeof row.src === 'number' ? (row.src as RowSrc) : null,
-    props: { header: row.header, cantSplit: row.cantSplit },
+    props: {
+      header: row.header,
+      cantSplit: row.cantSplit,
+      ...(heightPt === undefined ? {} : { heightPt }),
+      ...(heightRule === undefined ? {} : { heightRule }),
+    },
     cells: row.cells.map((cell) => modelCell(cell, ids)),
   }
 }
 
 function modelCell(cell: wire.Cell, ids: Ids): Cell {
   const borders = cell.borders ? modelCellBorders(cell.borders) : undefined
+  const margins = cell.margins ? modelMargins(cell.margins) : undefined
   return {
     src: typeof cell.src === 'number' ? (cell.src as CellSrc) : null,
     span: cell.span,
     vMerge: cell.vMerge === 'restart' || cell.vMerge === 'continue' ? cell.vMerge : null,
     ...(borders === undefined ? {} : { borders }),
+    ...(margins === undefined ? {} : { margins }),
     blocks: cell.blocks.map((block) => modelBlock(block, ids)),
   }
+}
+
+function modelMargins(margins: wire.CellMargins): CellMargins | undefined {
+  const out: { top?: Pt; right?: Pt; bottom?: Pt; left?: Pt } = {}
+  if (typeof margins.top === 'number') out.top = pt(margins.top)
+  if (typeof margins.right === 'number') out.right = pt(margins.right)
+  if (typeof margins.bottom === 'number') out.bottom = pt(margins.bottom)
+  if (typeof margins.left === 'number') out.left = pt(margins.left)
+  if (out.top === undefined && out.right === undefined && out.bottom === undefined && out.left === undefined) return undefined
+  return out
 }
 
 function modelCellBorders(borders: wire.CellBorders): CellBorders | undefined {
@@ -1351,6 +1388,8 @@ function parseTable(record: Record<string, unknown>, path: string): wire.Table {
   if (record.borders !== undefined && record.borders !== null) {
     out.borders = parseTableBorders(record.borders, `${path}.borders`)
   }
+  const margins = parseMargins(record.margins, `${path}.margins`)
+  if (margins !== undefined) out.margins = margins
   return out
 }
 
@@ -1386,12 +1425,39 @@ function parseBorderStyle(value: unknown, path: string): wire.BorderStyleName {
 
 function parseRow(value: unknown, path: string): wire.Row {
   const record = rec(value, path)
-  return {
+  const out: wire.Row = {
     src: optNum(record.src, `${path}.src`),
     header: bool(record.header, `${path}.header`),
     cantSplit: bool(record.cantSplit, `${path}.cantSplit`),
     cells: arr(record.cells, `${path}.cells`).map((item, index) => parseCell(item, `${path}.cells[${index}]`)),
   }
+  if (record.heightPt !== undefined && record.heightPt !== null) out.heightPt = finite(record.heightPt, `${path}.heightPt`)
+  const rule = parseHeightRule(record.heightRule, `${path}.heightRule`)
+  if (rule !== undefined) out.heightRule = rule
+  return out
+}
+
+function parseHeightRule(value: unknown, path: string): 'exact' | 'atLeast' | undefined {
+  if (value === undefined || value === null) return undefined
+  const rule = text(value, path)
+  if (rule === 'exact' || rule === 'atLeast') return rule
+  fail(path, 'unknown row height rule')
+}
+
+function parseMargins(value: unknown, path: string): wire.CellMargins | undefined {
+  if (value === undefined || value === null) return undefined
+  const record = rec(value, path)
+  const out: wire.CellMargins = {}
+  const top = optNum(record.top, `${path}.top`)
+  const right = optNum(record.right, `${path}.right`)
+  const bottom = optNum(record.bottom, `${path}.bottom`)
+  const left = optNum(record.left, `${path}.left`)
+  if (typeof top === 'number') out.top = top
+  if (typeof right === 'number') out.right = right
+  if (typeof bottom === 'number') out.bottom = bottom
+  if (typeof left === 'number') out.left = left
+  if (out.top === undefined && out.right === undefined && out.bottom === undefined && out.left === undefined) return undefined
+  return out
 }
 
 function parseCell(value: unknown, path: string): wire.Cell {
@@ -1405,6 +1471,8 @@ function parseCell(value: unknown, path: string): wire.Cell {
   if (record.borders !== undefined && record.borders !== null) {
     out.borders = parseCellBorders(record.borders, `${path}.borders`)
   }
+  const margins = parseMargins(record.margins, `${path}.margins`)
+  if (margins !== undefined) out.margins = margins
   return out
 }
 

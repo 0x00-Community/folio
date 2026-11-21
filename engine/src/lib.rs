@@ -155,6 +155,16 @@ impl Session {
         }
     }
 
+    /// Strong count of the bytes stored for `family`.
+    ///
+    /// A live [`print::PrintLayout`] holds one clone of each face the text uses.
+    pub fn font_strong_count(&self, family: &str) -> Option<usize> {
+        self.fonts
+            .iter()
+            .find(|font| font.family == family)
+            .map(|font| Arc::strong_count(&font.bytes))
+    }
+
     /// Map a requested family onto a family passed to `add_font`.
     ///
     /// The same requested name replaces its previous target.
@@ -184,10 +194,10 @@ impl Session {
             .map_err(|error| print::PrintFailure::Write(error.to_string()))?;
         let written = write::write(&self.doc, &self.sources, &self.imported, &patch)
             .map_err(|error| print::PrintFailure::Write(error.detail()))?;
-        let fonts: Vec<(&str, &[u8])> = self
+        let fonts: Vec<(&str, Arc<[u8]>)> = self
             .fonts
             .iter()
-            .map(|font| (font.family.as_str(), font.bytes.as_ref()))
+            .map(|font| (font.family.as_str(), Arc::clone(&font.bytes)))
             .collect();
         let aliases: Vec<(&str, &str)> = self
             .font_aliases
@@ -266,6 +276,9 @@ impl Session {
         serde_json::to_string(&look).expect("run look is JSON")
     }
 
+    /// The page's bytes are copied once, into this slice. `Arc::from` on a
+    /// `Vec<u8>` or a `Box<[u8]>` copies again (nightly and 1.97.1), so the
+    /// binding does not take ownership.
     #[wasm_bindgen(js_name = add_font)]
     pub fn add_font_js(&mut self, family: &str, bytes: &[u8]) {
         self.add_font(family, bytes);

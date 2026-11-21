@@ -99,6 +99,14 @@ export type TableBorders = {
   insideV: BorderEdge
 }
 
+/** A missing edge is not set. The view uses the table's edge, then Word's default. */
+export type CellMargins = {
+  top?: number
+  right?: number
+  bottom?: number
+  left?: number
+}
+
 /** A missing key is an edge the file does not mention. Null is an edge with no line. */
 export type CellBorders = {
   top?: BorderEdge
@@ -113,6 +121,7 @@ export type Table = {
   gridPt: number[]
   rows: Row[]
   borders?: TableBorders | null
+  margins?: CellMargins | null
 }
 
 export type Row = {
@@ -120,6 +129,8 @@ export type Row = {
   header: boolean
   cantSplit: boolean
   cells: Cell[]
+  heightPt?: number
+  heightRule?: 'exact' | 'atLeast'
 }
 
 export type Cell = {
@@ -128,6 +139,7 @@ export type Cell = {
   vMerge?: string | null
   blocks: Block[]
   borders?: CellBorders | null
+  margins?: CellMargins | null
 }
 
 export type Opaque = {

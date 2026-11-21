@@ -309,6 +309,19 @@ pub struct CellBorders {
     pub right: SpecifiedEdge,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CellMargins {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Table {
@@ -319,6 +332,8 @@ pub struct Table {
     pub rows: Vec<Row>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borders: Option<TableBorders>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margins: Option<CellMargins>,
 }
 
 impl Table {
@@ -329,6 +344,7 @@ impl Table {
             grid_pt,
             rows,
             borders: None,
+            margins: None,
         }
     }
 }
@@ -340,6 +356,10 @@ pub struct Row {
     pub src: Option<RowSrc>,
     pub header: bool,
     pub cant_split: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height_rule: Option<String>,
     pub cells: Vec<Cell>,
 }
 
@@ -354,6 +374,8 @@ pub struct Cell {
     pub blocks: Vec<Block>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borders: Option<CellBorders>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margins: Option<CellMargins>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

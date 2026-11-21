@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { checkDoc, flatText, indexOf } from '../model.ts'
-import type { Block, Doc, Marks, Paragraph, RunLook, Table, TextRun } from '../model.ts'
+import type { Block, Doc, Marks, Paragraph, Row, RunLook, Table, TextRun } from '../model.ts'
 import {
   apply,
   changeIndentLevel,
@@ -14,6 +14,7 @@ import {
   deleteSelection,
   deleteTable,
   HISTORY_LIMIT,
+  INSERTED_CELL_MARGINS,
   INSERTED_TABLE_BORDERS,
   initialState,
   insertColumn,
@@ -418,6 +419,7 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   assert.equal(flatText(asParagraph(middle.doc.body[0])), 'ab', 'a table in the middle keeps the head')
   const inserted = asTable(middle.doc.body[1])
   assert.deepEqual(inserted.props.borders, INSERTED_TABLE_BORDERS, 'an inserted table has the borders save writes')
+  assert.deepEqual(inserted.props.margins, INSERTED_CELL_MARGINS, 'an inserted table keeps the old 3px 5px padding')
   assert.equal(inserted.rows.length, 2, 'the table has the requested rows')
   assert.equal(inserted.grid.length, 2, 'the table has the requested columns')
   const firstCell = inserted.rows[0]?.cells[0]?.blocks[0]
@@ -489,6 +491,7 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   const grown = run(initialState(makeDoc([rows])), insertRow('below'))
   assert.equal(asTable(grown.doc.body[0]).rows.length, 3, 'insertRow adds a row')
   assert.equal(asTable(grown.doc.body[0]).rows[0], top, 'insertRow keeps the other rows')
+  assert.deepEqual(asTable(grown.doc.body[0]).rows[2]?.props, {}, 'a row inserted beside one with no height has none')
 
   const wide = table('wide', [row([cell([paragraph('a', [text('a')])]), cell([paragraph('b', [text('b')])])])], [72, 72])
   const added = run(initialState(makeDoc([wide])), insertColumn('right'))
@@ -503,6 +506,16 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   const beside = run(caretAt(initialState(makeDoc([para, single])), only.id, 0), deleteColumns())
   assert.equal(beside.doc.body.length, 1, 'the last column takes the table with it')
   assert.equal(beside.doc.body[0], para, 'the paragraph outside the table stays')
+  const exact: Row = { ...row([cell([paragraph('h', [text('h')])])]), props: { heightPt: pt(36), heightRule: 'exact' } }
+  const copied = run(initialState(makeDoc([table('h', [exact])])), insertRow('below'))
+  const copiedRows = asTable(copied.doc.body[0]).rows
+  assert.equal(copiedRows[1]?.props.heightPt, pt(36), 'insertRow copies the neighbour height')
+  assert.equal(copiedRows[1]?.props.heightRule, 'exact', 'insertRow copies the neighbour rule')
+  assert.equal(copiedRows[1]?.props.header, undefined, 'insertRow does not copy the header flag')
+  const least: Row = { ...row([cell([paragraph('m', [text('m')])])]), props: { heightPt: pt(20), heightRule: 'atLeast' } }
+  const copiedLeast = run(initialState(makeDoc([table('m', [least])])), insertRow('above'))
+  assert.equal(asTable(copiedLeast.doc.body[0]).rows[0]?.props.heightRule, 'atLeast')
+
   const dropped = run(initialState(makeDoc([para, wide])), deleteTable(wide.id))
   assert.equal(dropped.doc.body.length, 1, 'deleteTable removes the table')
   assert.equal(dropped.doc.body[0], para, 'the paragraph outside the table stays')

@@ -42,6 +42,8 @@ export interface Measure {
   readonly keepLines: boolean
   readonly pageBreakBefore: boolean
   readonly widowControl: boolean
+  /** Y of each inline page break, relative to the block top. Paragraphs only. */
+  readonly inlineBreaks?: Float32Array
 }
 
 interface LineRect {
@@ -136,6 +138,7 @@ export function measureElement(el: HTMLElement, zoom: number): Measure {
   const lastLine = lineBottoms.length > 0 ? (lineBottoms[lineBottoms.length - 1] ?? 0) : 0
   const lastRow = rowBottoms && rowBottoms.length > 0 ? (rowBottoms[rowBottoms.length - 1] ?? 0) : 0
   const headerRows = Number(el.dataset.headerRows ?? '0')
+  const inlineBreaks = pageBreakBottoms(el, box.top, z)
   return {
     widthPx: el.offsetWidth || box.width / z,
     heightPx: Math.max(box.height / z, lastLine, lastRow),
@@ -148,7 +151,21 @@ export function measureElement(el: HTMLElement, zoom: number): Measure {
     keepLines: el.dataset.keepLines === '1',
     pageBreakBefore: el.dataset.pageBreakBefore === '1',
     widowControl: el.dataset.widow === '1',
+    ...(inlineBreaks ? { inlineBreaks } : {}),
   }
+}
+
+function pageBreakBottoms(el: HTMLElement, boxTop: number, zoom: number): Float32Array | undefined {
+  if (!el.classList.contains('p')) return undefined
+  const atoms = el.querySelectorAll(':scope > .atom[data-atom="pageBreak"]')
+  if (atoms.length === 0) return undefined
+  const breaks = new Float32Array(atoms.length)
+  for (let i = 0; i < atoms.length; i++) {
+    const atom = atoms[i]
+    if (!(atom instanceof HTMLElement)) continue
+    breaks[i] = (atom.getBoundingClientRect().bottom - boxTop) / zoom
+  }
+  return breaks
 }
 
 export interface Slice {
@@ -317,6 +334,26 @@ function spaceAfterBefore(body: readonly Block[], sectionOf: readonly number[], 
   return measure(prev, section)?.spaceAfterPx ?? 0
 }
 
+function firstBreakAfter(m: Measure, y: number): number | null {
+  const breaks = m.inlineBreaks
+  if (!breaks || breaks.length === 0) return null
+  let found: number | null = null
+  for (let i = 0; i < breaks.length; i++) {
+    const at = breaks[i] ?? 0
+    if (at <= y + EPS) continue
+    if (found === null || at < found) found = at
+  }
+  return found
+}
+
+/** The slice finished the block and a page break sits at that end, so the next block starts a new page. */
+function endsWithInlineBreak(m: Measure, placed: Placed): boolean {
+  if (placed.continueY !== null) return false
+  const at = firstBreakAfter(m, placed.slice.y0)
+  if (at === null) return false
+  return at >= m.heightPx - EPS && at <= placed.slice.y1 + EPS
+}
+
 function placeLines(
   id: BlockId,
   m: Measure,
@@ -330,20 +367,30 @@ function placeLines(
   const n = bottoms.length
   let start = y0
   if (skip > 0 && start <= EPS) start = skip
-  if (m.keepLines && !atTop && start <= EPS && m.heightPx - start <= pageBody + EPS && m.heightPx - start > available + EPS) {
+  // A page break ends the page even when later lines would fit. keepLines stops at the break.
+  const breakAt = firstBreakAfter(m, start)
+  const splitAt = breakAt !== null && breakAt < m.heightPx - EPS ? breakAt : null
+  if (splitAt !== null && splitAt - start <= available + EPS) {
+    return fit(id, start, splitAt, 0, splitAt - start, splitAt)
+  }
+  const limit = splitAt ?? m.heightPx
+  if (m.keepLines && !atTop && start <= EPS && limit - start <= pageBody + EPS && limit - start > available + EPS) {
     return null
   }
-  if (m.heightPx - start <= available + EPS) return fit(id, start, m.heightPx, 0, m.heightPx - start, null)
+  if (splitAt === null && m.heightPx - start <= available + EPS) return fit(id, start, m.heightPx, 0, m.heightPx - start, null)
 
   let first = 0
   while (first < n && (bottoms[first] ?? 0) <= start + EPS) first += 1
   if (first >= n) {
+    if (splitAt !== null && splitAt - start <= available + EPS) return fit(id, start, splitAt, 0, splitAt - start, splitAt)
     if (atTop || m.heightPx - start <= available + EPS) return fit(id, start, m.heightPx, 0, Math.max(0, m.heightPx - start), null)
     return null
   }
   let last = first - 1
   for (let i = first; i < n; i++) {
-    if ((bottoms[i] ?? 0) - start <= available + EPS) last = i
+    const bottom = bottoms[i] ?? 0
+    if (splitAt !== null && bottom > splitAt + EPS) break
+    if (bottom - start <= available + EPS) last = i
     else break
   }
   if (last < first) {
@@ -363,7 +410,11 @@ function placeLines(
     }
   }
   const end = bottoms[last] ?? start
-  if (last >= n - 1) return fit(id, start, end, 0, Math.max(0, end - start), null)
+  if (splitAt !== null && splitAt <= end + EPS) return fit(id, start, splitAt, 0, splitAt - start, splitAt)
+  if (last >= n - 1) {
+    if (splitAt !== null && splitAt > end + EPS) return fit(id, start, end, 0, Math.max(0, end - start), end)
+    return fit(id, start, end, 0, Math.max(0, end - start), null)
+  }
   if (end <= start + 0.25) return atTop ? fit(id, start, m.heightPx, 0, Math.max(0, m.heightPx - start), null) : null
   return fit(id, start, end, 0, end - start, end)
 }
@@ -437,7 +488,9 @@ function placeBlock(
   pageBody: number,
 ): Placed | null {
   if (m.rowBottoms && m.rowBottoms.length > 0) return placeTable(id, m, y0, available, atTop, skip)
-  if (m.lineBottoms.length > 0) return placeLines(id, m, y0, available, atTop, skip, pageBody)
+  if (m.lineBottoms.length > 0 || (m.inlineBreaks !== undefined && m.inlineBreaks.length > 0)) {
+    return placeLines(id, m, y0, available, atTop, skip, pageBody)
+  }
   return placeAtomic(id, m, y0, available, atTop, skip)
 }
 
@@ -463,10 +516,12 @@ function chainFit(
     if (i > index && measured.pageBreakBefore) break
     const before = Math.max(0, measured.spaceBeforePx)
     const overlap = Math.min(before, Math.max(0, prevAfter))
-    here += Math.max(0, measured.heightPx - overlap)
-    fresh += Math.max(0, measured.heightPx - (i === index ? before : overlap))
+    const breakAt = firstBreakAfter(measured, 0)
+    const used = breakAt === null ? measured.heightPx : Math.min(measured.heightPx, breakAt)
+    here += Math.max(0, used - overlap)
+    fresh += Math.max(0, used - (i === index ? before : overlap))
     prevAfter = measured.spaceAfterPx
-    if (!measured.keepNext || fresh > pageBody) break
+    if (breakAt !== null || !measured.keepNext || fresh > pageBody) break
   }
   return { here, fresh }
 }
@@ -765,11 +820,12 @@ function wantsBlank(breakType: 'evenPage' | 'oddPage', pageNumber: number): bool
 }
 
 /**
- * Word's block-level page rules over cached measures: pageBreakBefore, keepNext chains (capped at one page),
+ * Word's page rules over cached measures: pageBreakBefore, an inline page break, keepNext chains (capped at one page),
  * keepLines, widow and orphan control, section breaks, rows that cannot split, header rows, and paragraph
  * spacing. The top of a page drops space before. Between two blocks the gap is the larger of the first's
  * space after and the second's space before. The measured height stays the block's own; the skip is applied
- * when the slice is placed.
+ * when the slice is placed. A break at the end of a block starts the next block on a new page, and that one
+ * transition absorbs the next block's pageBreakBefore.
  *
  * Incremental: with `previous` and `changed`, starts at the page holding the first changed block and stops at the first
  * page whose start (block, y0) equals the previous layout's page start at the same index, reusing the rest.
@@ -821,6 +877,7 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
   }
 
   let pending: PageBuilder | null = null
+  let inlineOpensPage = false
   let guard = 0
   const maxGuard = body.length * 6 + 8
   while (cursor.index < body.length && guard < maxGuard) {
@@ -864,10 +921,11 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
       softNext = false
     }
 
-    if (cursor.y0 === 0 && measured.pageBreakBefore && pending.slices.length > 0) {
+    if (cursor.y0 === 0 && pending.slices.length > 0 && (measured.pageBreakBefore || inlineOpensPage)) {
       pages.push(pending.toPage())
       pending = openBuilder(doc, section, sectionIndex, pages.length + 1, measure, false)
     }
+    if (cursor.y0 === 0) inlineOpensPage = false
 
     const atTop = pending.slices.length === 0
     const earlierAfter = atTop ? 0 : spaceAfterBefore(body, sectionOf, index, measure, doc)
@@ -893,6 +951,7 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
       placed = fit(block.id, cursor.y0, measured.heightPx, 0, measured.heightPx, null)
     }
     pending.add(placed)
+    if (endsWithInlineBreak(measured, placed)) inlineOpensPage = true
     if (placed.continueY === null || placed.continueY <= cursor.y0 + 0.25) {
       cursor = { index: index + 1, y0: 0 }
     } else {

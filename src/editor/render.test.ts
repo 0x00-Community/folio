@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { BorderEdge, BorderLine, CellBorders, LineSpacing, Pt, RunLook, Section, Table, TableBorders } from '../model.ts'
+import type { BorderEdge, BorderLine, CellBorders, LineSpacing, Pt, Row, RunLook, Section, Table, TableBorders } from '../model.ts'
 import { cell, paragraph, pt, row, table, text, hex } from './testkit.ts'
-import { cellBoxShadow, cellEdges, collapsedSpaceBefore, pageBoxStyle, paintFamily, paintedCellEdges, scriptSegments, snapLinePx } from './render.ts'
+import { cellBoxShadow, cellEdges, cellPadPt, collapsedSpaceBefore, pageBoxStyle, paintFamily, paintedCellEdges, rowFrame, scriptSegments, snapLinePx } from './render.ts'
 
 const look = {
   fonts: { ascii: 'Times', hAnsi: 'TimesHigh', eastAsia: 'SimSun', cs: 'Naskh' },
@@ -241,4 +241,27 @@ test('a shared line uses both facing edges', () => {
   ], [100, 100])
   assert.deepEqual(paintedCellEdges(down, 0, 0).right, red, 'several cells down one edge use the first')
   assert.equal(paintedCellEdges(down, 0, 1).left, null, 'the spanning cell paints that line once')
+})
+
+test('row height is an exact clip, a minimum, or nothing', () => {
+  const auto = row([cell([paragraph('a', [text('a')])])])
+  assert.deepEqual(rowFrame(auto), { height: null, minHeight: null, clip: false })
+  const atLeast: Row = { ...auto, props: { heightPt: pt(18), heightRule: 'atLeast' } }
+  assert.deepEqual(rowFrame(atLeast), { height: null, minHeight: '24px', clip: false })
+  const exact: Row = { ...auto, props: { heightPt: pt(24), heightRule: 'exact' } }
+  assert.deepEqual(rowFrame(exact), { height: '32px', minHeight: null, clip: true })
+  const implicit: Row = { ...auto, props: { heightPt: pt(12) } }
+  assert.deepEqual(rowFrame(implicit), { height: null, minHeight: '16px', clip: false }, 'a height with no rule is a minimum')
+})
+
+test('cell padding is the Word default, then the table, then the cell', () => {
+  const made = table('t', [row([cell([paragraph('a', [text('a')])])])])
+  const plain = made.rows[0]?.cells[0]
+  assert.ok(plain)
+  if (!plain) return
+  assert.deepEqual(cellPadPt(made, plain), { top: 0, right: 5.4, bottom: 0, left: 5.4 })
+  const withTable: Table = { ...made, props: { margins: { top: pt(1), right: pt(2), bottom: pt(3), left: pt(4) } } }
+  assert.deepEqual(cellPadPt(withTable, plain), { top: 1, right: 2, bottom: 3, left: 4 })
+  const over = { ...plain, margins: { top: pt(0), left: pt(8) } }
+  assert.deepEqual(cellPadPt(withTable, over), { top: 0, right: 2, bottom: 3, left: 8 }, 'an explicit 0 overrides the table')
 })

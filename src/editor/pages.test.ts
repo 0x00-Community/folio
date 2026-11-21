@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Block, BlockId, Doc, Paragraph, Pt, Section, StoryKey, StyleId } from '../model.ts'
 import { listMarkers } from './derive.ts'
-import { apply, deleteBackward, initialState, selectAll, setPageSetup, setSelection, toggleList } from './edit.ts'
+import { apply, deleteBackward, initialState, insertPageBreak, selectAll, setPageSetup, setSelection, toggleList } from './edit.ts'
 import { layoutPlan, pageOfBlock, paginate, type Layout, type Measure } from './pages.ts'
 import { cell, makeDoc, opaqueBlock, paragraph, row, table, text } from './testkit.ts'
 
@@ -63,6 +63,7 @@ function pm(height: number, lines: number[], extra: Partial<Measure> = {}): Meas
     keepLines: extra.keepLines ?? false,
     pageBreakBefore: extra.pageBreakBefore ?? false,
     widowControl: extra.widowControl ?? false,
+    ...(extra.inlineBreaks !== undefined ? { inlineBreaks: extra.inlineBreaks } : {}),
   }
 }
 
@@ -156,6 +157,67 @@ test('pageBreakBefore starts a new page and drops the whole space before', () =>
     ['b', pm(30, [20, 30], { pageBreakBefore: true, spaceBeforePx: 10 })],
   ])
   assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-40', 'b:10-30'])
+})
+
+test('an inline page break starts the next page', () => {
+  const only = new Map([
+    ['a', pm(16, [16], { inlineBreaks: Float32Array.from([16]) })],
+    ['b', pm(20, [20])],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], only, 100)), ['a:0-16', 'b:0-20'], 'a paragraph that holds only the break takes its line, then the next block')
+  const around = new Map([['a', pm(60, [20, 40, 60], { inlineBreaks: Float32Array.from([40]) })]])
+  assert.deepEqual(sig(layoutOf([para('a')], around, 100)), ['a:0-40', 'a:40-60'], 'text after the break starts the next page')
+  const end = new Map([
+    ['a', pm(40, [40], { inlineBreaks: Float32Array.from([40]) })],
+    ['b', pm(20, [20])],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], end, 100)), ['a:0-40', 'b:0-20'], 'a break at the end of a paragraph starts the next block on a new page')
+  const twice = new Map([['a', pm(60, [20, 40, 60], { inlineBreaks: Float32Array.from([20, 40]) })]])
+  assert.deepEqual(sig(layoutOf([para('a')], twice, 100)), ['a:0-20', 'a:20-40', 'a:40-60'], 'two breaks in a row are two page starts')
+})
+
+test('a trailing inline break absorbs the next paragraph pageBreakBefore', () => {
+  const absorbed = new Map([
+    ['a', pm(20, [20], { inlineBreaks: Float32Array.from([20]) })],
+    ['b', pm(20, [20], { pageBreakBefore: true })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], absorbed, 100)), ['a:0-20', 'b:0-20'])
+  const mid = new Map([
+    ['a', pm(40, [20, 40], { inlineBreaks: Float32Array.from([20]) })],
+    ['b', pm(20, [20], { pageBreakBefore: true })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], mid, 100)), ['a:0-20', 'a:20-40', 'b:0-20'], 'a break inside the paragraph does not absorb the following pageBreakBefore')
+})
+
+test('keepLines does not cross an inline page break', () => {
+  const measures = new Map([
+    ['a', pm(50, [50])],
+    ['b', pm(80, [20, 40, 60, 80], { inlineBreaks: Float32Array.from([40]), keepLines: true })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('b')], measures, 100)), ['a:0-50|b:0-40', 'b:40-80'])
+})
+
+test('insertPageBreak inserts the atom and the page view starts there', () => {
+  const source = paragraph('p', [text('ab')])
+  let state = initialState(makeDoc([source]))
+  const moved = setSelection({ kind: 'text', anchor: { p: source.id, o: 1 }, head: { p: source.id, o: 1 } })(state)
+  assert.ok(moved, 'the caret moves between the letters')
+  state = apply(state, moved, 0)
+  const broken = insertPageBreak(state)
+  assert.ok(broken, 'insertPageBreak applies')
+  state = apply(state, broken, 0)
+  const next = state.doc.body[0]
+  assert.ok(next && next.kind === 'p', 'the paragraph stays one block')
+  if (!next || next.kind !== 'p') return
+  assert.deepEqual(next.inlines.map((inline) => inline.kind === 'text' ? inline.text : inline.atom.type), ['a', 'pageBreak', 'b'])
+  assert.equal(state.sel.kind, 'text')
+  if (state.sel.kind === 'text') {
+    assert.equal(state.sel.head.o, 2, 'the caret sits after the atom')
+    assert.equal(state.sel.head.p, next.id)
+  }
+  const measures = new Map<string, Measure>([[next.id, pm(40, [20, 40], { inlineBreaks: Float32Array.from([20]) })]])
+  const layout = paginate(state.doc, (block) => measures.get(block.id), null, [])
+  assert.deepEqual(sig(layout), [`${next.id}:0-20`, `${next.id}:20-40`])
 })
 
 test('adjacent body paragraphs keep the larger of space after and space before', () => {

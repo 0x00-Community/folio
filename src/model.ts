@@ -178,6 +178,14 @@ export interface CellBorders {
   readonly right?: BorderEdge
 }
 
+/** A missing edge does not override the table. The view's default applies only when both omit it. */
+export interface CellMargins {
+  readonly top?: Pt
+  readonly right?: Pt
+  readonly bottom?: Pt
+  readonly left?: Pt
+}
+
 export interface Table {
   readonly kind: 'table'
   readonly id: TableId
@@ -187,6 +195,7 @@ export interface Table {
     readonly align?: 'left' | 'center' | 'right'
     readonly widthPt?: Pt
     readonly borders?: TableBorders
+    readonly margins?: CellMargins
   }
   readonly grid: readonly Pt[]
   readonly rows: readonly Row[]
@@ -206,6 +215,7 @@ export interface Cell {
   readonly shading?: Hex
   readonly vAlign?: 'top' | 'center' | 'bottom'
   readonly borders?: CellBorders
+  readonly margins?: CellMargins
   readonly blocks: readonly Block[]
 }
 

@@ -4,6 +4,7 @@ import type {
   AtomKind,
   Block,
   BorderEdge,
+  Cell,
   CellBorders,
   HighlightName,
   LineSpacing,
@@ -14,6 +15,7 @@ import type {
   ParaLook,
   Pos,
   Pt,
+  Row,
   RunLook,
   Section,
   Table,
@@ -368,7 +370,7 @@ function isMostlyEastAsian(text: string): boolean {
   return false
 }
 
-function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration | undefined, beforePx?: number): HTMLElement {
+function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration | undefined, beforePx?: number, splitBreaks = true): HTMLElement {
   const el = document.createElement('div')
   el.className = 'blk p'
   el.dataset.id = para.id
@@ -410,7 +412,9 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
   for (const piece of pieces) {
     if (piece.kind === 'atom') {
       emitPreedit(piece.o)
-      el.append(renderAtom(piece.atom, piece.o, ctx, para))
+      const atom = renderAtom(piece.atom, piece.o, ctx, para)
+      if (splitBreaks && piece.atom.atom.type === 'pageBreak') stylePageBreak(atom, el)
+      el.append(atom)
       continue
     }
     const end = piece.o + piece.text.length
@@ -427,6 +431,33 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
   }
   if (active && !preeditDone) appendPreedit(el, ctx, para, active)
   return finishParagraph(el, para)
+}
+
+function lineHasInk(parent: HTMLElement): boolean {
+  const children = parent.childNodes
+  for (let i = children.length - 1; i >= 0; i--) {
+    const node = children[i]
+    if (node === undefined) continue
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.textContent ?? '').replaceAll('\u200b', '')
+      if (text.length > 0) return true
+      continue
+    }
+    if (!(node instanceof HTMLElement)) continue
+    if (node.classList.contains('marker')) continue
+    if (node.dataset.atom === 'pageBreak') return false
+    return true
+  }
+  return false
+}
+
+function stylePageBreak(el: HTMLElement, parent: HTMLElement): void {
+  el.style.display = 'block'
+  el.style.width = '100%'
+  el.style.overflow = 'hidden'
+  // A break after text closes that line. A break with nothing on its line takes one:
+  // the line breaker flushes a line before the forced page break, and an empty line has height.
+  el.style.height = lineHasInk(parent) ? '0' : '1em'
 }
 
 function finishParagraph(el: HTMLElement, para: Paragraph): HTMLElement {
@@ -634,9 +665,51 @@ function appendCellBlocks(td: HTMLElement, blocks: readonly Block[], ctx: Render
       continue
     }
     const before = collapsedSpaceBefore(px(ctx.paraLook(child).spacing.before), previousAfter)
-    td.append(renderParagraph(child, ctx, decoFor(child, deco), before))
+    td.append(renderParagraph(child, ctx, decoFor(child, deco), before, false))
     previousAfter = px(ctx.paraLook(child).spacing.after)
   }
+}
+
+const WORD_CELL_PAD_PT = { top: 0, right: 5.4, bottom: 0, left: 5.4 }
+
+export interface CellPad {
+  readonly top: number
+  readonly right: number
+  readonly bottom: number
+  readonly left: number
+}
+
+function padEdge(cell: number | undefined, table: number | undefined, fallback: number): number {
+  if (cell !== undefined) return cell
+  if (table !== undefined) return table
+  return fallback
+}
+
+/** Cell, then table, then Word's 0, 5.4 pt, 0, 5.4 pt. An explicit 0 wins. */
+export function cellPadPt(table: Table, cell: Cell): CellPad {
+  const tableMargins = table.props.margins
+  const cellMargins = cell.margins
+  return {
+    top: padEdge(cellMargins?.top, tableMargins?.top, WORD_CELL_PAD_PT.top),
+    right: padEdge(cellMargins?.right, tableMargins?.right, WORD_CELL_PAD_PT.right),
+    bottom: padEdge(cellMargins?.bottom, tableMargins?.bottom, WORD_CELL_PAD_PT.bottom),
+    left: padEdge(cellMargins?.left, tableMargins?.left, WORD_CELL_PAD_PT.left),
+  }
+}
+
+export interface RowFrame {
+  readonly height: string | null
+  readonly minHeight: string | null
+  readonly clip: boolean
+}
+
+/** Exact clips. atLeast, and a height with no rule, is a minimum. Auto sets neither. */
+export function rowFrame(row: Row): RowFrame {
+  const height = row.props.heightPt
+  if (height === undefined) return { height: null, minHeight: null, clip: false }
+  const pxHeight = `${px(height)}px`
+  if (row.props.heightRule === 'exact') return { height: pxHeight, minHeight: null, clip: true }
+  return { height: null, minHeight: pxHeight, clip: false }
 }
 
 function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefined): HTMLElement {
@@ -672,7 +745,9 @@ function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefi
     const tr = document.createElement('tr')
     if (row.props.header) tr.dataset.header = '1'
     tr.dataset.cantSplit = '1'
-    if (row.props.heightPt) tr.style.height = `${px(row.props.heightPt)}px`
+    const frame = rowFrame(row)
+    if (frame.height !== null) tr.style.height = frame.height
+    if (frame.minHeight !== null) tr.style.minHeight = frame.minHeight
     let col = 0
     for (let c = 0; c < row.cells.length; c++) {
       const cell = row.cells[c]
@@ -687,6 +762,13 @@ function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefi
       if (rows > 1) td.rowSpan = rows
       const shadow = cellBoxShadow(paintedCellEdges(table, r, c))
       if (shadow !== 'none') td.style.boxShadow = shadow
+      const pad = cellPadPt(table, cell)
+      td.style.padding = `${px(pad.top)}px ${px(pad.right)}px ${px(pad.bottom)}px ${px(pad.left)}px`
+      if (frame.clip && frame.height !== null) {
+        td.style.height = frame.height
+        td.style.maxHeight = frame.height
+        td.style.overflow = 'hidden'
+      }
       if (cell.shading) td.style.backgroundColor = `#${cell.shading}`
       if (cell.vAlign === 'center') td.style.verticalAlign = 'middle'
       else if (cell.vAlign) td.style.verticalAlign = cell.vAlign

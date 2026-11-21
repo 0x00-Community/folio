@@ -1,7 +1,36 @@
 # Round 7 brief: print fidelity
 
-Status: units 1 and 4 pass their checks on `r7/print-fidelity` (2026-11-22). Unit 3 has its measurement and the
-editing view's fixes and does not reach its pass mark yet. Unit 2 is not started.
+Status (2026-11-22, branch `r7/print-fidelity`, kit `work/editing-kit-grok` at `2b6c33f0`): units 1, 2 and 4 pass
+their checks. Unit 3 passes on `basic.docx` and `long.docx` and not on the private document. Every
+`scripts/e2e/*.mjs` passes on the host.
+
+| Measure | Before the round | Now | Mark |
+| --- | --- | --- | --- |
+| Private document, characters missing from the PDF | 82 | 0 | at most 30 |
+| Private document, text below the bottom margin | 99 runs | 0 | 0 |
+| Wasm memory after a preview, `basic.docx` | 490 MB | 161 MB | under 200 MB |
+| Wasm memory after a preview, private document | 1,228 MB | 348 MB | under 512 MB |
+| Blocks that start on the same page, `basic.docx` | 0.91 | 1.00 | 0.9 |
+| Blocks that start on the same page, `long.docx` | 0.06 (50 and 59 pages) | 0.97 (55 and 55) | 0.9 |
+| Blocks that start on the same page, private document | 0.69 (33 and 37 pages) | 0.84 (33 and 37) | 0.9 |
+
+Open:
+
+- The private document misses the drift mark. The editing view does not continue a table row on the next page
+  (cause 1 of the diagnosis below). Not built: it waits for a decision.
+- The preview is 37 pages where Word's PDF is 35, and differs from it in character counts from page 1.
+- Thirteen `auto` paragraphs in `linesAndChars` sections are snapped to the grid pitch by rdocx. Whether Word
+  does is not settled.
+- Adding a face still costs twice its size in wasm memory, because `Arc::from` copies a `Vec` and a `Box`.
+- A table the editor inserts keeps its old padding in the model, and save does not write cell margins, so after
+  save and reopen its rows are 6 px shorter.
+- Caret motion and clicks across an inline page break were tested in `pages.test.ts`, not by hand in the window.
+- The kit's `rdocx-py` and `rpptx-py` crates were edited for the font bytes type and could not be compiled offline.
+- Finding 13: how the runtime counts wasm memory against `heapMb` is still not known.
+
+Unit 2, second part and unit 3, third step (2026-11-22): the session passes `Arc` clones of its faces to the
+kit's shared entry point. An inline page break starts a page in the editing view. `w:trHeight` and cell margins
+are imported and drawn.
 
 Unit 3, kit fix (2026-11-22, kit `work/editing-kit-grok` at the commit "Draw each character of a run in the
 face its font slot gives it"): a run is divided by the face that can draw each character, so the Latin text of a

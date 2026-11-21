@@ -1,6 +1,6 @@
 //! Lay out a patched document once and render that layout to PDF or PNG.
 //!
-//! Caller faces are passed by reference. Families the caller did not supply
+//! Caller faces are shared `Arc`s. Families the caller did not supply
 //! resolve from the bundled substitutes, because the engine builds without
 //! system-font discovery.
 
@@ -292,20 +292,21 @@ impl From<PrintError> for JsValue {
 
 /// Layout `document` with caller faces over the bundled substitutes.
 ///
-/// `layout_with_fonts` has no bundled fallback, so a missing Calibri would not
-/// resolve. The alias variant tries each `(requested, loaded)` pair after an
-/// exact family and before the bundled metric substitutes.
+/// The shared entry point clones each `Arc` into the layout and does not copy
+/// the face bytes. `layout_with_fonts` has no bundled fallback, so a missing
+/// Calibri would not resolve. The alias variant tries each `(requested, loaded)`
+/// pair after an exact family and before the bundled metric substitutes.
 ///
 /// `body_blocks` is the patch body length. See [`BlockPage`] for the map from
 /// those blocks onto `body_layout_fragments`.
 pub(crate) fn lay_out(
     document: &rdocx::Document,
-    fonts: &[(&str, &[u8])],
+    fonts: &[(&str, Arc<[u8]>)],
     aliases: &[(&str, &str)],
     body_blocks: usize,
 ) -> Result<PrintLayout, PrintError> {
     let laid = document
-        .layout_with_fonts_aliases_and_bundled_fallback(fonts, aliases)
+        .layout_with_shared_fonts_aliases_and_bundled_fallback(fonts, aliases)
         .map_err(classify)?;
     let mut block_pages = Vec::with_capacity(body_blocks);
     let mut block_boxes = Vec::with_capacity(body_blocks);

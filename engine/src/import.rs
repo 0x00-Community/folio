@@ -1028,12 +1028,16 @@ fn import_table(
                 }),
                 blocks: cell_blocks,
                 borders: cell_borders(&cell),
+                margins: cell_margins_of(&cell),
             });
         }
+        let (height_pt, height_rule) = imported_row_height(&row);
         rows.push(wire::Row {
             src: Some(row_src),
             header: row.is_header(),
             cant_split: row.cant_split_value().unwrap_or(false),
+            height_pt,
+            height_rule,
             cells,
         });
     }
@@ -1041,6 +1045,7 @@ fn import_table(
     // Direct w:tblBorders replaces the style chain as a whole. An edge the
     // set does not name draws no line, rather than falling through per edge.
     imported.borders = table_borders(doc, table);
+    imported.margins = table_margins(doc, table);
     Block::Table(imported)
 }
 
@@ -1142,6 +1147,114 @@ fn cell_borders(cell: &rdocx::CellRef<'_>) -> Option<wire::CellBorders> {
         left,
         bottom,
         right,
+    })
+}
+
+fn cell_margins_of(cell: &rdocx::CellRef<'_>) -> Option<wire::CellMargins> {
+    let margins = cell.margins()?;
+    present_margins(
+        margins.top.map(Length::to_pt),
+        margins.right.map(Length::to_pt),
+        margins.bottom.map(Length::to_pt),
+        margins.left.map(Length::to_pt),
+    )
+}
+
+fn imported_row_height(row: &rdocx::RowRef<'_>) -> (Option<f64>, Option<String>) {
+    match row.height() {
+        Some(rdocx::RowHeight::Exact(length)) => (Some(length.to_pt()), Some("exact".to_string())),
+        Some(rdocx::RowHeight::AtLeast(length)) => {
+            (Some(length.to_pt()), Some("atLeast".to_string()))
+        }
+        None => (None, None),
+    }
+}
+
+/// Direct `w:tblCellMar` over the named style chain, one edge at a time.
+///
+/// The chain is the table's own style, not the document's default table style,
+/// the same choice as borders. Word's 0 / 5.4 pt default is not stored: the view
+/// applies it when neither the table nor the cell sets that edge.
+fn table_margins(doc: &Document, table: &rdocx::TableRef<'_>) -> Option<wire::CellMargins> {
+    let mut edges = MarginEdges::default();
+    if let Some(style_id) = table.style_id() {
+        let mut chain = Vec::new();
+        let mut next = Some(style_id.to_string());
+        let mut seen = HashSet::new();
+        while let Some(id) = next {
+            if !seen.insert(id.clone()) {
+                break;
+            }
+            let Some(style) = doc.style(&id) else {
+                break;
+            };
+            next = style.based_on().map(str::to_string);
+            chain.push(id);
+        }
+        for id in chain.iter().rev() {
+            if let Some(style) = doc.style(id) {
+                overlay_style_margins(&mut edges, &style);
+            }
+        }
+    }
+    if let Some(direct) = table.cell_margins() {
+        overlay_length(&mut edges.top, direct.top);
+        overlay_length(&mut edges.right, direct.right);
+        overlay_length(&mut edges.bottom, direct.bottom);
+        overlay_length(&mut edges.left, direct.left);
+    }
+    present_margins(edges.top, edges.right, edges.bottom, edges.left)
+}
+
+#[derive(Default)]
+struct MarginEdges {
+    top: Option<f64>,
+    right: Option<f64>,
+    bottom: Option<f64>,
+    left: Option<f64>,
+}
+
+fn overlay_length(slot: &mut Option<f64>, value: Option<Length>) {
+    if let Some(length) = value {
+        *slot = Some(length.to_pt());
+    }
+}
+
+fn overlay_style_margins(edges: &mut MarginEdges, style: &rdocx::Style<'_>) {
+    let Some(properties) = style.table_properties() else {
+        return;
+    };
+    let Some(margins) = properties.cell_margin.as_ref() else {
+        return;
+    };
+    if let Some(top) = margins.top {
+        edges.top = Some(Length::twips(top.0).to_pt());
+    }
+    if let Some(right) = margins.right {
+        edges.right = Some(Length::twips(right.0).to_pt());
+    }
+    if let Some(bottom) = margins.bottom {
+        edges.bottom = Some(Length::twips(bottom.0).to_pt());
+    }
+    if let Some(left) = margins.left {
+        edges.left = Some(Length::twips(left.0).to_pt());
+    }
+}
+
+fn present_margins(
+    top: Option<f64>,
+    right: Option<f64>,
+    bottom: Option<f64>,
+    left: Option<f64>,
+) -> Option<wire::CellMargins> {
+    if top.is_none() && right.is_none() && bottom.is_none() && left.is_none() {
+        return None;
+    }
+    Some(wire::CellMargins {
+        top,
+        right,
+        bottom,
+        left,
     })
 }
 

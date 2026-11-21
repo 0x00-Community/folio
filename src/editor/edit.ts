@@ -12,6 +12,7 @@ import type {
   Block,
   BorderLine,
   Cell,
+  CellMargins,
   Doc,
   DocIndex,
   Hex,
@@ -1655,6 +1656,14 @@ function removeTable(doc: Doc, id: TableId): { doc: Doc, pos: Pos } | null {
 
 const insertedEdge: BorderLine = { style: 'single', widthPt: asPt(0.5), color: '000000' as Hex }
 
+/** 3px 5px at 96dpi. An inserted table keeps the padding the view used before cell margins came from the file. */
+export const INSERTED_CELL_MARGINS: CellMargins = {
+  top: asPt(2.25),
+  right: asPt(3.75),
+  bottom: asPt(2.25),
+  left: asPt(3.75),
+}
+
 /** The six edges write.rs gives a table the editor inserts: single, half a point, black. */
 export const INSERTED_TABLE_BORDERS: TableBorders = {
   top: insertedEdge,
@@ -1675,7 +1684,7 @@ function makeTable(doc: Doc, loc: ParaLoc, rows: number, cols: number): Table {
     for (let c = 0; c < cols; c++) cells.push(emptyCell())
     body.push({ src: null, props: {}, cells })
   }
-  return { kind: 'table', id: newTableId(), src: null, props: { borders: INSERTED_TABLE_BORDERS }, grid, rows: body }
+  return { kind: 'table', id: newTableId(), src: null, props: { borders: INSERTED_TABLE_BORDERS, margins: INSERTED_CELL_MARGINS }, grid, rows: body }
 }
 
 function newTableId(): TableId {
@@ -1687,7 +1696,14 @@ function blankRow(template: Row, columns: number): Row {
   const cells = template.cells.length > 0
     ? template.cells.map(cell => ({ src: null, span: cell.span, vMerge: null, widthPt: cell.widthPt, blocks: [emptyParagraph()] }))
     : Array.from({ length: columns }, () => emptyCell())
-  return { src: null, props: {}, cells }
+  return {
+    src: null,
+    props: {
+      ...(template.props.heightPt !== undefined ? { heightPt: template.props.heightPt } : {}),
+      ...(template.props.heightRule !== undefined ? { heightRule: template.props.heightRule } : {}),
+    },
+    cells,
+  }
 }
 
 function rowHasProtected(row: Row): boolean {

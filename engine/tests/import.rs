@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rdocx::{
     BodyItemRef, BorderStyle, CellBorderEdge, CellItemRef, ContentLocation, Document, HdrFtrType,
-    HeaderFooterKind, StoryId, StoryItemKind, StoryKind, TableBorderEdge,
+    HeaderFooterKind, Length, StoryId, StoryItemKind, StoryKind, TableBorderEdge,
 };
 use rdocx_word_engine::Session;
 use rdocx_word_engine::wire::{
@@ -699,4 +699,71 @@ fn each_section_keeps_its_own_header() {
         ],
         "each section's header story keeps its own text"
     );
+}
+
+#[test]
+fn row_height_and_cell_margins_import() {
+    let mut doc = Document::new();
+    {
+        let mut table = doc.add_table(3, 1);
+        table
+            .row(0)
+            .expect("exact row")
+            .set_height_exact(Length::pt(24.0));
+        table
+            .row(1)
+            .expect("at least row")
+            .set_height(Length::pt(18.0));
+        table.set_cell_margins(
+            Length::pt(2.0),
+            Length::pt(4.0),
+            Length::pt(6.0),
+            Length::pt(8.0),
+        );
+        table
+            .cell(0, 0)
+            .expect("cell")
+            .set_margins_checked(
+                Length::pt(1.0),
+                Length::pt(3.0),
+                Length::pt(5.0),
+                Length::pt(7.0),
+            )
+            .expect("cell margins");
+    }
+    doc.add_table(1, 1);
+    let bytes = doc.to_bytes().expect("bytes");
+    let session = Session::from_bytes(&bytes).expect("session");
+    let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
+    let Block::Table(table) = &imported.body[0] else {
+        panic!("table");
+    };
+    assert_eq!(table.rows[0].height_pt, Some(24.0));
+    assert_eq!(table.rows[0].height_rule.as_deref(), Some("exact"));
+    assert_eq!(table.rows[1].height_pt, Some(18.0));
+    assert_eq!(table.rows[1].height_rule.as_deref(), Some("atLeast"));
+    assert_eq!(table.rows[2].height_pt, None, "auto is no height");
+    assert_eq!(table.rows[2].height_rule, None);
+    let margins = table.margins.as_ref().expect("table margins");
+    assert_eq!(margins.top, Some(2.0));
+    assert_eq!(margins.right, Some(4.0));
+    assert_eq!(margins.bottom, Some(6.0));
+    assert_eq!(margins.left, Some(8.0));
+    let cell = table.rows[0].cells[0]
+        .margins
+        .as_ref()
+        .expect("cell margins");
+    assert_eq!(cell.top, Some(1.0));
+    assert_eq!(cell.right, Some(3.0));
+    assert_eq!(cell.bottom, Some(5.0));
+    assert_eq!(cell.left, Some(7.0));
+    assert!(table.rows[1].cells[0].margins.is_none());
+    let Block::Table(plain) = &imported.body[1] else {
+        panic!("plain table");
+    };
+    assert!(
+        plain.margins.is_none(),
+        "a table that sets no margins omits them"
+    );
+    assert!(plain.rows[0].height_pt.is_none());
 }
