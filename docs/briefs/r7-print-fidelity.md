@@ -3,6 +3,13 @@
 Status: units 1 and 4 pass their checks on `r7/print-fidelity` (2026-11-22). Unit 3 has its measurement and the
 editing view's fixes and does not reach its pass mark yet. Unit 2 is not started.
 
+Unit 3, kit fix (2026-11-22, kit `work/editing-kit-grok` at the commit "Draw each character of a run in the
+face its font slot gives it"): a run is divided by the face that can draw each character, so the Latin text of a
+mixed run stays in the Latin face. `long.docx` lays out to 55 pages with and without a caller face (59 and 67
+before). Drift after it: `long.docx` 0.97 (55 pages on both sides), `basic.docx` 0.91, the private document 0.73
+(33 against 37, first difference at block 40). `long.docx` and `basic.docx` reach the pass mark. The private
+document does not.
+
 Unit 2, first part (2026-11-22). Measured in the runtime with `scripts/e2e/print.mjs`, kit unchanged:
 
 | Document | Faces passed | After adding the faces | After the layout | High-water mark |
