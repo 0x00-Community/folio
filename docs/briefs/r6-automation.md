@@ -1,6 +1,20 @@
 # Round 6 brief: the automation interface
 
-Status: designed on 2026-11-21, not built.
+Status: all three units pass their checks on `r6/automation` (2026-11-21). `scripts/e2e/automation.mjs` passes
+5 of 5 on the host, and every `scripts/e2e/shell-*.mjs` still passes. Measured in the runtime on `long.docx`:
+`outline` 0.2 ms, one `blocks` call of 500 1.0 ms, the whole `text` walk 0.2 ms in 2 calls.
+
+Changes from this brief as built:
+
+- `insertImage` accepts `image/png` and `image/jpeg` only, as `Source.addMedia` does. A GIF is `bad-request`.
+- `setStyle` also accepts the role ids `normal`, `title`, `heading1`, `heading2`, `heading3`, which the editor can
+  add to a document that lacks them.
+- `Host` gained `markers()` and `watch(listener)`, and `file()` carries a `session` object. `pageOf` takes a block
+  id.
+- One Rust change was needed, outside the interface. Enter at the end of an untouched imported paragraph sent a
+  kept paragraph followed by a new paragraph of the same source, and `plan` in `engine/src/write.rs` refused it
+  with `block N appears twice`. The keyboard reached the same failure. `plan` now accepts that order, with tests in
+  `engine/tests/save.rs` and `src/engine/save.test.ts`.
 
 ## Goal
 
