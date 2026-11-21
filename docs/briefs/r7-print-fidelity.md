@@ -17,7 +17,9 @@ their checks. Unit 3 passes on `basic.docx` and `long.docx` and not on the priva
 Open:
 
 - The private document misses the drift mark. The editing view does not continue a table row on the next page
-  (cause 1 of the diagnosis below). Not built: it waits for a decision.
+  (cause 1 of the diagnosis below). Not built: it waits for a decision. Seen in the window on 2026-11-22: the
+  page that holds such a row clips it (a page body 582 px high with 3,002 px of content, `overflow: hidden`), so
+  most of the row cannot be seen or reached in the editing view, and the page before it is left almost empty.
 - The preview is 37 pages where Word's PDF is 35, and differs from it in character counts from page 1.
 - Thirteen `auto` paragraphs in `linesAndChars` sections are snapped to the grid pitch by rdocx. Whether Word
   does is not settled.
