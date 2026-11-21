@@ -7,7 +7,10 @@ use std::time::Instant;
 
 use rdocx_word_engine::Session;
 use rdocx_word_engine::print::PrintFailure;
-use rdocx_word_engine::wire::{Block, BridgeError, Imported, Inline, Para, Patch, PatchBlock};
+use rdocx_word_engine::print::{BlockPage, PrintLayout};
+use rdocx_word_engine::wire::{
+    Block, BridgeError, Imported, Inline, Marks, Para, ParaProps, Patch, PatchBlock,
+};
 
 const SONG_FACE: usize = 3;
 const NEW_SENTENCE: &str = "印刷预览写入了新的中文句子";
@@ -531,6 +534,469 @@ fn render_song(label: &str, face: &[u8]) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+fn assert_block_pages(layout: &PrintLayout, body_len: usize) {
+    let pages = layout.block_pages();
+    assert_eq!(pages.len(), body_len, "one entry per body block");
+    let mut previous = None;
+    for (index, entry) in pages.iter().enumerate() {
+        assert_eq!(entry.index as usize, index);
+        match (entry.first_page, entry.last_page) {
+            (Some(first), Some(last)) => {
+                assert!(last >= first, "block {index} ends before it starts");
+                assert!(
+                    last < layout.page_count(),
+                    "block {index} is past the last page"
+                );
+                if let Some(earlier) = previous {
+                    assert!(
+                        first >= earlier,
+                        "block {index} starts on page {first} after page {earlier}"
+                    );
+                }
+                previous = Some(first);
+            }
+            (None, None) => {}
+            _ => panic!("block {index} has only one of first and last page"),
+        }
+    }
+    let last = pages.last().expect("body has a block");
+    assert_eq!(
+        last.last_page,
+        Some(layout.page_count() - 1),
+        "the last block ends on the last page"
+    );
+}
+
+fn pdftotext_page(path: &Path, page: u32) -> String {
+    let n = (page + 1).to_string();
+    tool(
+        "pdftotext",
+        &["-enc", "UTF-8", "-f", &n, "-l", &n, pdf_arg(path), "-"],
+    )
+}
+
+fn block_holding(body: &[Block], needle: &str) -> usize {
+    body.iter()
+        .position(|block| match block {
+            Block::P(para) => paragraph_text(para).contains(needle),
+            _ => false,
+        })
+        .unwrap_or_else(|| panic!("no paragraph holds {needle}"))
+}
+
+fn assert_paragraph_on_page(pages: &[BlockPage], body: &[Block], needle: &str, pdf: &Path) {
+    let index = block_holding(body, needle);
+    let page = pages[index]
+        .first_page
+        .unwrap_or_else(|| panic!("{needle} has no page"));
+    let text = readable(&pdftotext_page(pdf, page));
+    let flat = strip_ws(needle);
+    assert!(
+        text.contains(&flat),
+        "page {} does not hold {flat}",
+        page + 1
+    );
+}
+
+fn inserted_paragraph(text: &str) -> Para {
+    let props = ParaProps {
+        page_break_before: Some(true),
+        ..ParaProps::default()
+    };
+    Para::new(
+        None,
+        props,
+        vec![Inline::Text {
+            text: text.to_owned(),
+            marks: Marks::default(),
+            src: None,
+        }],
+        None,
+        None,
+    )
+}
+
+fn flat_block(block: &Block) -> String {
+    match block {
+        Block::P(para) => strip_ws(&paragraph_text(para)),
+        Block::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .flat_map(|cell| cell.blocks.iter())
+            .find_map(|block| match block {
+                Block::P(para) => Some(strip_ws(&paragraph_text(para))),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        Block::Opaque(opaque) => strip_ws(&opaque.label),
+    }
+}
+
+#[test]
+fn block_pages_follow_the_body_and_an_insert_at_index_3() {
+    let face = song_face(&cjk_font());
+    let mut session = open("basic.docx");
+    add_song(&mut session, &face);
+    let imported = imported_of(&session);
+    let layout = session
+        .print_layout(&patch_json(&keep_patch(&imported)))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_block_pages(&layout, imported.body.len());
+    let pdf = write_pdf("basic-block-pages", &layout.pdf().expect("pdf"));
+    assert_paragraph_on_page(layout.block_pages(), &imported.body, OLD_SENTENCE, &pdf);
+
+    let displaced = flat_block(&imported.body[3]);
+    assert!(
+        displaced.chars().count() >= 8,
+        "block 3 has no text to follow"
+    );
+    let displaced: String = displaced.chars().take(24).collect();
+    let mut inserted = String::new();
+    for _ in 0..80 {
+        inserted.push_str("DRIFTINSERTMARK ");
+        inserted.push_str(&"x".repeat(80));
+        inserted.push(' ');
+    }
+    let mut patch = keep_patch(&imported);
+    patch.body.insert(
+        3,
+        PatchBlock::Changed(Block::P(inserted_paragraph(&inserted))),
+    );
+    let again = session
+        .print_layout(&patch_json(&patch))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(again.block_pages().len(), imported.body.len() + 1);
+    let before = layout.block_pages();
+    let after = again.block_pages();
+    for index in 0..3 {
+        assert_eq!(
+            after[index].first_page, before[index].first_page,
+            "block {index} moved"
+        );
+    }
+    let pdf = write_pdf("basic-block-pages-insert", &again.pdf().expect("pdf"));
+    let new_page = after[3].first_page.expect("inserted block has a page");
+    let new_text = readable(&pdftotext_page(&pdf, new_page));
+    assert!(
+        new_text.contains("DRIFTINSERTMARK"),
+        "entry 3 is not the inserted paragraph"
+    );
+    assert!(
+        !new_text.contains(&displaced),
+        "entry 3 still holds the block that was at index 3"
+    );
+    let moved = after[4].first_page.expect("the shifted block has a page");
+    let moved_text = readable(&pdftotext_page(&pdf, moved));
+    assert!(
+        moved_text.contains(&displaced),
+        "entry 4 is not the block that was at index 3"
+    );
+    assert_ne!(new_page, moved, "the insert did not land on its own page");
+}
+
+struct MeasureLine {
+    baseline: f64,
+    han: bool,
+    latin: bool,
+    latin_families: Vec<String>,
+    mixed_families: Vec<String>,
+}
+
+fn span_lines(layout: &PrintLayout, page: u32) -> Vec<MeasureLine> {
+    let spans = layout.painted_spans();
+    let mut lines: Vec<MeasureLine> = Vec::new();
+    for span in spans.iter().filter(|span| span.page == page) {
+        let han = has_han(&span.text);
+        let latin = span.text.chars().any(|c| c.is_ascii_alphabetic());
+        let mixed = han && latin;
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|line| (line.baseline - span.baseline).abs() < 0.75)
+        {
+            line.han |= han;
+            line.latin |= latin;
+            push_family(&mut line.latin_families, latin, &span.family);
+            push_family(&mut line.mixed_families, mixed, &span.family);
+        } else {
+            lines.push(MeasureLine {
+                baseline: span.baseline,
+                han,
+                latin,
+                latin_families: if latin {
+                    vec![span.family.clone()]
+                } else {
+                    Vec::new()
+                },
+                mixed_families: if mixed {
+                    vec![span.family.clone()]
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+    }
+    lines.sort_by(|left, right| {
+        left.baseline
+            .partial_cmp(&right.baseline)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    lines
+}
+
+fn push_family(families: &mut Vec<String>, take: bool, family: &str) {
+    if take && !families.iter().any(|had| had == family) {
+        families.push(family.to_owned());
+    }
+}
+
+fn report_lines(label: &str, lines: &[MeasureLine]) {
+    let mut reported = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(previous) = index.checked_sub(1).and_then(|at| lines.get(at)) else {
+            continue;
+        };
+        let pitch = line.baseline - previous.baseline;
+        if !(8.0..40.0).contains(&pitch) {
+            continue;
+        }
+        let kind = if line.han { "han" } else { "latin" };
+        println!(
+            "{label} {kind} pitch {pitch:.2} baseline {baseline:.2} latin_faces {} mixed_faces {}",
+            line.latin_families.join("+"),
+            line.mixed_families.join("+"),
+            baseline = line.baseline,
+        );
+        reported += 1;
+        if reported == 6 {
+            break;
+        }
+    }
+    if reported == 0 {
+        println!("{label} no body line pitch in 8..40 pt");
+    }
+}
+
+struct BBoxWord {
+    y_min: f64,
+    y_max: f64,
+    han: bool,
+    latin: bool,
+}
+
+fn bbox_words(xml: &str) -> Vec<BBoxWord> {
+    let mut words = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<word ") {
+        let after = &rest[start..];
+        let Some(close) = after.find("</word>") else {
+            break;
+        };
+        let Some(tag_end) = after.find('>') else {
+            break;
+        };
+        let tag = &after[..tag_end];
+        let text = &after[tag_end + 1..close];
+        if let (Some(y_min), Some(y_max)) = (bbox_attr(tag, "yMin"), bbox_attr(tag, "yMax")) {
+            words.push(BBoxWord {
+                y_min,
+                y_max,
+                han: has_han(text),
+                latin: text.chars().any(|c| c.is_ascii_alphabetic()),
+            });
+        }
+        rest = &after[close + "</word>".len()..];
+    }
+    words
+}
+
+fn bbox_attr(tag: &str, name: &str) -> Option<f64> {
+    let key = format!("{name}=\"");
+    let start = tag.find(&key)? + key.len();
+    let end = tag[start..].find('"')? + start;
+    tag[start..end].parse().ok()
+}
+
+fn report_bbox(label: &str, xml: &str) {
+    let words = bbox_words(xml);
+    println!("{label} bbox words {}", words.len());
+    let mut lines: Vec<(f64, f64, bool, bool)> = Vec::new();
+    for word in &words {
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|line| (line.0 - word.y_min).abs() < 1.5)
+        {
+            line.1 = line.1.max(word.y_max);
+            line.2 |= word.han;
+            line.3 |= word.latin;
+        } else {
+            lines.push((word.y_min, word.y_max, word.han, word.latin));
+        }
+    }
+    lines.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut reported = 0;
+    for pair in lines.windows(2) {
+        let pitch = pair[1].0 - pair[0].0;
+        if !(8.0..40.0).contains(&pitch) {
+            continue;
+        }
+        let kind = if pair[1].2 { "han" } else { "latin" };
+        let bottom = pair[1].1 - pair[0].1;
+        println!("{label} bbox {kind} line-top {pitch:.2} bottom-delta {bottom:.2}");
+        reported += 1;
+        if reported == 4 {
+            break;
+        }
+    }
+}
+
+fn render_page_png(pdf: &Path, page: u32, name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("rdocx-print").join(name);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("temp {}: {error}", dir.display()));
+    let prefix = dir.join("page");
+    let prefix_arg = prefix
+        .to_str()
+        .unwrap_or_else(|| panic!("prefix {}", prefix.display()));
+    let n = (page + 1).to_string();
+    tool(
+        "pdftoppm",
+        &[
+            "-f",
+            &n,
+            "-l",
+            &n,
+            "-png",
+            "-r",
+            "72",
+            pdf_arg(pdf),
+            prefix_arg,
+        ],
+    );
+    std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .unwrap_or_else(|| panic!("pdftoppm wrote no png in {}", dir.display()))
+}
+
+fn letters(text: &str) -> String {
+    text.chars().filter(|c| c.is_ascii_alphabetic()).collect()
+}
+
+/// Faces of glyph runs whose letters are a slice of `piece`.
+fn faces_of_piece(layout: &PrintLayout, piece: &str) -> Vec<String> {
+    let piece = letters(piece);
+    let mut families = Vec::new();
+    for span in layout.painted_spans() {
+        let text = letters(&span.text);
+        if text.chars().count() < 4 || !piece.contains(&text) {
+            continue;
+        }
+        push_family(&mut families, true, &span.family);
+    }
+    families
+}
+
+fn faces_of_han(layout: &PrintLayout) -> Vec<String> {
+    let mut families = Vec::new();
+    for span in layout.painted_spans() {
+        push_family(&mut families, has_han(&span.text), &span.family);
+    }
+    families
+}
+
+fn report_long_layout(label: &str, layout: &PrintLayout, body: &[Block], pdf_name: &str) {
+    println!("{label} pages {}", layout.page_count());
+    assert_block_pages(layout, body.len());
+    let pdf = write_pdf(pdf_name, &layout.pdf().expect("pdf"));
+    assert_paragraph_on_page(layout.block_pages(), body, "Paragraph 40.", &pdf);
+    let fonts = pdffonts(&pdf);
+    println!("{label} pdffonts:\n{fonts}");
+    println!(
+        "{label} fox faces {}",
+        faces_of_piece(layout, "quick brown fox jumps").join("+")
+    );
+    println!(
+        "{label} lorem faces {}",
+        faces_of_piece(
+            layout,
+            "Lorem ipsum dolor sit amet consectetur adipiscing elit"
+        )
+        .join("+")
+    );
+    println!("{label} han faces {}", faces_of_han(layout).join("+"));
+    let han_page = layout
+        .painted_spans()
+        .into_iter()
+        .find(|span| has_han(&span.text))
+        .map(|span| span.page);
+    let paragraph_page = layout.block_pages()[block_holding(body, "Paragraph 40.")]
+        .first_page
+        .expect("Paragraph 40 has a page");
+    let page = han_page.unwrap_or(paragraph_page);
+    if han_page.is_none() {
+        println!("{label} no painted han text");
+    }
+    let lines = span_lines(layout, page);
+    println!(
+        "{label} painted lines on page {}: {}",
+        page + 1,
+        lines.len()
+    );
+    report_lines(label, &lines);
+    let n = (page + 1).to_string();
+    let bbox = tool(
+        "pdftotext",
+        &[
+            "-bbox",
+            "-enc",
+            "UTF-8",
+            "-f",
+            &n,
+            "-l",
+            &n,
+            pdf_arg(&pdf),
+            "-",
+        ],
+    );
+    report_bbox(label, &bbox);
+    let png = render_page_png(&pdf, page, pdf_name);
+    println!("{label} page image {}", png.display());
+}
+
+#[test]
+fn long_mixed_run_with_and_without_the_cjk_face() {
+    let imported = imported_of(&open("long.docx"));
+    let plain = open("long.docx");
+    let without = plain
+        .print_layout(&patch_json(&keep_patch(&imported)))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    report_long_layout(
+        "long-without-cjk",
+        &without,
+        &imported.body,
+        "long-without-cjk",
+    );
+
+    let face = song_face(&cjk_font());
+    let mut with_font = open("long.docx");
+    add_song(&mut with_font, &face);
+    let with = with_font
+        .print_layout(&patch_json(&keep_patch(&imported)))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    report_long_layout("long-with-cjk", &with, &imported.body, "long-with-cjk");
+    println!(
+        "finding 17 page counts: without {} with {}",
+        without.page_count(),
+        with.page_count()
+    );
 }
 
 #[test]

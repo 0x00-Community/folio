@@ -36,11 +36,42 @@ pub struct PrintFont {
     pub embedded: bool,
 }
 
+/// One model body block, in body order.
+///
+/// Pages are 0-based physical pages. Both are absent when the block has no
+/// placed fragment: the layout returns an empty list for content it did not
+/// place, and `None` for an index past the written body. Nothing is invented
+/// for that block.
+///
+/// `body_layout_fragments` is indexed by the written document's direct body
+/// items. `write` keeps one body item per patch block, in patch order, so
+/// item `i` is model block `i`. On an unmodified document that index is also
+/// the import source map's content index, because import walks body items in
+/// order. After a patch the fragment index follows the written document, not
+/// the original content index an insert would have shifted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockPage {
+    pub index: u32,
+    pub first_page: Option<u32>,
+    pub last_page: Option<u32>,
+}
+
+/// One glyph run as the PDF paints it. Baseline is points from the page top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintedSpan {
+    pub page: u32,
+    pub text: String,
+    pub family: String,
+    pub baseline: f64,
+}
+
 /// The layout of one patched document. Preview and PDF both read it.
 #[derive(Debug)]
 #[wasm_bindgen]
 pub struct PrintLayout {
     layout: oxml_layout::LayoutResult,
+    block_pages: Vec<BlockPage>,
 }
 
 impl PrintLayout {
@@ -89,6 +120,52 @@ impl PrintLayout {
                 embedded: !font.data.is_empty(),
             })
             .collect()
+    }
+
+    pub fn block_pages(&self) -> &[BlockPage] {
+        &self.block_pages
+    }
+
+    /// Glyph runs in paint order, with the face the PDF embeds for each.
+    pub fn painted_spans(&self) -> Vec<PaintedSpan> {
+        let fonts: Vec<(oxml_layout::FontId, String)> = self
+            .layout
+            .fonts
+            .iter()
+            .map(|font| (font.id, font.family.clone()))
+            .collect();
+        let mut spans = Vec::new();
+        for (index, page) in self.layout.pages.iter().enumerate() {
+            let Ok(page_index) = u32::try_from(index) else {
+                continue;
+            };
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                let (text, font_id, origin) = match element {
+                    oxml_layout::PositionedElement::Text(run) => {
+                        (run.text.as_str(), run.font_id, run.origin)
+                    }
+                    oxml_layout::PositionedElement::MultilingualText(run) => {
+                        (run.logical_text.as_str(), run.font_id, run.origin)
+                    }
+                    _ => return,
+                };
+                if text.is_empty() {
+                    return;
+                }
+                let family = fonts
+                    .iter()
+                    .find(|(id, _)| *id == font_id)
+                    .map(|(_, family)| family.clone())
+                    .unwrap_or_else(|| format!("font {}", font_id.0));
+                spans.push(PaintedSpan {
+                    page: page_index,
+                    text: text.to_owned(),
+                    family,
+                    baseline: transform.apply(origin).y,
+                });
+            });
+        }
+        spans
     }
 
     fn used_font_ids(&self) -> BTreeSet<oxml_layout::FontId> {
@@ -153,6 +230,15 @@ impl PrintLayout {
             })
         })
     }
+
+    #[wasm_bindgen(js_name = block_pages)]
+    pub fn block_pages_js(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.block_pages).map_err(|error| {
+            JsValue::from(PrintError::Render {
+                detail: format!("block pages json: {error}"),
+            })
+        })
+    }
 }
 
 impl From<PrintError> for JsValue {
@@ -171,17 +257,57 @@ impl From<PrintError> for JsValue {
 /// `layout_with_fonts` has no bundled fallback, so a missing Calibri would not
 /// resolve. The alias variant tries each `(requested, loaded)` pair after an
 /// exact family and before the bundled metric substitutes.
+///
+/// `body_blocks` is the patch body length. See [`BlockPage`] for the map from
+/// those blocks onto `body_layout_fragments`.
 pub(crate) fn lay_out(
     document: &rdocx::Document,
     fonts: &[(&str, &[u8])],
     aliases: &[(&str, &str)],
+    body_blocks: usize,
 ) -> Result<PrintLayout, PrintError> {
     let laid = document
         .layout_with_fonts_aliases_and_bundled_fallback(fonts, aliases)
         .map_err(classify)?;
+    let block_pages = (0..body_blocks)
+        .map(|index| {
+            let (first_page, last_page) = match laid.body_layout_fragments(index) {
+                Some(fragments) => {
+                    pages_from_physical(fragments.iter().map(|fragment| fragment.physical_page))
+                }
+                None => (None, None),
+            };
+            BlockPage {
+                index: u32::try_from(index).expect("body index fits in u32"),
+                first_page,
+                last_page,
+            }
+        })
+        .collect();
     Ok(PrintLayout {
         layout: laid.layout,
+        block_pages,
     })
+}
+
+/// 1-based physical pages become a 0-based first and last. A page number of 0
+/// is not a placed page and is left out.
+fn pages_from_physical(
+    physical_pages: impl IntoIterator<Item = usize>,
+) -> (Option<u32>, Option<u32>) {
+    let mut first = None;
+    let mut last = None;
+    for physical in physical_pages {
+        let Some(page) = physical.checked_sub(1) else {
+            continue;
+        };
+        let Ok(page) = u32::try_from(page) else {
+            continue;
+        };
+        first = Some(first.map_or(page, |earlier: u32| earlier.min(page)));
+        last = Some(last.map_or(page, |earlier: u32| earlier.max(page)));
+    }
+    (first, last)
 }
 
 fn classify(error: rdocx::Error) -> PrintError {
@@ -227,6 +353,7 @@ mod tests {
         let page = Arc::new(oxml_layout::PageFrame::new(1, 612.0, 792.0, Vec::new()));
         PrintLayout {
             layout: oxml_layout::LayoutResult::new(vec![page], Vec::new(), None, Vec::new()),
+            block_pages: Vec::new(),
         }
     }
 
@@ -265,5 +392,29 @@ mod tests {
         let (width, height) = layout.page_size(0).expect("page 0");
         assert_eq!((width, height), (612.0, 792.0));
         assert_eq!(layout.page_count(), 1);
+        assert!(layout.block_pages().is_empty());
+    }
+
+    #[test]
+    fn block_page_json_uses_null_when_the_block_has_no_fragment() {
+        let page = BlockPage {
+            index: 2,
+            first_page: None,
+            last_page: None,
+        };
+        let json = serde_json::to_string(&page).expect("json");
+        assert_eq!(json, "{\"index\":2,\"firstPage\":null,\"lastPage\":null}");
+        let placed = BlockPage {
+            index: 0,
+            first_page: Some(0),
+            last_page: Some(1),
+        };
+        assert_eq!(
+            serde_json::to_string(&placed).expect("json"),
+            "{\"index\":0,\"firstPage\":0,\"lastPage\":1}"
+        );
+        assert_eq!(pages_from_physical([1, 3, 2]), (Some(0), Some(2)));
+        assert_eq!(pages_from_physical([0]), (None, None));
+        assert_eq!(pages_from_physical(std::iter::empty()), (None, None));
     }
 }

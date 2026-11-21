@@ -99,6 +99,13 @@ export type PrintFontInfo = {
   readonly embedded: boolean
 }
 
+/** One model body block. Pages are 0-based. Both are null when the block was not placed. */
+export type BlockPageInfo = {
+  readonly index: number
+  readonly firstPage: number | null
+  readonly lastPage: number | null
+}
+
 /** One layout. Preview and PDF both read it. `free` drops the wasm object. */
 export type PrintLayout = {
   pageCount(): number
@@ -106,6 +113,7 @@ export type PrintLayout = {
   pagePng(index: number, dpi: number): Uint8Array
   pdf(): Uint8Array
   fonts(): readonly PrintFontInfo[]
+  blockPages(): readonly BlockPageInfo[]
   free(): void
 }
 
@@ -1632,6 +1640,13 @@ function wrapLayout(layout: WasmLayout): PrintLayout {
         throw asPrintError(error)
       }
     },
+    blockPages() {
+      try {
+        return parseBlockPages(layout.block_pages())
+      } catch (error) {
+        throw asPrintError(error)
+      }
+    },
     free() {
       layout.free()
     },
@@ -1645,6 +1660,25 @@ function parsePageSize(json: string): readonly [number, number] {
   const height = parsed[1]
   if (typeof width !== 'number' || typeof height !== 'number') throw renderError('page size')
   return [width, height]
+}
+
+function parseBlockPages(json: string): BlockPageInfo[] {
+  const parsed = parseJson(json)
+  if (!Array.isArray(parsed)) throw renderError('block pages')
+  return parsed.map((item, index) => {
+    if (!isRecord(item) || item.index !== index) throw renderError('block pages')
+    return {
+      index,
+      firstPage: pageOrNull(item.firstPage),
+      lastPage: pageOrNull(item.lastPage),
+    }
+  })
+}
+
+function pageOrNull(value: unknown): number | null {
+  if (value === null) return null
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
+  throw renderError('block pages')
 }
 
 function parsePrintFonts(json: string): PrintFontInfo[] {

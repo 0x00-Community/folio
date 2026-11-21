@@ -194,7 +194,8 @@ impl Session {
             .iter()
             .map(|(requested, loaded)| (requested.as_str(), loaded.as_str()))
             .collect();
-        print::lay_out(&written.document, &fonts, &aliases).map_err(print::PrintFailure::Print)
+        print::lay_out(&written.document, &fonts, &aliases, patch.body.len())
+            .map_err(print::PrintFailure::Print)
     }
 }
 

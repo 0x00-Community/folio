@@ -8,6 +8,8 @@ import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, ins
 import { listMarkers } from './editor/derive.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
+import { drift } from './editor/drift.ts'
+import type { DriftReport } from './editor/drift.ts'
 import { OpenError, SaveVerifyError, SaveWriteError, engineBootMs, loadEngine, saveTampered, wasmMemoryBytes } from './engine/engine.ts'
 import type { Opened, PrintFontInfo, PrintLayout } from './engine/engine.ts'
 import { ensurePrintFonts } from './fonts.ts'
@@ -55,6 +57,11 @@ export interface WordApp {
    * Does not write a file. The PDF is base64. The preview does not call this.
    */
   printLayout(): Promise<PrintMeasure>
+  /**
+   * Dev hook: one print layout of the open document, compared with the editing
+   * view's page per body block. Nothing calls it until the hook does.
+   */
+  drift(): Promise<DriftReport>
 }
 
 export type PrintMeasure = {
@@ -700,6 +707,27 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     }
   }
 
+  async function measureDrift(): Promise<DriftReport> {
+    await whenLaidOut(current())
+    const editorNow = current()
+    const doc = editorNow.state.doc
+    await ensurePrintFonts(editorNow.source, editorNow.source.fontsUsed(doc), documentHasHan(doc))
+    const layout = editorNow.source.printLayout(doc)
+    try {
+      // `blocks` publishes a 1-based page. `pageOf` is the 0-based index the
+      // print layout uses, so a matching block counts as the same page.
+      const edit = doc.body.map((block) => editorNow.pageOf(block.id))
+      const report = drift(edit, layout.blockPages())
+      return {
+        ...report,
+        editPages: editorNow.status().pages,
+        printPages: layout.pageCount(),
+      }
+    } finally {
+      layout.free()
+    }
+  }
+
   const wordHost: Host = {
     state() {
       return editorNow().state
@@ -783,6 +811,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     pageSetupMs: () => lastPageSetupMs,
     memoryBytes: () => wasmMemoryBytes(),
     printLayout: measurePrint,
+    drift: measureDrift,
   }
 }
 

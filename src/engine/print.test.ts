@@ -58,6 +58,21 @@ test('printLayout of basic.docx with the Songti face returns pages and a PDF', (
     const printed = opened.source.printLayout(opened.doc)
     layout = printed
     assert.equal(printed.pageCount() > 0, true, 'page count')
+    const blockPages = printed.blockPages()
+    assert.equal(blockPages.length, opened.doc.body.length)
+    let previous = -1
+    for (const entry of blockPages) {
+      if (entry.firstPage === null) {
+        assert.equal(entry.lastPage, null)
+        continue
+      }
+      assert.equal(entry.lastPage !== null && entry.lastPage >= entry.firstPage, true)
+      assert.equal(entry.firstPage >= previous, true)
+      previous = entry.firstPage
+    }
+    const last = blockPages[blockPages.length - 1]
+    assert.ok(last)
+    assert.equal(last.lastPage, printed.pageCount() - 1)
     const pdf = printed.pdf()
     assert.equal(Buffer.from(pdf.subarray(0, 5)).toString('latin1'), '%PDF-')
     const png = printed.pagePng(0, 144)

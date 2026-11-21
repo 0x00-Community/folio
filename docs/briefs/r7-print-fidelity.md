@@ -2,6 +2,19 @@
 
 Status: unit 4 passes its checks on `r7/print-fidelity` (2026-11-21). Units 1 to 3 are not done.
 
+Unit 3, first step (measured on the host, 2026-11-21, `scripts/e2e/drift.mjs`, before any fix):
+
+| Document | Blocks | Share on the same page | First block that differs | Editing view pages | Preview pages |
+| --- | --- | --- | --- | --- | --- |
+| `basic.docx` | 33 | 0.91 | 18 | 2 | 2 |
+| `long.docx` | 634 | 0.06 | 11 | 50 | 59 |
+| private document | 180 | 0.69 | 40 | 33 | 37 (Word: 35) |
+
+Finding 17 held in part. rdocx draws the Latin text of a run that mixes Latin and Chinese in the Chinese face
+(`long.docx`: Carlito for the first runs, Songti SC for the whole mixed run), and the line that holds it is
+18.15 pt against 16.62 pt for a line of Chinese only. With no caller face the same layout is 67 pages. That is
+a kit defect and is not fixed yet. The editing view's 50 pages were not explained by a test.
+
 Unit 4 as built:
 
 - A line between two cells comes from both facing edges, as rdocx paints it: it is drawn when either cell has it,
