@@ -216,6 +216,99 @@ pub enum LineSpacing {
     AtLeast { pt: f64 },
 }
 
+/// A line, or `None` when the file says the edge has no line (`nil` or `none`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BorderEdge {
+    pub style: BorderStyleName,
+    pub width_pt: f64,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum BorderStyleName {
+    Single,
+    Double,
+    Dashed,
+    Dotted,
+}
+
+/// All six edges. A null edge is one the chosen border set does not draw.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableBorders {
+    #[serde(default)]
+    pub top: Option<BorderEdge>,
+    #[serde(default)]
+    pub left: Option<BorderEdge>,
+    #[serde(default)]
+    pub bottom: Option<BorderEdge>,
+    #[serde(default)]
+    pub right: Option<BorderEdge>,
+    #[serde(default)]
+    pub inside_h: Option<BorderEdge>,
+    #[serde(default)]
+    pub inside_v: Option<BorderEdge>,
+}
+
+/// `None` omits the key (the file does not mention the edge). `Some(None)` is
+/// JSON null: the file says that edge has no line.
+///
+/// Serde reads a JSON null as the outer `None`, so the field module puts the
+/// null back into the inner `None` when the key is present.
+pub type SpecifiedEdge = Option<Option<BorderEdge>>;
+
+mod specified_edge {
+    use super::{BorderEdge, SpecifiedEdge};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &SpecifiedEdge,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(Some(edge)) => edge.serialize(serializer),
+            _ => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SpecifiedEdge, D::Error> {
+        Ok(Some(Option::<BorderEdge>::deserialize(deserializer)?))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CellBorders {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "specified_edge"
+    )]
+    pub top: SpecifiedEdge,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "specified_edge"
+    )]
+    pub left: SpecifiedEdge,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "specified_edge"
+    )]
+    pub bottom: SpecifiedEdge,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "specified_edge"
+    )]
+    pub right: SpecifiedEdge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Table {
@@ -224,6 +317,8 @@ pub struct Table {
     pub src: Option<BlockSrc>,
     pub grid_pt: Vec<f64>,
     pub rows: Vec<Row>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borders: Option<TableBorders>,
 }
 
 impl Table {
@@ -233,6 +328,7 @@ impl Table {
             src,
             grid_pt,
             rows,
+            borders: None,
         }
     }
 }
@@ -256,6 +352,8 @@ pub struct Cell {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v_merge: Option<String>,
     pub blocks: Vec<Block>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borders: Option<CellBorders>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

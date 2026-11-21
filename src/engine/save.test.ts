@@ -164,7 +164,7 @@ function project(doc: Doc): unknown {
 }
 
 test('toDoc then toWireBlock is the import block for every fixture block', () => {
-  for (const name of FIXTURES) {
+  for (const name of [...FIXTURES, 'tables.docx']) {
     const raw = golden(name)
     assert.ok(isRecord(raw), name)
     const built = toDoc(parseImported(raw))

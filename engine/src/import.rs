@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rdocx::{
-    Alignment, BodyItemRef, BreakKind, CellItemRef, Document, HdrFtrType, HeaderFooterKind,
-    HyperlinkItemRef, Length, NumberingFormat, ParagraphItemRef, ParagraphRef, RevisionKind,
-    RunFontSlot, RunItemRef, RunRef, ST_DocGrid, SectionRef, StoryId, StoryItemKind, StoryKind,
-    StyleType, VMerge,
+    Alignment, BodyItemRef, BreakKind, CellBorderEdge, CellItemRef, Document, HdrFtrType,
+    HeaderFooterKind, HyperlinkItemRef, Length, NumberingFormat, ParagraphItemRef, ParagraphRef,
+    RevisionKind, RunFontSlot, RunItemRef, RunRef, ST_DocGrid, SectionRef, StoryId, StoryItemKind,
+    StoryKind, StyleType, TableBorderEdge, TableBorderRef, VMerge,
 };
 
 use crate::wire::{
@@ -946,6 +946,7 @@ fn import_table(
                     VMerge::Continue => "continue".into(),
                 }),
                 blocks: cell_blocks,
+                borders: cell_borders(&cell),
             });
         }
         rows.push(wire::Row {
@@ -955,7 +956,156 @@ fn import_table(
             cells,
         });
     }
-    Block::Table(wire::Table::new(Some(src), grid_pt, rows))
+    let mut imported = wire::Table::new(Some(src), grid_pt, rows);
+    // Direct w:tblBorders replaces the style chain as a whole. An edge the
+    // set does not name draws no line, rather than falling through per edge.
+    imported.borders = table_borders(doc, table);
+    Block::Table(imported)
+}
+
+/// An omitted `w:sz` is half a point, the width the layout paints.
+const DEFAULT_BORDER_EIGHTHS: u32 = 4;
+
+fn table_borders(doc: &Document, table: &rdocx::TableRef<'_>) -> Option<wire::TableBorders> {
+    if let Some(direct) = direct_table_borders(table) {
+        return Some(direct);
+    }
+    table
+        .style_id()
+        .and_then(|style_id| style_chain_borders(doc, style_id))
+}
+
+fn direct_table_borders(table: &rdocx::TableRef<'_>) -> Option<wire::TableBorders> {
+    let top = table.border(TableBorderEdge::Top);
+    let left = table.border(TableBorderEdge::Left);
+    let bottom = table.border(TableBorderEdge::Bottom);
+    let right = table.border(TableBorderEdge::Right);
+    let inside_h = table.border(TableBorderEdge::InsideHorizontal);
+    let inside_v = table.border(TableBorderEdge::InsideVertical);
+    if top.is_none()
+        && left.is_none()
+        && bottom.is_none()
+        && right.is_none()
+        && inside_h.is_none()
+        && inside_v.is_none()
+    {
+        return None;
+    }
+    Some(wire::TableBorders {
+        top: top.and_then(edge_from_ref),
+        left: left.and_then(edge_from_ref),
+        bottom: bottom.and_then(edge_from_ref),
+        right: right.and_then(edge_from_ref),
+        inside_h: inside_h.and_then(edge_from_ref),
+        inside_v: inside_v.and_then(edge_from_ref),
+    })
+}
+
+fn style_chain_borders(doc: &Document, start: &str) -> Option<wire::TableBorders> {
+    let mut next = Some(start.to_string());
+    let mut seen = HashSet::new();
+    while let Some(id) = next {
+        if !seen.insert(id.clone()) {
+            return None;
+        }
+        let style = doc.style(&id)?;
+        if let Some(borders) = borders_of_style(&style) {
+            return Some(borders);
+        }
+        next = style.based_on().map(str::to_string);
+    }
+    None
+}
+
+fn borders_of_style(style: &rdocx::Style<'_>) -> Option<wire::TableBorders> {
+    let borders = style.table_properties()?.borders.as_ref()?;
+    Some(wire::TableBorders {
+        top: borders
+            .top
+            .as_ref()
+            .and_then(|edge| edge_from_parts(edge.val.to_str(), edge.sz, edge.color.as_deref())),
+        left: borders
+            .left
+            .as_ref()
+            .and_then(|edge| edge_from_parts(edge.val.to_str(), edge.sz, edge.color.as_deref())),
+        bottom: borders
+            .bottom
+            .as_ref()
+            .and_then(|edge| edge_from_parts(edge.val.to_str(), edge.sz, edge.color.as_deref())),
+        right: borders
+            .right
+            .as_ref()
+            .and_then(|edge| edge_from_parts(edge.val.to_str(), edge.sz, edge.color.as_deref())),
+        inside_h: borders
+            .inside_h
+            .as_ref()
+            .and_then(|edge| edge_from_parts(edge.val.to_str(), edge.sz, edge.color.as_deref())),
+        inside_v: borders
+            .inside_v
+            .as_ref()
+            .and_then(|edge| edge_from_parts(edge.val.to_str(), edge.sz, edge.color.as_deref())),
+    })
+}
+
+/// A named cell edge. Missing edges stay absent so they do not override the table.
+fn cell_borders(cell: &rdocx::CellRef<'_>) -> Option<wire::CellBorders> {
+    let top = specified_edge(cell.border(CellBorderEdge::Top));
+    let left = specified_edge(cell.border(CellBorderEdge::Left));
+    let bottom = specified_edge(cell.border(CellBorderEdge::Bottom));
+    let right = specified_edge(cell.border(CellBorderEdge::Right));
+    if top.is_none() && left.is_none() && bottom.is_none() && right.is_none() {
+        return None;
+    }
+    Some(wire::CellBorders {
+        top,
+        left,
+        bottom,
+        right,
+    })
+}
+
+fn specified_edge(edge: Option<TableBorderRef<'_>>) -> wire::SpecifiedEdge {
+    edge.map(edge_from_ref)
+}
+
+fn edge_from_ref(edge: TableBorderRef<'_>) -> Option<wire::BorderEdge> {
+    edge_from_parts(edge.style(), edge.size_eighths_pt(), edge.color())
+}
+
+fn edge_from_parts(
+    style: &str,
+    eighths: Option<u32>,
+    color: Option<&str>,
+) -> Option<wire::BorderEdge> {
+    if style == "nil" || style == "none" {
+        return None;
+    }
+    Some(wire::BorderEdge {
+        style: border_style_name(style),
+        width_pt: f64::from(eighths.unwrap_or(DEFAULT_BORDER_EIGHTHS)) / 8.0,
+        color: border_color(color),
+    })
+}
+
+fn border_style_name(style: &str) -> wire::BorderStyleName {
+    match style {
+        "double" => wire::BorderStyleName::Double,
+        "dashed" => wire::BorderStyleName::Dashed,
+        "dotted" => wire::BorderStyleName::Dotted,
+        _ => wire::BorderStyleName::Single,
+    }
+}
+
+fn border_color(value: Option<&str>) -> String {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "000000".into();
+    };
+    let hex = value.trim_start_matches('#');
+    if hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        hex.to_ascii_uppercase()
+    } else {
+        "000000".into()
+    }
 }
 
 fn import_paragraph(

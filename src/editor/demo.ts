@@ -20,6 +20,7 @@ import type {
   TableId,
 } from '../model.ts'
 import { listMarkers } from './derive.ts'
+import { INSERTED_TABLE_BORDERS } from './edit.ts'
 import { PageView } from './pages.ts'
 import type { RenderContext } from './render.ts'
 import './view.css'
@@ -283,7 +284,7 @@ function wideTable(): Table {
       cells,
     })
   }
-  return { kind: 'table', id: TABLE, src: null, props: { align: 'left' }, grid, rows: built }
+  return { kind: 'table', id: TABLE, src: null, props: { align: 'left', borders: INSERTED_TABLE_BORDERS }, grid, rows: built }
 }
 
 interface RoundTrip {

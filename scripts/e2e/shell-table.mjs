@@ -44,6 +44,7 @@ const CHUNK = 48 * 1024
 const HEAD = 'Centered '
 const TAIL = 'paragraph.'
 const basicDoc = readFileSync(new URL('../../fixtures/basic.docx', import.meta.url)).toString('base64')
+const tablesDoc = readFileSync(new URL('../../fixtures/tables.docx', import.meta.url)).toString('base64')
 // acde dev reloads the page when a project file changes. The shot stays outside the project until the checks finish.
 const shots = mkdtempSync(`${tmpdir()}/shell-table-`)
 const shotFile = `${shots}/inserted.png`
@@ -456,6 +457,172 @@ await check('deleting the inserted table round-trips', async () => {
   assert(tableBetween(reopened, HEAD, TAIL) === null, 'reopen still has no inserted table')
   assert(adjacent(reopened, HEAD, TAIL), 'the halves stay adjacent')
   assert(tableContaining(reopened, 'Apples'), 'the fixture table stays')
+})
+
+const RED = { style: 'single', widthPt: 1, color: 'FF0000' }
+const BLACK = { style: 'single', widthPt: 0.5, color: '000000' }
+const BLUE = { style: 'single', widthPt: 1.5, color: '0000FF' }
+const SIX = (edge) => ({ top: edge, left: edge, bottom: edge, right: edge, insideH: edge, insideV: edge })
+
+function shadowParts(value) {
+  if (!value || value === 'none') return []
+  const parts = []
+  const re = /rgba?\([^)]+\)\s+(-?[\d.]+)px\s+(-?[\d.]+)px/g
+  let match = re.exec(value)
+  while (match) {
+    const color = match[0].slice(0, match[0].indexOf(')') + 1)
+    const x = Number(match[1])
+    const y = Number(match[2])
+    let side = ''
+    if (y > 0.05 && Math.abs(x) < 0.05) side = 'top'
+    else if (y < -0.05 && Math.abs(x) < 0.05) side = 'bottom'
+    else if (x > 0.05 && Math.abs(y) < 0.05) side = 'left'
+    else if (x < -0.05 && Math.abs(y) < 0.05) side = 'right'
+    parts.push({ color, side })
+    match = re.exec(value)
+  }
+  return parts
+}
+
+function tableRecord(heading) {
+  return evaluate(`(() => {
+    const want = ${JSON.stringify(heading)}
+    function textOf(para) {
+      return para.inlines.map((inline) => inline.kind === 'text' ? inline.text : '').join('')
+    }
+    const blocks = window.__word.editor.state.doc.body
+    for (let i = 0; i < blocks.length - 1; i++) {
+      const block = blocks[i]
+      if (block.kind !== 'p' || textOf(block) !== want) continue
+      const table = blocks[i + 1]
+      if (!table || table.kind !== 'table') return null
+      const cell = table.rows[0] && table.rows[0].cells[0]
+      return {
+        borders: table.props.borders || null,
+        cell: cell && cell.borders ? cell.borders : null,
+      }
+    }
+    return null
+  })()`)
+}
+
+function firstCellShadow(heading) {
+  return evaluate(`(() => {
+    const want = ${JSON.stringify(heading)}
+    const blocks = [...document.querySelectorAll('.blk')].filter((el) => !el.closest('.repeat-head') && el.getAttribute('aria-hidden') !== 'true')
+    for (let i = 0; i < blocks.length - 1; i++) {
+      const block = blocks[i]
+      if (!block.classList.contains('p') || block.getAttribute('aria-label') !== want) continue
+      const next = blocks[i + 1]
+      if (!next || !next.classList.contains('t')) return ''
+      const cell = next.querySelector('td')
+      return cell ? getComputedStyle(cell).boxShadow : ''
+    }
+    return ''
+  })()`)
+}
+
+function rightEdgeOf(heading) {
+  return evaluate(`(() => {
+    const want = ${JSON.stringify(heading)}
+    const blocks = [...document.querySelectorAll('.blk')].filter((el) => !el.closest('.repeat-head') && el.getAttribute('aria-hidden') !== 'true')
+    for (let i = 0; i < blocks.length - 1; i++) {
+      const block = blocks[i]
+      if (!block.classList.contains('p') || block.getAttribute('aria-label') !== want) continue
+      const next = blocks[i + 1]
+      if (!next || !next.classList.contains('t')) return null
+      const body = next.closest('.page-body')
+      const cells = next.querySelectorAll('tr:first-child td')
+      const last = cells[cells.length - 1]
+      if (!body || !last) return null
+      return {
+        overflow: last.getBoundingClientRect().right - body.getBoundingClientRect().right,
+        shadow: getComputedStyle(last).boxShadow,
+      }
+    }
+    return null
+  })()`)
+}
+
+await check('tables.docx draws each file\'s borders, and an inserted table keeps them', async () => {
+  await openDocument(tablesDoc, 'tables.docx')
+  const error = evaluate(`window.__wordError || ''`)
+  assert(!error, error)
+  await until(`window.__word.editor.status().pagesFinal === true`, { timeout: 60000, label: 'tables.docx pagination' })
+  const cases = [
+    ['No borders', null, null, []],
+    ['Direct borders', SIX(RED), null, ['top', 'left', 'bottom', 'right']],
+    ['Table Grid', SIX(BLACK), null, ['top', 'left', 'bottom', 'right']],
+    ['Cell override', SIX(BLUE), { right: null }, ['top', 'left', 'bottom', 'right']],
+  ]
+  for (const [heading, borders, cell, wantSides] of cases) {
+    const record = tableRecord(heading)
+    sameJson(record && record.borders, borders, `${heading} table borders`)
+    sameJson(record && record.cell, cell, `${heading} cell borders`)
+    const parts = shadowParts(firstCellShadow(heading))
+    const got = parts.map((part) => part.side).filter(Boolean).sort()
+    sameJson(got, wantSides.slice().sort(), `${heading} shadow`)
+    if (borders) {
+      const color = parts[0] && parts[0].color
+      const channel = borders.top.color === 'FF0000' ? '255, 0, 0' : borders.top.color === '0000FF' ? '0, 0, 255' : '0, 0, 0'
+      assert(color && color.includes(channel), `${heading} color ${color}`)
+    }
+  }
+  const edge = rightEdgeOf('Direct borders')
+  assert(edge && edge.overflow <= 0.5, `full-width right edge ${JSON.stringify(edge)}`)
+  assert(shadowParts(edge.shadow).some((part) => part.side === 'right'), `right line ${edge && edge.shadow}`)
+
+  scrollTo('Insert here.')
+  act(namedRef('Insert here.'), 'click')
+  const sink = focusSink()
+  act(sink, 'key', 'home')
+  for (let i = 0; i < 'Insert '.length; i++) act(sink, 'key', 'arrowright')
+  const placed = caretPlace()
+  assert(placed && placed.text === 'Insert here.' && placed.o === 'Insert '.length, `caret ${JSON.stringify(placed)}`)
+  await openInsertDialog()
+  replaceField(ui.rows, '2')
+  replaceField(ui.columns, '2')
+  act(buttonRef(ui.ok, true), 'click')
+  await until(`(() => {
+    const body = window.__word.editor.state.doc.body
+    function textOf(para) {
+      return para && para.kind === 'p' ? para.inlines.map((inline) => inline.kind === 'text' ? inline.text : '').join('') : ''
+    }
+    return body.some((block, index) => block.kind === 'table' && block.rows.length === 2 && block.grid.length === 2 && textOf(body[index - 1]) === 'Insert ' && textOf(body[index + 1]) === 'here.')
+  })()`, { label: 'inserted bordered table' })
+  await dialogClosed()
+  const inserted = tableBetween(bodyProjection(), 'Insert ', 'here.')
+  assert(inserted, 'the new table sits in the paragraph')
+  const model = evaluate(`(() => {
+    const body = window.__word.editor.state.doc.body
+    function textOf(para) {
+      return para.kind === 'p' ? para.inlines.map((inline) => inline.kind === 'text' ? inline.text : '').join('') : ''
+    }
+    for (let i = 1; i < body.length - 1; i++) {
+      if (body[i].kind === 'table' && textOf(body[i - 1]) === 'Insert ' && textOf(body[i + 1]) === 'here.') return body[i].props.borders || null
+    }
+    return null
+  })()`)
+  sameJson(model, SIX(BLACK), 'inserted table borders')
+  const saved = evaluate('window.__word.save()')
+  assert(saved && typeof saved.base64 === 'string' && saved.base64.length > 0, 'save returned no bytes')
+  await openDocument(saved.base64, 'tables-inserted.docx')
+  const reopenedError = evaluate(`window.__wordError || ''`)
+  assert(!reopenedError, reopenedError)
+  await until(`window.__word.editor.status().pagesFinal === true`, { timeout: 60000, label: 'reopened inserted table' })
+  const again = evaluate(`(() => {
+    const body = window.__word.editor.state.doc.body
+    function textOf(para) {
+      return para.kind === 'p' ? para.inlines.map((inline) => inline.kind === 'text' ? inline.text : '').join('') : ''
+    }
+    for (let i = 1; i < body.length - 1; i++) {
+      if (body[i].kind === 'table' && textOf(body[i - 1]) === 'Insert ' && textOf(body[i + 1]) === 'here.') return body[i].props.borders || null
+    }
+    return null
+  })()`)
+  sameJson(again, SIX(BLACK), 'reopened inserted table borders')
+  const painted = shadowParts(firstCellShadow('Insert '))
+  sameJson(painted.map((part) => part.side).filter(Boolean).sort(), ['bottom', 'left', 'right', 'top'], 'reopened shadow')
 })
 
 await check('console has no errors', async () => {

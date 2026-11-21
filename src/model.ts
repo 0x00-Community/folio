@@ -147,11 +147,47 @@ export type LineSpacing =
   | { readonly rule: 'exact'; readonly pt: Pt }
   | { readonly rule: 'atLeast'; readonly pt: Pt }
 
+export type BorderStyleName = 'single' | 'double' | 'dashed' | 'dotted'
+
+export interface BorderLine {
+  readonly style: BorderStyleName
+  readonly widthPt: Pt
+  readonly color: Hex
+}
+
+/** A line, or null when the file says that edge has no line (`nil` or `none`). */
+export type BorderEdge = BorderLine | null
+
+export interface TableBorders {
+  readonly top: BorderEdge
+  readonly left: BorderEdge
+  readonly bottom: BorderEdge
+  readonly right: BorderEdge
+  readonly insideH: BorderEdge
+  readonly insideV: BorderEdge
+}
+
+/**
+ * A key is present only when the cell's `w:tcBorders` names that edge.
+ * Null is no line. A missing key does not override the table.
+ */
+export interface CellBorders {
+  readonly top?: BorderEdge
+  readonly left?: BorderEdge
+  readonly bottom?: BorderEdge
+  readonly right?: BorderEdge
+}
+
 export interface Table {
   readonly kind: 'table'
   readonly id: TableId
   readonly src: TableSrc | null
-  readonly props: { readonly style?: StyleId; readonly align?: 'left' | 'center' | 'right'; readonly widthPt?: Pt }
+  readonly props: {
+    readonly style?: StyleId
+    readonly align?: 'left' | 'center' | 'right'
+    readonly widthPt?: Pt
+    readonly borders?: TableBorders
+  }
   readonly grid: readonly Pt[]
   readonly rows: readonly Row[]
 }
@@ -169,6 +205,7 @@ export interface Cell {
   readonly widthPt?: Pt
   readonly shading?: Hex
   readonly vAlign?: 'top' | 'center' | 'bottom'
+  readonly borders?: CellBorders
   readonly blocks: readonly Block[]
 }
 

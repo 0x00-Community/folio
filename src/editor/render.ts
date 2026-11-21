@@ -3,6 +3,8 @@ import type {
   Atom,
   AtomKind,
   Block,
+  BorderEdge,
+  CellBorders,
   HighlightName,
   LineSpacing,
   Marks,
@@ -15,6 +17,7 @@ import type {
   RunLook,
   Section,
   Table,
+  TableBorders,
 } from '../model.ts'
 
 /** View-only decorations. Rendered, never stored, never measured into the cache. */
@@ -401,6 +404,174 @@ function rowspanAt(table: Table, rowIndex: number, col: number): number {
   return span
 }
 
+export interface CellEdges {
+  readonly top: BorderEdge
+  readonly left: BorderEdge
+  readonly bottom: BorderEdge
+  readonly right: BorderEdge
+}
+
+const NO_EDGES: CellEdges = { top: null, left: null, bottom: null, right: null }
+
+/**
+ * The four edges a cell shows. Outer sides use the table's outer edges, inner
+ * sides use insideH and insideV, and an edge the cell names replaces the table.
+ */
+export function cellEdges(table: Table, rowIndex: number, cellIndex: number): CellEdges {
+  const row = table.rows[rowIndex]
+  const cell = row?.cells[cellIndex]
+  if (!row || !cell) return NO_EDGES
+  const col = columnIndex(table, rowIndex, cellIndex)
+  const columns = columnCount(table, rowIndex)
+  const covered = cell.vMerge === 'restart' ? rowspanAt(table, rowIndex, col) : 1
+  const lastRow = rowIndex + covered - 1
+  return {
+    top: resolveEdge(cell.borders, 'top', table.props.borders, rowIndex === 0 ? 'top' : 'insideH'),
+    left: resolveEdge(cell.borders, 'left', table.props.borders, col === 0 ? 'left' : 'insideV'),
+    bottom: resolveEdge(cell.borders, 'bottom', table.props.borders, lastRow >= table.rows.length - 1 ? 'bottom' : 'insideH'),
+    right: resolveEdge(cell.borders, 'right', table.props.borders, col + cell.span >= columns ? 'right' : 'insideV'),
+  }
+}
+
+/**
+ * The edges this cell paints. A line between two cells is painted once: the
+ * left cell owns a vertical line and the upper cell owns a horizontal line.
+ * rdocx paints each cell's resolved edge on its own, so a side with no line
+ * drops out. When both sides are lines, the later stroke covers the earlier
+ * one, and that later stroke is the one kept: the right neighbour's left, or
+ * the lower neighbour's top.
+ */
+export function paintedCellEdges(table: Table, rowIndex: number, cellIndex: number): CellEdges {
+  const edges = cellEdges(table, rowIndex, cellIndex)
+  const row = table.rows[rowIndex]
+  const cell = row?.cells[cellIndex]
+  if (!row || !cell) return edges
+  const col = columnIndex(table, rowIndex, cellIndex)
+  const covered = cell.vMerge === 'restart' ? rowspanAt(table, rowIndex, col) : 1
+  const below = facingEdge(table, rowIndex + covered, 1, col, cell.span, 'top')
+  const beside = facingEdge(table, rowIndex, covered, col + cell.span, 1, 'left')
+  return {
+    top: rowIndex === 0 ? edges.top : null,
+    left: col === 0 ? edges.left : null,
+    bottom: sharedEdge(edges.bottom, below),
+    right: sharedEdge(edges.right, beside),
+  }
+}
+
+/** Inset shadow for the edges this cell paints. `none` when it paints no line. */
+export function cellBoxShadow(edges: CellEdges): string {
+  const parts: string[] = []
+  // box-shadow is one solid band, so dashed, dotted and double use that band.
+  addBand(parts, edges.top, 0, 1)
+  addBand(parts, edges.left, 1, 0)
+  addBand(parts, edges.bottom, 0, -1)
+  addBand(parts, edges.right, -1, 0)
+  return parts.length === 0 ? 'none' : parts.join(', ')
+}
+
+function resolveEdge(
+  own: CellBorders | undefined,
+  side: keyof CellBorders,
+  tableBorders: TableBorders | undefined,
+  tableSide: keyof TableBorders,
+): BorderEdge {
+  if (own !== undefined && Object.hasOwn(own, side)) {
+    const value = own[side]
+    return value === undefined ? null : value
+  }
+  if (tableBorders === undefined) return null
+  return tableBorders[tableSide]
+}
+
+function columnIndex(table: Table, rowIndex: number, cellIndex: number): number {
+  const cells = table.rows[rowIndex]?.cells ?? []
+  let col = 0
+  for (let i = 0; i < cellIndex; i++) col += cells[i]?.span ?? 0
+  return col
+}
+
+function columnCount(table: Table, rowIndex: number): number {
+  const spanned = table.rows[rowIndex]?.cells.reduce((sum, cell) => sum + cell.span, 0) ?? 0
+  return Math.max(table.grid.length, spanned)
+}
+
+/** A line with a positive width, or null when this side draws nothing. */
+function drawnEdge(edge: BorderEdge): BorderEdge {
+  if (edge !== null && edge.widthPt > 0) return edge
+  return null
+}
+
+/**
+ * One stroke for a shared boundary. The neighbour is painted later, so its
+ * line covers the owner's where both draw. A side that draws nothing leaves
+ * the other side's line in place.
+ */
+function sharedEdge(owner: BorderEdge, facing: BorderEdge): BorderEdge {
+  return drawnEdge(facing) ?? drawnEdge(owner)
+}
+
+/**
+ * The edge of the first cell that faces this span, in row-major order.
+ * A vertical merge paints from its restart cell. When several cells meet one
+ * edge of a span and they differ, the first is the one that counts.
+ */
+function facingEdge(
+  table: Table,
+  rowIndex: number,
+  rowCount: number,
+  col: number,
+  colCount: number,
+  side: 'top' | 'left',
+): BorderEdge {
+  const rowEnd = Math.min(table.rows.length, rowIndex + rowCount)
+  const colEnd = col + colCount
+  for (let row = rowIndex; row < rowEnd; row++) {
+    for (let cursor = col; cursor < colEnd; cursor++) {
+      const at = cellCovering(table, row, cursor)
+      if (!at) continue
+      return cellEdges(table, at.row, at.cell)[side]
+    }
+  }
+  return null
+}
+
+/** The cell that paints this grid position. A vertical merge paints from its restart. */
+function cellCovering(table: Table, rowIndex: number, col: number): { readonly row: number; readonly cell: number } | null {
+  let row = rowIndex
+  let cell = cellIndexAt(table, row, col)
+  if (cell === null) return null
+  while (row > 0 && table.rows[row]?.cells?.[cell]?.vMerge === 'continue') {
+    const above = cellIndexAt(table, row - 1, col)
+    if (above === null) break
+    row -= 1
+    cell = above
+  }
+  return { row, cell }
+}
+
+function cellIndexAt(table: Table, rowIndex: number, col: number): number | null {
+  const cells = table.rows[rowIndex]?.cells
+  if (!cells) return null
+  let cursor = 0
+  for (let index = 0; index < cells.length; index++) {
+    const span = cells[index]?.span ?? 0
+    if (col >= cursor && col < cursor + span) return index
+    cursor += span
+  }
+  return null
+}
+
+function addBand(parts: string[], edge: BorderEdge, xSign: number, ySign: number): void {
+  if (edge === null || !(edge.widthPt > 0)) return
+  const color = /^[0-9A-Fa-f]{6}$/.test(edge.color) ? `#${edge.color}` : '#000000'
+  const width = edge.widthPt * PT_TO_PX
+  parts.push(`inset ${cssPx(xSign * width)} ${cssPx(ySign * width)} 0 ${color}`)
+}
+
+function cssPx(value: number): string {
+  return `${Math.round(value * 1000) / 1000}px`
+}
+
 function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefined): HTMLElement {
   const el = document.createElement('div')
   el.className = 'blk t'
@@ -436,7 +607,9 @@ function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefi
     tr.dataset.cantSplit = '1'
     if (row.props.heightPt) tr.style.height = `${px(row.props.heightPt)}px`
     let col = 0
-    for (const cell of row.cells) {
+    for (let c = 0; c < row.cells.length; c++) {
+      const cell = row.cells[c]
+      if (!cell) continue
       if (cell.vMerge === 'continue') {
         col += cell.span
         continue
@@ -445,6 +618,8 @@ function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefi
       if (cell.span > 1) td.colSpan = cell.span
       const rows = cell.vMerge === 'restart' ? rowspanAt(table, r, col) : 1
       if (rows > 1) td.rowSpan = rows
+      const shadow = cellBoxShadow(paintedCellEdges(table, r, c))
+      if (shadow !== 'none') td.style.boxShadow = shadow
       if (cell.shading) td.style.backgroundColor = `#${cell.shading}`
       if (cell.vAlign === 'center') td.style.verticalAlign = 'middle'
       else if (cell.vAlign) td.style.verticalAlign = cell.vAlign

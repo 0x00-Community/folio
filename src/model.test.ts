@@ -12,11 +12,13 @@ import {
 } from './model.ts'
 import {
   cell,
+  hex,
   imageAtom,
   makeDoc,
   opaqueAtom,
   paraId,
   paragraph,
+  pt,
   row,
   runSrc,
   storyKey,
@@ -100,6 +102,21 @@ test('newParaId mints distinct ids', () => {
   const first = newParaId()
   const second = newParaId()
   assert.notEqual(first, second, 'ids are never reused')
+})
+
+test('checkDoc accepts table and cell borders', () => {
+  const line = { style: 'single' as const, widthPt: pt(0.5), color: hex('000000') }
+  const borders = { top: line, left: line, bottom: line, right: line, insideH: line, insideV: line }
+  const plain = table('t', [row([cell([paragraph('a', [text('a')])])])])
+  const bordered = {
+    ...plain,
+    props: { borders },
+    rows: plain.rows.map((entry, index) => index === 0
+      ? { ...entry, cells: entry.cells.map((item, cellIndex) => cellIndex === 0 ? { ...item, borders: { right: null } } : item) }
+      : entry),
+  }
+  checkDoc(makeDoc([bordered]))
+  checkDoc(makeDoc([plain]))
 })
 
 test('checkDoc accepts a table, a locked paragraph, and a story with its own src cursor', () => {

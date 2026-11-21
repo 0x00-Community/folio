@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 use rdocx::{
-    BodyItemRef, CellItemRef, Document, HdrFtrType, HeaderFooterKind, StoryId, StoryItemKind,
+    BodyItemRef, BorderStyle, CellBorderEdge, CellItemRef, Document, HdrFtrType, HeaderFooterKind,
+    StoryId, StoryItemKind, TableBorderEdge,
 };
 use rdocx_word_engine::Session;
-use rdocx_word_engine::wire::{Atom, Block, Imported, Inline};
+use rdocx_word_engine::wire::{Atom, Block, BorderEdge, BorderStyleName, Imported, Inline};
 use serde_json::Value;
 
 fn golden(name: &str) -> String {
@@ -175,6 +176,7 @@ fn basic_long_and_preserve_text_matches_rdocx() {
     assert_texts_match("basic.docx");
     assert_texts_match("long.docx");
     assert_texts_match("preserve.docx");
+    assert_texts_match("tables.docx");
 }
 
 #[test]
@@ -374,7 +376,7 @@ fn header_story_text_matches_story_items() {
 
 #[test]
 fn fixture_import_matches_recorded_golden_json() {
-    for name in ["basic.docx", "long.docx", "preserve.docx"] {
+    for name in ["basic.docx", "long.docx", "preserve.docx", "tables.docx"] {
         let bytes = fixture(name);
         let session = Session::from_bytes(&bytes).expect("session opens");
         let actual = session.import();
@@ -398,6 +400,139 @@ fn fixture_import_matches_recorded_golden_json() {
             String::from_utf8_lossy(&expected_bytes[start..(index + 60).min(expected_bytes.len())]),
         );
     }
+}
+
+#[test]
+fn tables_docx_borders_follow_direct_style_and_cell() {
+    let (_, imported, _) = open("tables.docx");
+    let mut headings = Vec::new();
+    let mut tables = Vec::new();
+    for block in &imported.body {
+        match block {
+            Block::P(para) => headings.push(flat_text(&para.inlines)),
+            Block::Table(table) => tables.push(table),
+            Block::Opaque(_) => {}
+        }
+    }
+    assert_eq!(
+        headings,
+        [
+            "No borders",
+            "Direct borders",
+            "Table Grid",
+            "Cell override",
+            "Insert here.",
+        ]
+    );
+    assert_eq!(tables.len(), 4);
+
+    assert!(
+        tables[0].borders.is_none(),
+        "a table with no borders omits them"
+    );
+    assert!(cells_omit_borders(tables[0]));
+
+    let direct = line(BorderStyleName::Single, 1.0, "FF0000");
+    assert_eq!(
+        tables[1].borders.as_ref().map(edges_of),
+        Some(vec![direct.clone(); 6])
+    );
+    assert!(cells_omit_borders(tables[1]));
+
+    let grid = line(BorderStyleName::Single, 0.5, "000000");
+    assert_eq!(
+        tables[2].borders.as_ref().map(edges_of),
+        Some(vec![grid.clone(); 6])
+    );
+    assert!(
+        cells_omit_borders(tables[2]),
+        "Table Grid borders stay on the table"
+    );
+
+    let blue = line(BorderStyleName::Single, 1.5, "0000FF");
+    assert_eq!(
+        tables[3].borders.as_ref().map(edges_of),
+        Some(vec![blue; 6])
+    );
+    let over = tables[3].rows[0].cells[0]
+        .borders
+        .as_ref()
+        .expect("cell override");
+    assert!(over.top.is_none() && over.left.is_none() && over.bottom.is_none());
+    assert_eq!(over.right, Some(None), "the named right edge is no line");
+    assert!(tables[3].rows[0].cells[1].borders.is_none());
+    assert!(
+        tables[3].rows[1]
+            .cells
+            .iter()
+            .all(|cell| cell.borders.is_none())
+    );
+}
+
+#[test]
+fn nil_and_none_are_null_and_an_unnamed_style_is_single() {
+    let mut doc = Document::new();
+    {
+        let mut table = doc.add_table(1, 1);
+        table
+            .set_border_checked(TableBorderEdge::Top, BorderStyle::Thick, 8, "auto")
+            .expect("top");
+        table
+            .set_border_checked(TableBorderEdge::Left, BorderStyle::None, 0, "auto")
+            .expect("left");
+        if let Some(mut cell) = table.cell(0, 0) {
+            cell.set_border_checked(CellBorderEdge::Right, BorderStyle::None, 0, "00ff00")
+                .expect("cell");
+        }
+    }
+    let bytes = doc.to_bytes().expect("bytes");
+    let session = Session::from_bytes(&bytes).expect("session");
+    let imported: Imported = serde_json::from_str(&session.import()).expect("wire");
+    let Block::Table(table) = &imported.body[0] else {
+        panic!("table");
+    };
+    let borders = table.borders.as_ref().expect("direct borders");
+    let top = borders.top.as_ref().expect("thick becomes a line");
+    assert_eq!(top.style, BorderStyleName::Single);
+    assert_eq!(top.width_pt, 1.0);
+    assert_eq!(top.color, "000000");
+    assert!(borders.left.is_none(), "none is no line");
+    assert!(
+        borders.bottom.is_none(),
+        "an omitted edge of a present set is no line"
+    );
+    let cell = table.rows[0].cells[0].borders.as_ref().expect("cell edge");
+    assert_eq!(cell.right, Some(None));
+    assert!(cell.top.is_none() && cell.left.is_none() && cell.bottom.is_none());
+}
+
+fn line(style: BorderStyleName, width_pt: f64, color: &str) -> BorderEdge {
+    BorderEdge {
+        style,
+        width_pt,
+        color: color.to_string(),
+    }
+}
+
+fn edges_of(borders: &rdocx_word_engine::wire::TableBorders) -> Vec<BorderEdge> {
+    [
+        borders.top.clone(),
+        borders.left.clone(),
+        borders.bottom.clone(),
+        borders.right.clone(),
+        borders.inside_h.clone(),
+        borders.inside_v.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn cells_omit_borders(table: &rdocx_word_engine::wire::Table) -> bool {
+    table
+        .rows
+        .iter()
+        .all(|row| row.cells.iter().all(|cell| cell.borders.is_none()))
 }
 
 #[test]

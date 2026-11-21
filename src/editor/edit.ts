@@ -10,6 +10,7 @@ import {
 import type {
   Atom,
   Block,
+  BorderLine,
   Cell,
   Doc,
   DocIndex,
@@ -37,6 +38,7 @@ import type {
   StyleId,
   StyleRole,
   Table,
+  TableBorders,
   TableId,
   TextRun,
 } from '../model.ts'
@@ -1651,6 +1653,18 @@ function removeTable(doc: Doc, id: TableId): { doc: Doc, pos: Pos } | null {
   return { doc: { ...doc, body }, pos }
 }
 
+const insertedEdge: BorderLine = { style: 'single', widthPt: asPt(0.5), color: '000000' as Hex }
+
+/** The six edges write.rs gives a table the editor inserts: single, half a point, black. */
+export const INSERTED_TABLE_BORDERS: TableBorders = {
+  top: insertedEdge,
+  left: insertedEdge,
+  bottom: insertedEdge,
+  right: insertedEdge,
+  insideH: insertedEdge,
+  insideV: insertedEdge,
+}
+
 function makeTable(doc: Doc, loc: ParaLoc, rows: number, cols: number): Table {
   const width = contentWidth(doc, sectionIndex(doc, loc))
   const colWidth = asPt(Math.max(36, width / cols))
@@ -1661,7 +1675,7 @@ function makeTable(doc: Doc, loc: ParaLoc, rows: number, cols: number): Table {
     for (let c = 0; c < cols; c++) cells.push(emptyCell())
     body.push({ src: null, props: {}, cells })
   }
-  return { kind: 'table', id: newTableId(), src: null, props: {}, grid, rows: body }
+  return { kind: 'table', id: newTableId(), src: null, props: { borders: INSERTED_TABLE_BORDERS }, grid, rows: body }
 }
 
 function newTableId(): TableId {

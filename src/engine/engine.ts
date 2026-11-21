@@ -3,7 +3,9 @@ import init, { PrintLayout as WasmLayout, Session, type MediaFile } from './pkg/
 import type {
   Atom,
   Block,
+  BorderEdge,
   Cell,
+  CellBorders,
   Doc,
   Hex,
   HighlightName,
@@ -34,6 +36,7 @@ import type {
   StyleId,
   StyleRole,
   Table,
+  TableBorders,
   TableId,
   TableSrc,
   CellSrc,
@@ -684,7 +687,24 @@ function toWireLine(line: LineSpacing): wire.LineSpacing {
 function toWireTable(table: Table): wire.Table {
   const out: wire.Table = { kind: 'table', gridPt: [...table.grid], rows: table.rows.map(toWireRow) }
   if (table.src !== null) out.src = table.src
+  if (table.props.borders) out.borders = toWireTableBorders(table.props.borders)
   return out
+}
+
+function toWireTableBorders(borders: TableBorders): wire.TableBorders {
+  return {
+    top: toWireEdge(borders.top),
+    left: toWireEdge(borders.left),
+    bottom: toWireEdge(borders.bottom),
+    right: toWireEdge(borders.right),
+    insideH: toWireEdge(borders.insideH),
+    insideV: toWireEdge(borders.insideV),
+  }
+}
+
+function toWireEdge(edge: BorderEdge): wire.BorderEdge {
+  if (edge === null) return null
+  return { style: edge.style, widthPt: edge.widthPt, color: edge.color }
 }
 
 function toWireRow(row: Row): wire.Row {
@@ -701,6 +721,16 @@ function toWireCell(cell: Cell): wire.Cell {
   const out: wire.Cell = { span: cell.span, blocks: cell.blocks.map(toWireBlock) }
   if (cell.src !== null) out.src = cell.src
   if (cell.vMerge) out.vMerge = cell.vMerge
+  if (cell.borders) out.borders = toWireCellBorders(cell.borders)
+  return out
+}
+
+function toWireCellBorders(borders: CellBorders): wire.CellBorders {
+  const out: wire.CellBorders = {}
+  if (borders.top !== undefined) out.top = toWireEdge(borders.top)
+  if (borders.left !== undefined) out.left = toWireEdge(borders.left)
+  if (borders.bottom !== undefined) out.bottom = toWireEdge(borders.bottom)
+  if (borders.right !== undefined) out.right = toWireEdge(borders.right)
   return out
 }
 
@@ -878,14 +908,31 @@ function modelSpacing(props: wire.ParaProps): ParaProps['spacing'] | undefined {
 
 function modelTable(table: wire.Table, ids: Ids): Table {
   ids.table += 1
+  const borders = table.borders ? modelTableBorders(table.borders) : undefined
   return {
     kind: 'table',
     id: tableId(`t${ids.table}`),
     src: typeof table.src === 'number' ? (table.src as TableSrc) : null,
-    props: {},
+    props: borders === undefined ? {} : { borders },
     grid: table.gridPt.map(pt),
     rows: table.rows.map((row) => modelRow(row, ids)),
   }
+}
+
+function modelTableBorders(borders: wire.TableBorders): TableBorders {
+  return {
+    top: modelEdge(borders.top),
+    left: modelEdge(borders.left),
+    bottom: modelEdge(borders.bottom),
+    right: modelEdge(borders.right),
+    insideH: modelEdge(borders.insideH),
+    insideV: modelEdge(borders.insideV),
+  }
+}
+
+function modelEdge(edge: wire.BorderEdge): BorderEdge {
+  if (edge === null) return null
+  return { style: edge.style, widthPt: pt(edge.widthPt), color: hex(edge.color) }
 }
 
 function modelRow(row: wire.Row, ids: Ids): Row {
@@ -897,12 +944,26 @@ function modelRow(row: wire.Row, ids: Ids): Row {
 }
 
 function modelCell(cell: wire.Cell, ids: Ids): Cell {
+  const borders = cell.borders ? modelCellBorders(cell.borders) : undefined
   return {
     src: typeof cell.src === 'number' ? (cell.src as CellSrc) : null,
     span: cell.span,
     vMerge: cell.vMerge === 'restart' || cell.vMerge === 'continue' ? cell.vMerge : null,
+    ...(borders === undefined ? {} : { borders }),
     blocks: cell.blocks.map((block) => modelBlock(block, ids)),
   }
+}
+
+function modelCellBorders(borders: wire.CellBorders): CellBorders | undefined {
+  const out: { top?: BorderEdge; left?: BorderEdge; bottom?: BorderEdge; right?: BorderEdge } = {}
+  if (borders.top !== undefined) out.top = modelEdge(borders.top)
+  if (borders.left !== undefined) out.left = modelEdge(borders.left)
+  if (borders.bottom !== undefined) out.bottom = modelEdge(borders.bottom)
+  if (borders.right !== undefined) out.right = modelEdge(borders.right)
+  if (out.top === undefined && out.left === undefined && out.bottom === undefined && out.right === undefined) {
+    return undefined
+  }
+  return out
 }
 
 function modelOpaque(block: wire.Opaque, ids: Ids): OpaqueBlock {
@@ -1189,12 +1250,46 @@ function parseLine(value: unknown, path: string): wire.LineSpacing {
 }
 
 function parseTable(record: Record<string, unknown>, path: string): wire.Table {
-  return {
+  const out: wire.Table = {
     kind: 'table',
     src: optNum(record.src, `${path}.src`),
     gridPt: arr(record.gridPt, `${path}.gridPt`).map((item, index) => finite(item, `${path}.gridPt[${index}]`)),
     rows: arr(record.rows, `${path}.rows`).map((item, index) => parseRow(item, `${path}.rows[${index}]`)),
   }
+  if (record.borders !== undefined && record.borders !== null) {
+    out.borders = parseTableBorders(record.borders, `${path}.borders`)
+  }
+  return out
+}
+
+function parseTableBorders(value: unknown, path: string): wire.TableBorders {
+  const record = rec(value, path)
+  return {
+    top: parseBorderEdge(record.top, `${path}.top`),
+    left: parseBorderEdge(record.left, `${path}.left`),
+    bottom: parseBorderEdge(record.bottom, `${path}.bottom`),
+    right: parseBorderEdge(record.right, `${path}.right`),
+    insideH: parseBorderEdge(record.insideH, `${path}.insideH`),
+    insideV: parseBorderEdge(record.insideV, `${path}.insideV`),
+  }
+}
+
+function parseBorderEdge(value: unknown, path: string): wire.BorderEdge {
+  if (value === undefined || value === null) return null
+  const record = rec(value, path)
+  const color = text(record.color, `${path}.color`)
+  if (!/^[0-9A-Fa-f]{6}$/.test(color)) fail(path, 'expected six hex digits')
+  return {
+    style: parseBorderStyle(record.style, `${path}.style`),
+    widthPt: finite(record.widthPt, `${path}.widthPt`),
+    color: color.toUpperCase(),
+  }
+}
+
+function parseBorderStyle(value: unknown, path: string): wire.BorderStyleName {
+  const style = text(value, path)
+  if (style === 'single' || style === 'double' || style === 'dashed' || style === 'dotted') return style
+  fail(path, 'unknown border style')
 }
 
 function parseRow(value: unknown, path: string): wire.Row {
@@ -1209,12 +1304,26 @@ function parseRow(value: unknown, path: string): wire.Row {
 
 function parseCell(value: unknown, path: string): wire.Cell {
   const record = rec(value, path)
-  return {
+  const out: wire.Cell = {
     src: optNum(record.src, `${path}.src`),
     span: finite(record.span, `${path}.span`),
     vMerge: optText(record.vMerge, `${path}.vMerge`),
     blocks: arr(record.blocks, `${path}.blocks`).map((item, index) => parseBlock(item, `${path}.blocks[${index}]`)),
   }
+  if (record.borders !== undefined && record.borders !== null) {
+    out.borders = parseCellBorders(record.borders, `${path}.borders`)
+  }
+  return out
+}
+
+function parseCellBorders(value: unknown, path: string): wire.CellBorders {
+  const record = rec(value, path)
+  const out: wire.CellBorders = {}
+  if ('top' in record) out.top = parseBorderEdge(record.top, `${path}.top`)
+  if ('left' in record) out.left = parseBorderEdge(record.left, `${path}.left`)
+  if ('bottom' in record) out.bottom = parseBorderEdge(record.bottom, `${path}.bottom`)
+  if ('right' in record) out.right = parseBorderEdge(record.right, `${path}.right`)
+  return out
 }
 
 function parseOpaque(record: Record<string, unknown>, path: string): wire.Opaque {

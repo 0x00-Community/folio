@@ -1,6 +1,15 @@
 # Round 7 brief: print fidelity
 
-Status: planned on 2026-11-21. Nothing is built.
+Status: unit 4 passes its checks on `r7/print-fidelity` (2026-11-21). Units 1 to 3 are not done.
+
+Unit 4 as built:
+
+- A line between two cells comes from both facing edges, as rdocx paints it: it is drawn when either cell has it,
+  and when both do and differ, the right or lower cell's edge is the one drawn. The owner cell still paints it once.
+- Dashed, dotted and double edges are drawn as one solid band, because an inset shadow is one band.
+- Conditional regions of a table style (first row, banding) are not imported.
+- Open: rdocx treats a cell edge of `none` as unset and falls back to the table's edge, and only `nil` removes
+  the line. The importer stores both as no line.
 
 ## Goal
 

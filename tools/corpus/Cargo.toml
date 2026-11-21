@@ -5,6 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-rdocx = { path = "../../../rdocx/crates/rdocx" }
+rdocx = { path = "../../../rdocx-editing-kit/crates/rdocx" }
 
 [workspace]

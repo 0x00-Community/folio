@@ -7,8 +7,8 @@ use rdocx_word_engine::Session;
 use rdocx_word_engine::import::{self, Import};
 use rdocx_word_engine::verify;
 use rdocx_word_engine::wire::{
-    Atom, Block, BridgeError, Cell, Inline, ListDef, ListLevel, Marks, MediaPart, Para, ParaProps,
-    Patch, PatchBlock, Row, Section, Table,
+    Atom, Block, BorderEdge, BorderStyleName, BridgeError, Cell, Inline, ListDef, ListLevel, Marks,
+    MediaPart, Para, ParaProps, Patch, PatchBlock, Row, Section, Table, TableBorders,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -1637,6 +1637,7 @@ fn blank_row(template: &Row) -> Row {
                 span: cell.span,
                 v_merge: None,
                 blocks: vec![Block::P(empty_para())],
+                borders: None,
             })
             .collect(),
     }
@@ -1661,11 +1662,34 @@ fn fresh_table(rows: usize, cols: usize, width: f64) -> Table {
                     span: 1,
                     v_merge: None,
                     blocks: vec![Block::P(empty_para())],
+                    borders: None,
                 })
                 .collect(),
         });
     }
-    Table::new(None, vec![width; cols], table_rows)
+    let mut table = Table::new(None, vec![width; cols], table_rows);
+    table.borders = Some(inserted_borders());
+    table
+}
+
+fn inserted_line() -> BorderEdge {
+    BorderEdge {
+        style: BorderStyleName::Single,
+        width_pt: 0.5,
+        color: "000000".to_string(),
+    }
+}
+
+fn inserted_borders() -> TableBorders {
+    let edge = inserted_line();
+    TableBorders {
+        top: Some(edge.clone()),
+        left: Some(edge.clone()),
+        bottom: Some(edge.clone()),
+        right: Some(edge.clone()),
+        inside_h: Some(edge.clone()),
+        inside_v: Some(edge),
+    }
 }
 
 fn insert_block(
@@ -1813,6 +1837,7 @@ fn insert_grid_column(table: &mut Table, at: usize) {
             span: 1,
             v_merge: None,
             blocks: vec![Block::P(empty_para())],
+            borders: None,
         };
         row.cells.insert(at.min(row.cells.len()), cell);
     }
@@ -1845,6 +1870,7 @@ fn inserted_table_sits_between_paragraphs_at_the_edges_and_inside_a_split() {
         unreachable!("table");
     };
     assert_grid(&table.grid_pt, &[width, width]);
+    assert_eq!(table.borders, Some(inserted_borders()));
     assert_single_borders(&bytes, index);
 
     let first_text = text_of_block(&before.imported.body[0]);

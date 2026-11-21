@@ -86,11 +86,33 @@ export type LineSpacing =
   | { rule: 'exact'; pt: number }
   | { rule: 'atLeast'; pt: number }
 
+export type BorderStyleName = 'single' | 'double' | 'dashed' | 'dotted'
+
+export type BorderEdge = { style: BorderStyleName; widthPt: number; color: string } | null
+
+export type TableBorders = {
+  top: BorderEdge
+  left: BorderEdge
+  bottom: BorderEdge
+  right: BorderEdge
+  insideH: BorderEdge
+  insideV: BorderEdge
+}
+
+/** A missing key is an edge the file does not mention. Null is an edge with no line. */
+export type CellBorders = {
+  top?: BorderEdge
+  left?: BorderEdge
+  bottom?: BorderEdge
+  right?: BorderEdge
+}
+
 export type Table = {
   kind: 'table'
   src?: number | null
   gridPt: number[]
   rows: Row[]
+  borders?: TableBorders | null
 }
 
 export type Row = {
@@ -105,6 +127,7 @@ export type Cell = {
   span: number
   vMerge?: string | null
   blocks: Block[]
+  borders?: CellBorders | null
 }
 
 export type Opaque = {

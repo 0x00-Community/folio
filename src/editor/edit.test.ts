@@ -14,6 +14,7 @@ import {
   deleteSelection,
   deleteTable,
   HISTORY_LIMIT,
+  INSERTED_TABLE_BORDERS,
   initialState,
   insertColumn,
   insertImage,
@@ -416,6 +417,7 @@ test('tables insert, grow, shrink, and clear cells without dropping structure', 
   const middle = run(caretAt(initialState(makeDoc([para])), para.id, 2), insertTable(2, 2))
   assert.equal(flatText(asParagraph(middle.doc.body[0])), 'ab', 'a table in the middle keeps the head')
   const inserted = asTable(middle.doc.body[1])
+  assert.deepEqual(inserted.props.borders, INSERTED_TABLE_BORDERS, 'an inserted table has the borders save writes')
   assert.equal(inserted.rows.length, 2, 'the table has the requested rows')
   assert.equal(inserted.grid.length, 2, 'the table has the requested columns')
   const firstCell = inserted.rows[0]?.cells[0]?.blocks[0]

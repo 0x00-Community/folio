@@ -172,19 +172,18 @@ img.atom {
 }
 
 /* Cell lines are inset shadows, not borders. With collapsed borders acdert lays each column out one
-   pixel wider than its <col>, so a table as wide as the text area lost its right edge to the clip. */
+   pixel wider than its <col>, so a table as wide as the text area lost its right edge to the clip.
+   render.ts sets the shadow from the file. A table with no borders draws none. */
 .blk.t > table,
 .repeat-head {
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
-  box-shadow: inset 1px 1px 0 #8d8d8d;
 }
 
 .blk.t td,
 .repeat-head td {
   box-sizing: border-box;
-  box-shadow: inset -1px -1px 0 #8d8d8d;
   vertical-align: top;
   padding: 3px 5px 3px 5px;
   overflow-wrap: break-word;

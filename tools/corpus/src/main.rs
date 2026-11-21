@@ -1,6 +1,9 @@
 //! Writes the fixture documents the editor is verified against: `cargo run --release -- <out dir>`.
 
-use rdocx::{Alignment, BreakKind, Document, Length, ListLevel, RunRange, RunPosition};
+use rdocx::{
+    Alignment, BorderStyle, BreakKind, CellBorderEdge, Document, Length, ListLevel, RunPosition,
+    RunRange,
+};
 use std::path::Path;
 
 fn main() -> rdocx::Result<()> {
@@ -9,6 +12,7 @@ fn main() -> rdocx::Result<()> {
     basic(&Path::new(&out).join("basic.docx"))?;
     long(&Path::new(&out).join("long.docx"), 100)?;
     preserve(&Path::new(&out).join("preserve.docx"))?;
+    tables(&Path::new(&out).join("tables.docx"))?;
     Ok(())
 }
 
@@ -98,6 +102,52 @@ fn long(path: &Path, pages: usize) -> rdocx::Result<()> {
         p.add_run("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. 这是一段中文内容，用来测试长文档的排版性能。");
     }
     doc.save(path)
+}
+
+fn tables(path: &Path) -> rdocx::Result<()> {
+    let mut doc = Document::new();
+    if doc.style("TableGrid").is_none() {
+        return Err(rdocx::Error::Other(
+            "TableGrid is missing from a new document".into(),
+        ));
+    }
+    heading(&mut doc, "No borders");
+    fill(&mut doc.add_table(2, 2), &["n00", "n01", "n10", "n11"]);
+    heading(&mut doc, "Direct borders");
+    {
+        let mut table = doc.add_table(2, 2);
+        table.set_borders(BorderStyle::Single, 8, "FF0000");
+        fill(&mut table, &["d00", "d01", "d10", "d11"]);
+    }
+    heading(&mut doc, "Table Grid");
+    {
+        let mut table = doc.add_table(2, 2);
+        table.set_style("TableGrid");
+        fill(&mut table, &["g00", "g01", "g10", "g11"]);
+    }
+    heading(&mut doc, "Cell override");
+    {
+        let mut table = doc.add_table(2, 2);
+        table.set_borders(BorderStyle::Single, 12, "0000FF");
+        fill(&mut table, &["c00", "c01", "c10", "c11"]);
+        if let Some(mut cell) = table.cell(0, 0) {
+            cell.set_border_checked(CellBorderEdge::Right, BorderStyle::None, 0, "auto")?;
+        }
+    }
+    doc.add_paragraph("Insert here.");
+    doc.save(path)
+}
+
+fn heading(doc: &mut Document, text: &str) {
+    doc.add_paragraph(text).set_style("Heading1");
+}
+
+fn fill(table: &mut rdocx::Table<'_>, texts: &[&str]) {
+    for (index, text) in texts.iter().enumerate() {
+        if let Some(mut cell) = table.cell(index / 2, index % 2) {
+            cell.set_text(text);
+        }
+    }
 }
 
 fn preserve(path: &Path) -> rdocx::Result<()> {
