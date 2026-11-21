@@ -84,6 +84,7 @@ Each unit ends in a check that must pass before its result merges. Code is writt
 | 4 | Tables, images, page setup, lists UI | Grok | e2e per feature, round-trip through save |
 | 5 | PDF export through caller fonts, print preview | Grok | Chinese fixture PDF embeds SimSun, `pdftotext` matches |
 | 6 | Automation interface: operate the document and read its structure (see below) | Grok | a script edits `basic.docx` through the interface alone and reads back the outline, saved bytes match |
+| 7 | Print fidelity: merged rows across pages, font memory, page breaks that match the preview, table borders from the file (see below) | Grok, kit and app worktrees | on the private document no text past a page and memory under the window's limit; drift report at 0.9 or better |
 
 ## Round 6: an automation interface
 
@@ -142,3 +143,32 @@ JSON in and JSON out, and the transport is a thin wrapper that comes later.
   them move to `word.call`. Moving them is not part of this round.
 
 The data shapes and the checks are in `docs/briefs/r6-automation.md`.
+
+## Round 7: print fidelity
+
+Chosen by the user on 2026-11-21 from the open items of the earlier rounds. It closes the four that round 5
+recorded. The causes below were read from the code, not run. The brief makes each unit confirm its cause first.
+
+| Open item | Where it comes from | Decision |
+| --- | --- | --- |
+| A vertically merged row runs past the page (82 characters lost on the private document) | The kit's paginator places rows one at a time and refuses to split a row that touches a vertical merge. The restart cell is painted with the summed height of its span from its own row, so any merge that lands on two pages overflows the first. | Fix in the kit: a merged cell's content divides at the page end and continues on the next page. The reference is Word's PDF of the private document, since the repo records no rule. |
+| Wasm memory 490 MB and 1.3 GB | Every face added to the session is copied whole five times per layout, used or not, and every face named in the style table is fetched. Half of the recorded size is still unexplained. | Measure per stage first. Then pass only the faces the text uses, and share one `Arc<[u8]>` per face from the session through the kit to the layout result. Target: high-water mark at most the baseline plus 2.5 times the face bytes, and under the window's 512 MB for the private document. |
+| 59 pages in the preview, 50 in the editing view (`long.docx`) | Nothing has ever compared the two paginations (candidate B's risk 4 was not run). The leading candidate is the line box of runs that mix Latin and Chinese. Four smaller differences are verified by reading. | Build the comparison first: the print layout reports a page per body block and a drift report compares it with the editing view's. Fix what it shows, the kit side before the editing view. Pass mark: 90 percent of blocks start on the same page (the mark candidate B set), page counts within 2 percent. |
+| The editing view draws borders on every table | The model, the wire format and the importer carry no borders. CSS draws them unconditionally. | Import resolved table and cell borders (direct, then the style chain, then the cell) and draw only those. |
+
+Decisions that hold across the units:
+
+- **The preview is the reference for the editing view, and Word is the reference for the preview.** When the two
+  views differ, the first question is whether the preview is wrong against Word. Only then does the editing view
+  move toward it. The tradeoff candidate B accepted (drift of a line or two per page) stays. This round gives it
+  a number.
+- **No layout at idle still holds.** The drift report is a development tool behind `window.__word`. The app does
+  not adopt page breaks from rdocx at idle in this round. That stays the fallback candidate B named, to be
+  decided from the report if the pass mark is not reached.
+- **Kit signatures that exist do not change.** Shared font bytes arrive through new entry points, and the old
+  ones wrap them, so the other crates of the kit keep building.
+- **Borders are view data this round.** Save does not write them back and verify does not compare them, because
+  the editor has no control that changes a border. A table the editor inserts carries in the model the borders
+  save already writes for it.
+
+The findings, the data shapes and the checks are in `docs/briefs/r7-print-fidelity.md`.
