@@ -65,7 +65,24 @@ export function familyPrefix(family) {
   return prefix || 'Font'
 }
 
-export function checkPdf(path, result, paragraphs, quiet) {
+// How many characters of the document the PDF lacks, counted as a multiset. A paragraph that a page break
+// cuts inside a table has a repeated header row between its halves, so its text is not contiguous in the PDF.
+export function shortfall(text, parts) {
+  const have = new Map()
+  for (const ch of text) have.set(ch, (have.get(ch) ?? 0) + 1)
+  let missing = 0
+  for (const part of parts) {
+    for (const ch of strip(part)) {
+      const left = have.get(ch) ?? 0
+      if (left > 0) have.set(ch, left - 1)
+      else missing += 1
+    }
+  }
+  return missing
+}
+
+// `maxShortfall` replaces the in-order check with a count, for documents whose tables break across pages.
+export function checkPdf(path, result, paragraphs, quiet, maxShortfall) {
   const fonts = listedFonts(poppler('pdffonts', [path]))
   assert(fonts.length > 0, 'pdffonts listed no fonts')
   assert(fonts.every((font) => font.embedded), 'a font is not embedded')
@@ -76,6 +93,12 @@ export function checkPdf(path, result, paragraphs, quiet) {
   assert(named, `no font name starts with ${cjk.map((face) => familyPrefix(face.family)).join(', ')}`)
   assert(pdfPages(path) === result.pages, `pdfinfo pages differ from the layout (${result.pages})`)
   const text = readable(poppler('pdftotext', ['-enc', 'UTF-8', path, '-']))
+  if (maxShortfall !== undefined) {
+    const lacking = shortfall(text, paragraphs)
+    console.log(`  shortfall ${lacking} characters`)
+    assert(lacking <= maxShortfall, `the PDF lacks ${lacking} characters of the document (limit ${maxShortfall})`)
+    return
+  }
   const missing = missingPart(text, paragraphs)
   const detail = missing !== null && !quiet ? `missing ${missing.slice(0, 40)}` : 'exported text does not contain the document text in order'
   assert(missing === null, detail)

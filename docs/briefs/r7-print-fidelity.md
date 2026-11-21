@@ -1,6 +1,24 @@
 # Round 7 brief: print fidelity
 
-Status: unit 4 passes its checks on `r7/print-fidelity` (2026-11-21). Units 1 to 3 are not done.
+Status: units 1 and 4 pass their checks on `r7/print-fidelity` (2026-11-22). Unit 3 has its measurement and the
+editing view's fixes and does not reach its pass mark yet. Unit 2 is not started.
+
+Unit 1 as built (kit `work/editing-kit-grok` at `8df76d45`):
+
+- Finding 4 held. A merged cell's content now divides at the page end and continues in the next row of its span,
+  with the borders closed at the break. A row with vertically aligned cells also splits, because one overflow
+  on the private document was an ordinary centered row that the split refused.
+- On the private document: 37 pages (Word: 35), no text below the body or off the page, 0 characters missing
+  (82 before, Word's own PDF 26), 276 characters more than the document text (256 before). Against Word's PDF
+  the character multiset differs by 32 one way and 117 the other (31 and 218 before).
+- A first version left three near-empty pages and painted short merged labels on two pages each (41 pages). The
+  kit tests `overlapping_merges_paint_each_paragraph_once_and_fill_pages` and
+  `merged_span_fragment_height_follows_the_content` cover that.
+- `scripts/e2e/print.mjs` passes 4 of 4. Its reference case now counts missing characters (limit 30) instead of
+  asking for each paragraph's text in order, because a paragraph cut by a page break inside a table has the
+  repeated header row between its halves.
+- Open: the page count is 2 above Word's and already differs in character counts on page 1. A carried cell
+  whose target row shrinks onto the same page can draw a closing and an opening edge inside the span.
 
 Unit 3, first step (measured on the host, 2026-11-21, `scripts/e2e/drift.mjs`, before any fix):
 

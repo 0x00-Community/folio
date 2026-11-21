@@ -177,7 +177,8 @@ if (!realDoc || !realPdf) {
     assertFast(result)
     logMeasure('reference', result)
     withPdf(result.pdfBase64, (path) => {
-      checkPdf(path, result, paragraphs, true)
+      // Word's own PDF of this document lacks 26 characters.
+      checkPdf(path, result, paragraphs, true, 30)
       const refPages = pdfPages(realPdf)
       const refText = strip(poppler('pdftotext', ['-enc', 'UTF-8', realPdf, '-']))
       const outText = strip(poppler('pdftotext', ['-enc', 'UTF-8', path, '-']))
