@@ -1,19 +1,14 @@
 // Unit 3: open each fixture, save with no edit, open the bytes again, compare text and marks.
 // Run by the reviewer. This file is syntax-checked only in the dispatch.
 import { readFileSync } from 'node:fs'
-import { ensureDev, evaluate, until, check, assert, summary, consoleErrors } from './acde.mjs'
+import { ensureDev, evaluate, freshPage, until, check, assert, summary, consoleErrors } from './acde.mjs'
 
 const ARG_LIMIT = 100 * 1024
 const CHUNK = 48 * 1024
 const FIXTURES = ['basic.docx', 'long.docx', 'preserve.docx']
 
 await ensureDev()
-try {
-  evaluate(`location.hash = ''; location.reload()`)
-} catch {
-  // Reloading the page aborts the eval.
-}
-await until(`!!(window.__word && window.__word.save)`, { timeout: 60000, label: 'save hook' })
+await freshPage(`!!(window.__word && window.__word.save)`, { label: 'save hook' })
 
 function stage(base64) {
   if (base64.length <= ARG_LIMIT) return JSON.stringify(base64)
@@ -131,4 +126,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

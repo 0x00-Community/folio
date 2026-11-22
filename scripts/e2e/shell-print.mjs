@@ -1,11 +1,11 @@
 // Unit 3: print preview and PDF export through acde act and acde inspect.
 // The reviewer runs this. The sandbox cannot reach the acde dev socket.
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, namedRef, root, shot, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, namedRef, root, shot, summary, until } from './acde.mjs'
 import { checkPdf, pdfText, strip } from './pdf-check.mjs'
 
 const STRINGS = {
@@ -40,7 +40,6 @@ const basicDoc = readFileSync(new URL('../../fixtures/basic.docx', import.meta.u
 
 const dir = mkdtempSync(join(tmpdir(), 'shell-print-'))
 const pdfPath = join(dir, 'basic.pdf')
-const shots = mkdtempSync(join(tmpdir(), 'shell-print-shot-'))
 
 const pageReady = `(() => {
   const img = document.querySelector('.preview-pages img')
@@ -371,7 +370,7 @@ async function showLocale(lang) {
   await openBasic()
   act(buttonNamed(STRINGS[lang].preview), 'click')
   await until(pageReady, { timeout: 90000, label: `${lang} preview` })
-  shot(join(shots, `${lang}.png`))
+  shot(evidencePath(`print/preview-${lang}.png`))
 }
 
 await check('screenshot of the preview in zh', async () => {
@@ -387,11 +386,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-mkdirSync(join(root, 'docs/design/evidence/print'), { recursive: true })
-for (const lang of ['zh', 'en']) {
-  const from = join(shots, `${lang}.png`)
-  if (!existsSync(from)) continue
-  copyFileSync(from, join(root, 'docs/design/evidence/print', `preview-${lang}.png`))
-}
-
-summary()
+await summary()

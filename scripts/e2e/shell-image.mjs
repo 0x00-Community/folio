@@ -2,10 +2,10 @@
 // Edits go through acde act. Save and reopen go through window.__word.
 // Run by the reviewer. This dispatch does not run the script.
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, namedRef, root, shot, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, freshPage, namedRef, root, shot, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: {
@@ -35,25 +35,7 @@ const fakePath = join(dir, 'note.png')
 writeFileSync(pngPath, Buffer.from(PNG_B64, 'base64'))
 writeFileSync(jpegPath, Buffer.from(JPEG_B64, 'base64'))
 writeFileSync(fakePath, 'not an image\n')
-// acde dev reloads the page when a project file changes. The shot stays outside the project until the checks finish.
-const shots = mkdtempSync(join(tmpdir(), 'shell-image-shot-'))
-const shotFile = join(shots, 'inserted.png')
-
-let bootToken = ''
-
-function go(search) {
-  try {
-    evaluate(`location.assign(location.pathname + ${JSON.stringify(search)})`)
-  } catch {
-    // Reloading the page aborts the eval.
-  }
-}
-
-function goTracked(search) {
-  const match = search.match(/(?:^|[?&])boot=([^&]+)/)
-  bootToken = match ? decodeURIComponent(match[1]) : ''
-  go(search)
-}
+const shotFile = evidencePath('images/inserted.png')
 
 function names() {
   const lang = evaluate('document.documentElement.lang')
@@ -209,12 +191,7 @@ async function openBasic() {
 }
 
 await ensureDev()
-const token = `image-${Date.now()}`
-goTracked(`?boot=${token}`)
-await until(
-  `new URLSearchParams(location.search).get('boot') === ${JSON.stringify(bootToken)} && !!(window.__word && window.__word.save)`,
-  { timeout: 60000, label: 'shell' },
-)
+await freshPage(`!!(window.__word && window.__word.save)`, { label: 'shell' })
 
 const ui = names()
 
@@ -299,7 +276,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-mkdirSync(`${root}docs/design/evidence/images`, { recursive: true })
-if (existsSync(shotFile)) copyFileSync(shotFile, `${root}docs/design/evidence/images/inserted.png`)
-
-summary()
+await summary()

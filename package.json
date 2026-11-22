@@ -8,6 +8,7 @@
     "check": "acde check",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\" \"server/**/*.test.ts\"",
+    "e2e": "node scripts/e2e/all.mjs",
     "engine": "sh scripts/build-engine.sh"
   },
   "devDependencies": {

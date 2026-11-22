@@ -1,6 +1,5 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { root, ensureDev, evaluate, until, shot, consoleErrors, check, assert, summary } from './acde.mjs'
+import { readFileSync } from 'node:fs'
+import { assert, check, consoleErrors, ensureDev, evaluate, evidencePath, freshPage, shot, summary, until } from './acde.mjs'
 
 // acde eval puts the expression on the command line. A long fixture is staged on the page instead.
 const ARG_LIMIT = 100 * 1024
@@ -9,18 +8,8 @@ const CHUNK = 48 * 1024
 const basic = readFileSync(new URL('../../fixtures/basic.docx', import.meta.url)).toString('base64')
 const long = readFileSync(new URL('../../fixtures/long.docx', import.meta.url)).toString('base64')
 
-mkdirSync(`${root}docs/design/evidence/shell`, { recursive: true })
-// acde dev reloads the page when a project file changes, which would drop the open document. The screenshots are
-// taken outside the project and copied in after the last check.
-const shots = mkdtempSync(`${tmpdir()}/shell-open-`)
 await ensureDev()
-
-try {
-  evaluate(`location.hash = ''; location.reload()`)
-} catch {
-  // Reloading the page aborts the eval.
-}
-await until(`!!(window.__word && window.__word.editor)`, { timeout: 60000, label: 'editor' })
+await freshPage(`!!(window.__word && window.__word.editor)`, { label: 'editor' })
 
 function stage(base64) {
   if (base64.length <= ARG_LIMIT) return JSON.stringify(base64)
@@ -107,21 +96,17 @@ await check('basic.docx opens twice with a stable page count', async () => {
   await openTwice('basic', basic)
 })
 evaluate(`(() => { const view = document.querySelector('.page-view'); if (view) view.scrollTop = 0; return 1 })()`)
-shot(`${shots}/basic-page1.png`)
+shot(evidencePath('shell/basic-page1.png'))
 
 await check('long.docx opens twice with a stable page count', async () => {
   await openTwice('long', long)
 })
 evaluate(`(() => { const view = document.querySelector('.page-view'); if (view) view.scrollTop = 0; return 1 })()`)
-shot(`${shots}/long-page1.png`)
+shot(evidencePath('shell/long-page1.png'))
 
 await check('console has no errors', async () => {
   const errors = consoleErrors()
   assert(errors.length === 0, errors.join('\n'))
 })
 
-for (const name of ['basic-page1.png', 'long-page1.png']) {
-  copyFileSync(`${shots}/${name}`, `${root}docs/design/evidence/shell/${name}`)
-}
-
-summary()
+await summary()

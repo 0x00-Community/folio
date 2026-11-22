@@ -456,4 +456,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

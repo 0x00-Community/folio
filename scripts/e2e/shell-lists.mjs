@@ -1,4 +1,4 @@
-import { act, assert, check, consoleErrors, ensureDev, evaluate, namedRef, summary, until } from './acde.mjs'
+import { act, assert, check, consoleErrors, ensureDev, evaluate, freshPage, namedRef, summary, until } from './acde.mjs'
 
 // Tab, Shift+Tab, and the indent buttons on a numbered list. The table save path is a later unit, so this script does not save.
 
@@ -15,21 +15,6 @@ const STRINGS = {
     decrease: '减少缩进',
     increase: '增加缩进',
   },
-}
-
-function go(search) {
-  try {
-    evaluate(`location.assign(location.pathname + ${JSON.stringify(search)})`)
-  } catch {
-    // Reloading the page aborts the eval.
-  }
-}
-
-let bootToken = ''
-function goTracked(search) {
-  const match = search.match(/(?:^|[?&])boot=([^&]+)/)
-  bootToken = match ? decodeURIComponent(match[1]) : ''
-  go(search)
 }
 
 function names() {
@@ -102,12 +87,7 @@ function markersOf(fact) {
 }
 
 await ensureDev()
-const token = `lists-${Date.now()}`
-goTracked(`?boot=${token}`)
-await until(
-  `new URLSearchParams(location.search).get('boot') === ${JSON.stringify(bootToken)} && !!(window.__word && window.__word.editor)`,
-  { timeout: 60000, label: 'shell' },
-)
+await freshPage(`!!(window.__word && window.__word.editor)`, { label: 'shell' })
 
 const ui = names()
 const platform = evaluate('window.__word.platform')
@@ -197,4 +177,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

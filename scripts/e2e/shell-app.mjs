@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, namedRef, root, shot, summary, until } from './acde.mjs'
+import { readFileSync } from 'node:fs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, namedRef, root, shot, summary, until } from './acde.mjs'
 
 // Strings mirror src/locales. The page's lang, set from ?lang= or the system language, picks the table.
 const STRINGS = {
@@ -78,10 +77,6 @@ const ARG_LIMIT = 100 * 1024
 const CHUNK = 48 * 1024
 
 const basic = readFileSync(new URL('../../fixtures/basic.docx', import.meta.url)).toString('base64')
-
-mkdirSync(`${root}docs/design/evidence/shell`, { recursive: true })
-// acde dev reloads the page when a project file changes. Screenshots stay outside the project until the last check.
-const shots = mkdtempSync(`${tmpdir()}/shell-app-`)
 
 function go(search) {
   try {
@@ -635,18 +630,12 @@ async function showLocale(lang) {
 
 await check('screenshot of the window in zh', async () => {
   await showLocale('zh')
-  shot(`${shots}/window-zh.png`)
+  shot(evidencePath('shell/window-zh.png'))
 })
 
 await check('screenshot of the window in en', async () => {
   await showLocale('en')
-  shot(`${shots}/window-en.png`)
+  shot(evidencePath('shell/window-en.png'))
 })
 
-for (const name of ['window-zh.png', 'window-en.png']) {
-  const from = `${shots}/${name}`
-  if (!existsSync(from)) continue
-  copyFileSync(from, `${root}docs/design/evidence/shell/${name}`)
-}
-
-summary()
+await summary()

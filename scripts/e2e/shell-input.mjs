@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, namedRef, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, freshPage, namedRef, summary, until } from './acde.mjs'
 
 // acde eval puts the expression on the command line. A long fixture is staged on the page instead.
 const ARG_LIMIT = 100 * 1024
@@ -9,13 +9,7 @@ const basic = readFileSync(new URL('../../fixtures/basic.docx', import.meta.url)
 const long = readFileSync(new URL('../../fixtures/long.docx', import.meta.url)).toString('base64')
 
 await ensureDev()
-
-try {
-  evaluate(`location.hash = ''; location.reload()`)
-} catch {
-  // Reloading the page aborts the eval.
-}
-await until(`!!(window.__word && window.__word.editor)`, { timeout: 60000, label: 'editor' })
+await freshPage(`!!(window.__word && window.__word.editor)`, { label: 'editor' })
 
 function stage(base64) {
   if (base64.length <= ARG_LIMIT) return JSON.stringify(base64)
@@ -621,4 +615,4 @@ await check('a point on a tall paragraph hits the line under the pointer', async
   )
 })
 
-summary()
+await summary()

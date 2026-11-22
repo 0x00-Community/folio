@@ -3,7 +3,7 @@
 // Run by the reviewer. This dispatch only syntax-checks the file.
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { act, assert, check, consoleErrors, ensureDev, evaluate, namedRef, ref, root, summary, until } from './acde.mjs'
+import { act, assert, check, consoleErrors, ensureDev, evaluate, freshPage, namedRef, ref, root, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: {
@@ -41,22 +41,6 @@ const STRINGS = {
 const ARG_LIMIT = 100 * 1024
 const CHUNK = 48 * 1024
 const longDoc = readFileSync(new URL('../../fixtures/long.docx', import.meta.url)).toString('base64')
-
-let bootToken = ''
-
-function go(search) {
-  try {
-    evaluate(`location.assign(location.pathname + ${JSON.stringify(search)})`)
-  } catch {
-    // Reloading the page aborts the eval.
-  }
-}
-
-function goTracked(search) {
-  const match = search.match(/(?:^|[?&])boot=([^&]+)/)
-  bootToken = match ? decodeURIComponent(match[1]) : ''
-  go(search)
-}
 
 function names() {
   const lang = evaluate('document.documentElement.lang')
@@ -191,12 +175,7 @@ function replaceField(name, value) {
 }
 
 await ensureDev()
-const token = `page-${Date.now()}`
-goTracked(`?boot=${token}`)
-await until(
-  `new URLSearchParams(location.search).get('boot') === ${JSON.stringify(bootToken)} && !!(window.__word && window.__word.save)`,
-  { timeout: 60000, label: 'shell' },
-)
+await freshPage(`!!(window.__word && window.__word.save)`, { label: 'shell' })
 
 const ui = names()
 const platform = evaluate('window.__word.platform')
@@ -283,4 +262,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

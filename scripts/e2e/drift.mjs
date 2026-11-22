@@ -2,19 +2,14 @@
 // A low share is a measurement, not a failure. The sandbox cannot reach acde.
 import { readFileSync } from 'node:fs'
 import { heightDrift } from '../../src/editor/drift.ts'
-import { ensureDev, evaluate, until, check, assert, summary } from './acde.mjs'
+import { ensureDev, evaluate, freshPage, until, check, assert, summary } from './acde.mjs'
 
 const ARG_LIMIT = 100 * 1024
 const CHUNK = 48 * 1024
 const FIXTURES = ['basic.docx', 'long.docx']
 
 await ensureDev()
-try {
-  evaluate(`location.hash = ''; location.reload()`)
-} catch {
-  // Reloading the page aborts the eval.
-}
-await until(`!!(window.__word && window.__word.drift)`, { timeout: 60000, label: 'drift hook' })
+await freshPage(`!!(window.__word && window.__word.drift)`, { label: 'drift hook' })
 
 function stage(base64) {
   if (base64.length <= ARG_LIMIT) return JSON.stringify(base64)
@@ -176,4 +171,4 @@ if (!privateDoc) {
   })
 }
 
-summary()
+await summary()

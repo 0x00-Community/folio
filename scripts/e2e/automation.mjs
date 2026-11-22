@@ -3,7 +3,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, root, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, freshPage, root, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: { preview: 'Print preview', close: 'Close', cancel: 'Cancel' },
@@ -61,23 +61,8 @@ const EXPECTED_HEADINGS = [
   { text: '第二章 中文内容', level: 1 },
 ]
 
-let bootToken = ''
 let lastMs = 0
 let basicOk = false
-
-function go(search) {
-  try {
-    evaluate(`location.assign(location.pathname + ${JSON.stringify(search)})`)
-  } catch {
-    // Reloading the page aborts the eval.
-  }
-}
-
-function goTracked(search) {
-  const match = search.match(/(?:^|[?&])boot=([^&]+)/)
-  bootToken = match ? decodeURIComponent(match[1]) : ''
-  go(search)
-}
 
 // An eval argument is about 100 KiB. Past that, the bytes are appended in the page.
 function stage(base64) {
@@ -305,11 +290,9 @@ function atomsOf(block) {
 }
 
 await ensureDev()
-const token = `auto-${Date.now()}`
-goTracked(`?boot=${token}`)
-await until(
-  `new URLSearchParams(location.search).get('boot') === ${JSON.stringify(bootToken)} && !!(window.word && window.word.version === 1 && window.__word && window.__word.openBytes)`,
-  { timeout: 60000, label: 'shell' },
+await freshPage(
+  `!!(window.word && window.word.version === 1 && window.__word && window.__word.openBytes)`,
+  { label: 'shell' },
 )
 
 await check('basic.docx reads and edits go through word.call', async () => {
@@ -489,4 +472,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

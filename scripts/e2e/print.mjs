@@ -2,7 +2,7 @@
 // Records font, layout, pdf and page_png times, boot time, and wasm memory.
 // Writes the PDF and runs the unit 1 poppler checks. The reviewer runs this; the sandbox cannot reach acde.
 import { readFileSync } from 'node:fs'
-import { ensureDev, evaluate, until, consoleErrors, check, assert, summary } from './acde.mjs'
+import { ensureDev, evaluate, freshPage, until, consoleErrors, check, assert, summary } from './acde.mjs'
 import { checkPdf, lcsRatio, pdfPages, poppler, strip, withPdf } from './pdf-check.mjs'
 
 const ARG_LIMIT = 100 * 1024
@@ -11,12 +11,7 @@ const LIMIT_MS = 3000
 const FIXTURES = ['basic.docx', 'long.docx']
 
 await ensureDev()
-try {
-  evaluate(`location.hash = ''; location.reload()`)
-} catch {
-  // Reloading the page aborts the eval.
-}
-await until(`!!(window.__word && window.__word.printLayout)`, { timeout: 60000, label: 'print hook' })
+await freshPage(`!!(window.__word && window.__word.printLayout)`, { label: 'print hook' })
 
 function stage(base64) {
   if (base64.length <= ARG_LIMIT) return JSON.stringify(base64)
@@ -209,4 +204,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

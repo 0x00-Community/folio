@@ -1,15 +1,7 @@
 import { readFileSync } from 'node:fs'
-import { act, assert, check, consoleErrors, ensureDev, evaluate, namedRef, root, summary, until } from './acde.mjs'
+import { act, assert, check, consoleErrors, ensureDev, evaluate, freshPage, namedRef, root, summary, until } from './acde.mjs'
 
 // The caret after Enter, and after a second Enter on the empty paragraph the first one made.
-
-function go(search) {
-  try {
-    evaluate(`location.assign(location.pathname + ${JSON.stringify(search)})`)
-  } catch {
-    // Reloading the page aborts the eval.
-  }
-}
 
 function inputRef() {
   const errors = []
@@ -59,12 +51,7 @@ async function frames() {
 }
 
 await ensureDev()
-const token = `enter-${Date.now()}`
-go(`?boot=${token}`)
-await until(
-  `new URLSearchParams(location.search).get('boot') === ${JSON.stringify(token)} && !!(window.__word && window.__word.editor)`,
-  { timeout: 60000, label: 'shell' },
-)
+await freshPage(`!!(window.__word && window.__word.editor)`, { label: 'shell' })
 
 await check('the caret follows one Enter and then a second Enter', async () => {
   const sink = inputRef()
@@ -132,4 +119,4 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-summary()
+await summary()

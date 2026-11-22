@@ -2,9 +2,8 @@
 // Save and reopen go through window.__word, as shell-page.mjs does.
 // Run by the reviewer. This dispatch only syntax-checks the file.
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { act, assert, check, consoleErrors, ensureDev, evaluate, namedRef, root, shot, summary, until } from './acde.mjs'
+import { readFileSync } from 'node:fs'
+import { act, assert, check, consoleErrors, ensureDev, evaluate, evidencePath, freshPage, namedRef, root, shot, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: {
@@ -45,25 +44,7 @@ const HEAD = 'Centered '
 const TAIL = 'paragraph.'
 const basicDoc = readFileSync(new URL('../../fixtures/basic.docx', import.meta.url)).toString('base64')
 const tablesDoc = readFileSync(new URL('../../fixtures/tables.docx', import.meta.url)).toString('base64')
-// acde dev reloads the page when a project file changes. The shot stays outside the project until the checks finish.
-const shots = mkdtempSync(`${tmpdir()}/shell-table-`)
-const shotFile = `${shots}/inserted.png`
-
-let bootToken = ''
-
-function go(search) {
-  try {
-    evaluate(`location.assign(location.pathname + ${JSON.stringify(search)})`)
-  } catch {
-    // Reloading the page aborts the eval.
-  }
-}
-
-function goTracked(search) {
-  const match = search.match(/(?:^|[?&])boot=([^&]+)/)
-  bootToken = match ? decodeURIComponent(match[1]) : ''
-  go(search)
-}
+const shotFile = evidencePath('tables/inserted.png')
 
 function names() {
   const lang = evaluate('document.documentElement.lang')
@@ -309,12 +290,7 @@ async function openBasic() {
 }
 
 await ensureDev()
-const token = `table-${Date.now()}`
-goTracked(`?boot=${token}`)
-await until(
-  `new URLSearchParams(location.search).get('boot') === ${JSON.stringify(bootToken)} && !!(window.__word && window.__word.save)`,
-  { timeout: 60000, label: 'shell' },
-)
+await freshPage(`!!(window.__word && window.__word.save)`, { label: 'shell' })
 
 const ui = names()
 const platform = evaluate('window.__word.platform')
@@ -752,10 +728,7 @@ await check('console has no errors', async () => {
   assert(errors.length === 0, errors.join('\n'))
 })
 
-mkdirSync(`${root}docs/design/evidence/tables`, { recursive: true })
-if (existsSync(shotFile)) copyFileSync(shotFile, `${root}docs/design/evidence/tables/inserted.png`)
-
-summary()
+await summary()
 
 function adjacent(body, before, after) {
   for (let i = 0; i < body.length - 1; i++) {
