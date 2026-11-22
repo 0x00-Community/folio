@@ -1,6 +1,6 @@
 import { window as appWindow } from 'acde:window'
 import type { Word } from './automation/api.ts'
-import type { BlockHeight, PrintBlockHeight, PrintMeasure } from './app.ts'
+import type { BlockHeight, PrintBlockHeight, PrintMeasure, WordApp } from './app.ts'
 import type { DriftReport } from './editor/drift.ts'
 import type { Editor } from './editor/editor.ts'
 import { insertText, setSelection } from './editor/edit.ts'
@@ -20,10 +20,56 @@ if (location.hash === '#view-demo') {
   const host = document.querySelector('#pages')
   if (!(host instanceof HTMLElement)) throw new Error('missing #pages')
   const { boot } = await import('./app.ts')
-  const app = await boot(host)
-  // The automation interface, in every build. `__word` stays the test hook.
-  window.word = app.word
-  installHook(app)
+  await startEditor(host, boot)
+}
+
+async function startEditor(host: HTMLElement, boot: (host: HTMLElement) => Promise<WordApp>): Promise<void> {
+  let starting = false
+  const run = async (): Promise<void> => {
+    if (starting) return
+    starting = true
+    let app: WordApp | undefined
+    try {
+      app = await boot(host)
+    } catch (error) {
+      console.error(error)
+      showStartFailure(() => { void run() })
+      return
+    } finally {
+      starting = false
+    }
+    if (app === undefined) return
+    // Only a band this file put up is taken down. An open error that boot showed stays.
+    if (document.querySelector('#boot-retry')) hideStartFailure()
+    // The automation interface, in every build. `__word` stays the test hook.
+    window.word = app.word
+    installHook(app)
+  }
+  await run()
+}
+
+function showStartFailure(retry: () => void): void {
+  const band = document.querySelector('#open-error')
+  if (!(band instanceof HTMLElement)) return
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.id = 'boot-retry'
+  const label = t('boot.retry')
+  button.textContent = label
+  button.setAttribute('aria-label', label)
+  button.addEventListener('click', () => {
+    button.disabled = true
+    retry()
+  })
+  band.replaceChildren(document.createTextNode(t('boot.failed')), button)
+  band.hidden = false
+}
+
+function hideStartFailure(): void {
+  const band = document.querySelector('#open-error')
+  if (!(band instanceof HTMLElement)) return
+  band.replaceChildren()
+  band.hidden = true
 }
 
 function installHook(app: {

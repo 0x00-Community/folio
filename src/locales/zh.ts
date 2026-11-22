@@ -78,6 +78,8 @@ const messages: Record<string, string> = {
   'open.error.encrypted': '这个文档已加密，无法打开。',
   'open.error.corrupt': '这个文档已损坏，无法打开。',
   'open.error.tooLarge': '这个文档太大，无法打开。',
+  'boot.failed': '编辑器无法启动。',
+  'boot.retry': '重试',
   'print.preview': '打印预览',
   'print.export': '导出 PDF',
   'print.close': '关闭',

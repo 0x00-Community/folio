@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { PrintError } from './engine/print-error.ts'
-import { aliasChain, clearFontCatalog, cssStack, ensurePrintFonts, installPrintFonts, installedFamilies, printFonts, selectNewPrintFonts } from './fonts.ts'
+import { aliasChain, clearFontCatalog, cssStack, ensurePrintFonts, fetchMetrics, installPrintFonts, installedFamilies, printFonts, rememberedFamilies, selectNewPrintFonts } from './fonts.ts'
 import type { PrintCatalogFace } from './fonts.ts'
 
 test('cssStack builds the 宋体 substitute list and ends in the generic family', () => {
@@ -209,4 +209,188 @@ test('a face the session already holds is not added again', () => {
     faces: [{ id: 'hei', family: '黑体' }],
     aliases: [['Heiti SC', '黑体']],
   })
+})
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === 'string') return input
+  if (input instanceof URL) return input.href
+  return input.url
+}
+
+test('a failed font catalog is fetched again and a success is kept', async () => {
+  clearFontCatalog()
+  const faces = [{ id: 'a', families: ['Calibri', '宋体'] }]
+  const expected = ['Calibri', '宋体'].sort((a, b) => a.localeCompare(b))
+  let mode: 'status' | 'throw' | 'ok' = 'status'
+  let hits = 0
+  const previous = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = requestUrl(input)
+    if (url !== '/api/fonts') throw new Error(`unexpected fetch ${url}`)
+    hits += 1
+    if (mode === 'status') return { ok: false, status: 503 } as Response
+    if (mode === 'throw') throw new Error('offline')
+    return { ok: true, json: async () => faces } as Response
+  }) as typeof fetch
+  try {
+    assert.deepEqual(await installedFamilies(), [])
+    assert.equal(hits, 1)
+    mode = 'ok'
+    assert.deepEqual(await installedFamilies(), expected)
+    assert.deepEqual(await installedFamilies(), expected)
+    assert.equal(hits, 2, 'a success is not fetched again')
+
+    clearFontCatalog()
+    hits = 0
+    mode = 'throw'
+    assert.deepEqual(await installedFamilies(), [])
+    assert.equal(hits, 1)
+    mode = 'ok'
+    assert.deepEqual(await installedFamilies(), expected)
+    assert.equal(hits, 2)
+    assert.deepEqual(await installedFamilies(), expected)
+    assert.equal(hits, 2)
+  } finally {
+    globalThis.fetch = previous
+    clearFontCatalog()
+  }
+})
+
+test('two catalog readers share one in-flight fetch', async () => {
+  clearFontCatalog()
+  let hits = 0
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const previous = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = requestUrl(input)
+    if (url !== '/api/fonts') throw new Error(`unexpected fetch ${url}`)
+    hits += 1
+    await gate
+    return { ok: true, json: async () => [{ id: 'a', families: ['Arial'] }] } as Response
+  }) as typeof fetch
+  try {
+    const first = installedFamilies()
+    const second = installedFamilies()
+    assert.equal(hits, 1)
+    release?.()
+    assert.deepEqual(await first, ['Arial'])
+    assert.deepEqual(await second, ['Arial'])
+    assert.equal(hits, 1)
+    assert.deepEqual(await installedFamilies(), ['Arial'])
+    assert.equal(hits, 1, 'a success is not fetched again')
+  } finally {
+    release?.()
+    globalThis.fetch = previous
+    clearFontCatalog()
+  }
+})
+
+test('a missing catalog is not treated as a family the index does not have', async () => {
+  assert.deepEqual(rememberedFamilies(['Calibri', '宋体'], false, []), [])
+  assert.deepEqual(rememberedFamilies(['Calibri'], false, ['Calibri']), [])
+  assert.deepEqual(rememberedFamilies(['Calibri'], true, []), ['Calibri'])
+  assert.deepEqual(rememberedFamilies(['Calibri'], true, ['Calibri', '宋体']), ['Calibri', '宋体'])
+
+  clearFontCatalog()
+  let catalogHits = 0
+  let resolveHits = 0
+  let catalogOk = false
+  const previous = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = requestUrl(input)
+    if (url === '/api/fonts') {
+      catalogHits += 1
+      if (!catalogOk) return { ok: false, status: 503 } as Response
+      return {
+        ok: true,
+        json: async () => [{ id: 'arial', families: ['Arial'], cjk: false, truetype: true }],
+      } as Response
+    }
+    resolveHits += 1
+    throw new Error(`unexpected fetch ${url}`)
+  }) as typeof fetch
+  try {
+    const down = await fetchMetrics(['Calibri', '宋体'])
+    assert.equal(down.available, false)
+    assert.equal(down.faces.size, 0)
+    assert.equal(catalogHits, 1, 'one catalog request for every missing family')
+    assert.equal(resolveHits, 0)
+    const again = await fetchMetrics(['Calibri'])
+    assert.equal(again.available, false)
+    assert.equal(catalogHits, 2, 'a failed catalog is not reused')
+
+    catalogOk = true
+    const missing = await fetchMetrics(['Calibri'])
+    assert.equal(missing.available, true)
+    assert.equal(missing.faces.has('Calibri'), false)
+    assert.equal(resolveHits, 0, 'an unlisted family is not resolved')
+    assert.deepEqual(rememberedFamilies(['Calibri'], missing.available, missing.faces.keys()), ['Calibri'])
+    assert.deepEqual(rememberedFamilies(['Calibri'], down.available, down.faces.keys()), [])
+  } finally {
+    globalThis.fetch = previous
+    clearFontCatalog()
+  }
+})
+
+test('Han text with no font catalog fails preview, and a catalog without a Chinese face does not', async () => {
+  clearFontCatalog()
+  let mode: 'status' | 'throw' | 'ok' = 'status'
+  let body: unknown = null
+  let allowFace = false
+  const previous = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = requestUrl(input)
+    if (url === '/api/fonts') {
+      if (mode === 'throw') throw new Error('offline')
+      if (mode === 'status') return { ok: false, status: 503 } as Response
+      return { ok: true, json: async () => body } as Response
+    }
+    if (allowFace && url.endsWith('/face')) {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer } as Response
+    }
+    throw new Error(`unexpected fetch ${url}`)
+  }) as typeof fetch
+  const target = () => ({
+    addFont() {},
+    addFontAlias() {},
+  })
+  try {
+    await assert.rejects(
+      () => ensurePrintFonts(target(), ['Calibri'], true),
+      (error: unknown) => {
+        assert.ok(error instanceof PrintError)
+        assert.equal(error.kind, 'font')
+        assert.equal(error.family, '宋体')
+        return true
+      },
+    )
+    clearFontCatalog()
+    mode = 'throw'
+    await assert.rejects(
+      () => ensurePrintFonts(target(), ['Calibri'], true),
+      (error: unknown) => error instanceof PrintError && error.kind === 'font' && error.family === '宋体',
+    )
+    clearFontCatalog()
+    mode = 'status'
+    await ensurePrintFonts(target(), ['Calibri'], false)
+
+    clearFontCatalog()
+    mode = 'ok'
+    body = [face('calibri', ['Calibri'], { cjk: false })]
+    await ensurePrintFonts(target(), ['Calibri'], true)
+
+    clearFontCatalog()
+    body = [face('song', ['宋体'])]
+    allowFace = true
+    const held = target()
+    await ensurePrintFonts(held, ['宋体'], true)
+    clearFontCatalog()
+    mode = 'status'
+    allowFace = false
+    await ensurePrintFonts(held, ['宋体'], true)
+  } finally {
+    globalThis.fetch = previous
+    clearFontCatalog()
+  }
 })

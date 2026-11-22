@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { checkDoc, type Block, type Doc, type ListLevel, type NumId, type Paragraph, type Pt } from '../model.ts'
-import { createEngine, type Opened } from './engine.ts'
+import { createEngine, readWithRetry, type Opened } from './engine.ts'
 import { initSync } from './pkg/engine.js'
 
 const root = new URL('../../', import.meta.url)
@@ -234,6 +234,63 @@ test('open parses long.docx and preserve.docx', () => {
     long.source.free()
     preserve.source.free()
   }
+})
+
+test('readWithRetry tries a failed fetch once more', async () => {
+  const url = '/engine.wasm'
+  let calls = 0
+  let waits = 0
+  const wait = async (): Promise<void> => { waits += 1 }
+  const respond = (status: number, ok = status >= 200 && status < 300): Response => {
+    return { ok, status } as Response
+  }
+
+  calls = 0
+  waits = 0
+  const ready = await readWithRetry(url, async (asked) => {
+    assert.equal(asked, url)
+    calls += 1
+    return respond(200)
+  }, wait)
+  assert.equal(ready.status, 200)
+  assert.equal(calls, 1, 'an ok response is not fetched again')
+  assert.equal(waits, 0)
+
+  calls = 0
+  waits = 0
+  const retried = await readWithRetry(url, async () => {
+    calls += 1
+    if (calls === 1) return respond(503, false)
+    return respond(200)
+  }, wait)
+  assert.equal(retried.ok, true)
+  assert.equal(calls, 2, 'one failure is tried once more')
+  assert.equal(waits, 1)
+
+  calls = 0
+  waits = 0
+  const afterThrow = await readWithRetry(url, async () => {
+    calls += 1
+    if (calls === 1) throw new Error('offline')
+    return respond(200)
+  }, wait)
+  assert.equal(afterThrow.ok, true)
+  assert.equal(calls, 2, 'a thrown fetch is tried once more')
+  assert.equal(waits, 1)
+
+  calls = 0
+  await assert.rejects(
+    () => readWithRetry(url, async () => {
+      calls += 1
+      return respond(404, false)
+    }, async () => {}),
+    (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.equal(error.message, '/engine.wasm: 404')
+      return true
+    },
+  )
+  assert.equal(calls, 2, 'two failures stop')
 })
 
 test('blank imports an empty document through the same path', () => {

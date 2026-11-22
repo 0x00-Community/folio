@@ -1,6 +1,6 @@
 // The only editor module the app imports. Holds one EditorState, runs commands, and drives PageView.
 import type { Opened, Source } from '../engine/engine.ts'
-import { cssStack, fetchMetrics } from '../fonts.ts'
+import { cssStack, fetchMetrics, rememberedFamilies } from '../fonts.ts'
 import type { FontMetrics } from '../fonts.ts'
 import { indexOf } from '../model.ts'
 import type { Block, Doc, Paragraph, ParaId, Pos, Table } from '../model.ts'
@@ -54,7 +54,7 @@ export class Editor implements EditingSurface {
   private markers: ReadonlyMap<ParaId, string>
   private metrics: ReadonlyMap<string, FontMetrics> = new Map()
   private metricsSettled = false
-  /** Families already resolved, including ones the index does not have. A later edit does not ask again. */
+  /** Families already resolved, including ones the index does not have. A catalog that could not be read does not add to this set. */
   private knownFonts = new Set<string>()
   /** Families with a metrics request in flight. */
   private pendingFonts = new Set<string>()
@@ -379,29 +379,28 @@ export class Editor implements EditingSurface {
     this.metricsSettled = false
     this.scheduleChange()
     let fetched: ReadonlyMap<string, FontMetrics> = new Map()
-    let failed = false
+    let available = false
     try {
-      fetched = await fetchMetrics(missing)
+      const read = await fetchMetrics(missing)
+      available = read.available
+      fetched = read.faces
     } catch {
-      failed = true
+      available = false
     }
     // A load() that started while this was in flight cleared the sets and owns them now.
     if (this.destroyed || generation !== this.generation) return
     for (const family of missing) this.pendingFonts.delete(family)
-    if (!failed) {
-      for (const family of missing) this.knownFonts.add(family)
-      for (const family of fetched.keys()) this.knownFonts.add(family)
-      if (fetched.size > 0) {
-        const merged = new Map(this.metrics)
-        for (const [family, value] of fetched) merged.set(family, value)
-        this.metrics = merged
-        // The paint before this fetch used the fallback line box. A resolved face changes the line heights.
-        // The load's own fetch starts at the top. A fetch for a family an edit introduced keeps the viewport.
-        const keepPlace = this.editedSinceLoad && generation === this.loadGeneration
-        if (keepPlace) this.view.relayout(this.current.doc)
-        else this.view.show(this.current.doc)
-        this.paintSelection(false)
-      }
+    for (const family of rememberedFamilies(missing, available, fetched.keys())) this.knownFonts.add(family)
+    if (available && fetched.size > 0) {
+      const merged = new Map(this.metrics)
+      for (const [family, value] of fetched) merged.set(family, value)
+      this.metrics = merged
+      // The paint before this fetch used the fallback line box. A resolved face changes the line heights.
+      // The load's own fetch starts at the top. A fetch for a family an edit introduced keeps the viewport.
+      const keepPlace = this.editedSinceLoad && generation === this.loadGeneration
+      if (keepPlace) this.view.relayout(this.current.doc)
+      else this.view.show(this.current.doc)
+      this.paintSelection(false)
     }
     this.metricsSettled = true
     this.scheduleChange()

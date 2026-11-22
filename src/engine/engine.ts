@@ -188,10 +188,48 @@ export function wasmMemoryBytes(): number {
   return wasmMemory?.buffer.byteLength ?? 0
 }
 
+const ENGINE_URL = '/engine.wasm'
+const ENGINE_RETRY_MS = 100
+
+type LoadAttempt =
+  | { ok: true; response: Response }
+  | { ok: false; status: string }
+
+async function attemptLoad(load: (url: string) => Promise<Response>, url: string): Promise<LoadAttempt> {
+  try {
+    const response = await load(url)
+    if (response.ok) return { ok: true, response }
+    return { ok: false, status: String(response.status) }
+  } catch (error) {
+    const status = error instanceof Error && error.message !== '' ? error.message : String(error)
+    return { ok: false, status: status === '' ? 'error' : status }
+  }
+}
+
+/**
+ * One more try after `wait` when `load` throws or the response is not ok.
+ * The rejection names `url` and the status of the attempt that was kept.
+ */
+export async function readWithRetry(
+  url: string,
+  load: (url: string) => Promise<Response>,
+  wait: () => Promise<void>,
+): Promise<Response> {
+  const first = await attemptLoad(load, url)
+  if (first.ok) return first.response
+  await wait()
+  const second = await attemptLoad(load, url)
+  if (second.ok) return second.response
+  throw new Error(`${url}: ${second.status}`)
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
 export async function loadEngine(): Promise<Engine> {
   const started = performance.now()
-  const response = await fetch('/engine.wasm')
-  if (!response.ok) throw new Error(`engine.wasm: ${response.status}`)
+  const response = await readWithRetry(ENGINE_URL, (url) => fetch(url), () => wait(ENGINE_RETRY_MS))
   const bytes = await response.arrayBuffer()
   const ready = await init({ module_or_path: bytes })
   bootMs = performance.now() - started

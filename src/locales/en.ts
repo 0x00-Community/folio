@@ -78,6 +78,8 @@ const messages: Record<string, string> = {
   'open.error.encrypted': 'This document is encrypted and cannot be opened.',
   'open.error.corrupt': 'This document is damaged and cannot be opened.',
   'open.error.tooLarge': 'This document is too large to open.',
+  'boot.failed': 'The editor could not start.',
+  'boot.retry': 'Retry',
   'print.preview': 'Print preview',
   'print.export': 'Export PDF',
   'print.close': 'Close',

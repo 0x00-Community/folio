@@ -59,6 +59,7 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   let usedFonts: readonly string[] = []
   let fontNow: string | 'mixed' = 'mixed'
   let fontReady = false
+  let fontListToken = 0
   const styleGuard = { n: 0, ignore: false }
   const fontGuard = { n: 0, ignore: false }
   const sizeGuard = { n: 0, ignore: false }
@@ -110,10 +111,24 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   })
   group(root).append(styleSelect)
 
-  void installedFamilies().then((names) => {
-    installed = names
-    if (!fontReady) return
-    paintFont(usedFonts, fontNow)
+  function refreshInstalled(): void {
+    if (installed.length > 0) return
+    const token = ++fontListToken
+    void installedFamilies().then((names) => {
+      if (token !== fontListToken) return
+      installed = names
+      if (!fontReady) return
+      paintFont(usedFonts, fontNow)
+    })
+  }
+
+  // Opening the menu reads the index again. A failed read is not kept; a success is already cached.
+  refreshInstalled()
+  fontSelect.addEventListener('mousedown', refreshInstalled)
+  fontSelect.addEventListener('keydown', (event) => {
+    if (event.repeat) return
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Enter' && event.key !== ' ') return
+    refreshInstalled()
   })
 
   const alignButtons = {

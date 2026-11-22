@@ -123,11 +123,11 @@ async function resolveFamily(family: string): Promise<ResolvedFace | undefined> 
 
 /** Fetches one standalone face per family that resolves. Missing families are omitted, without a request that 404s. */
 export async function fetchFonts(families: readonly string[]): Promise<ReadonlyMap<string, Uint8Array>> {
-  const installed = await installedNames()
+  const index = await catalogIndex()
   const out = new Map<string, Uint8Array>()
-  if (installed === null) return out
+  if (!index.available) return out
   for (const family of families) {
-    if (!listed(family, installed)) continue
+    if (!listed(family, index.names)) continue
     try {
       const resolved = await resolveFamily(family)
       if (resolved === undefined) continue
@@ -192,12 +192,10 @@ function metricsOf(resolved: ResolvedFace): FontMetrics {
   }
 }
 
-async function readMetricMap(families: readonly string[]): Promise<Map<string, FontMetrics>> {
-  const installed = await installedNames()
+async function readMetricMap(families: readonly string[], names: ReadonlySet<string>): Promise<Map<string, FontMetrics>> {
   const out = new Map<string, FontMetrics>()
-  if (installed === null) return out
   for (const family of families) {
-    if (!listed(family, installed)) continue
+    if (!listed(family, names)) continue
     try {
       const resolved = await resolveFamily(family)
       if (resolved === undefined) continue
@@ -209,20 +207,52 @@ async function readMetricMap(families: readonly string[]): Promise<Map<string, F
   return out
 }
 
+export type MetricsRead = {
+  /** False when `GET /api/fonts` could not be read. That is not "the index has no such family". */
+  readonly available: boolean
+  readonly faces: ReadonlyMap<string, FontMetrics>
+}
+
 /**
  * Units and the vertical metrics the resolver read. The honored triple fills any slot the response omits.
  * Families the index does not list are skipped: a 404 for a missing face is a console error, and line height falls back.
  * A resolved face with no CJK glyphs also loads 宋体 in this same call, so typing Han later does not fetch.
+ * `available` is false when the catalog could not be read, and this call then makes one catalog request.
  */
-export async function fetchMetrics(families: readonly string[]): Promise<ReadonlyMap<string, FontMetrics>> {
-  const out = await readMetricMap(families)
+export async function fetchMetrics(families: readonly string[]): Promise<MetricsRead> {
+  const index = await catalogIndex()
+  if (!index.available) return { available: false, faces: new Map() }
+  const out = await readMetricMap(families, index.names)
   const needsSong = [...out.values()].some((face) => !face.cjk)
   const askedSong = families.some((family) => family === SONG_FAMILY)
   if (needsSong && !askedSong && !out.has(SONG_FAMILY)) {
-    const song = await readMetricMap([SONG_FAMILY])
+    const song = await readMetricMap([SONG_FAMILY], index.names)
     for (const [family, face] of song) out.set(family, face)
   }
-  return out
+  return { available: true, faces: out }
+}
+
+/**
+ * Families an editor can stop requesting.
+ * A catalog that could not be read remembers nothing, so the next edit asks again.
+ * A family the index does not list is still remembered, and so is a face this fetch added, such as 宋体.
+ */
+export function rememberedFamilies(
+  asked: readonly string[],
+  available: boolean,
+  fetched: Iterable<string>,
+): string[] {
+  if (!available) return []
+  const names: string[] = []
+  const seen = new Set<string>()
+  const add = (family: string): void => {
+    if (seen.has(family)) return
+    seen.add(family)
+    names.push(family)
+  }
+  for (const family of asked) add(family)
+  for (const family of fetched) add(family)
+  return names
 }
 
 function listed(family: string, names: ReadonlySet<string>): boolean {
@@ -236,10 +266,20 @@ export function clearFontCatalog(): void {
   catalogPromise = null
 }
 
-/** One read of `GET /api/fonts`. `installedNames` and `installedFamilies` both wait on it. */
+/** The in-flight or successful `GET /api/fonts` body. A failure is dropped so the next reader fetches again. */
 function fontCatalog(): Promise<unknown> {
-  if (catalogPromise === null) catalogPromise = readFontCatalog()
-  return catalogPromise
+  if (catalogPromise !== null) return catalogPromise
+  const pending = readFontCatalog()
+  catalogPromise = pending
+  void pending.then(
+    (body) => {
+      if (body === null && catalogPromise === pending) catalogPromise = null
+    },
+    () => {
+      if (catalogPromise === pending) catalogPromise = null
+    },
+  )
+  return pending
 }
 
 async function readFontCatalog(): Promise<unknown> {
@@ -284,13 +324,20 @@ export async function installedFamilies(): Promise<readonly string[]> {
   return names
 }
 
-async function installedNames(): Promise<ReadonlySet<string> | null> {
+type CatalogIndex = {
+  readonly available: boolean
+  readonly names: ReadonlySet<string>
+}
+
+/** `available` is false only when the catalog could not be read. A loaded body that lists nothing is available. */
+async function catalogIndex(): Promise<CatalogIndex> {
+  const body = await fontCatalog()
+  if (body === null) return { available: false, names: new Set() }
   const names = new Set<string>()
-  const ok = walkFamilies(await fontCatalog(), (name) => {
+  walkFamilies(body, (name) => {
     names.add(name.toLowerCase())
   })
-  if (!ok) return null
-  return names
+  return { available: true, names }
 }
 
 /** One face from `GET /api/fonts`. `truetype` is false for a CFF `.otf`. */
@@ -432,9 +479,17 @@ export function installPrintFonts(source: PrintFontTarget, fetched: FetchedPrint
  * a second preview does not fetch them and does not pass the bytes into wasm again.
  * Each face is fetched, added, and dropped before the next fetch starts.
  * A face that fails to read throws `PrintError` of kind `font` and leaves the faces already added.
+ * Han text throws that same error when the catalog could not be read and this session has no face yet,
+ * so the preview does not draw missing glyphs. A catalog that loaded with no CJK face does not throw.
  */
 export async function ensurePrintFonts(source: PrintFontTarget, families: readonly string[], han: boolean): Promise<void> {
-  const plan = printFonts(families, await readPrintCatalog(), han)
+  const catalog = await readPrintCatalog()
+  if (catalog === null) {
+    const held = sessionFonts.get(source)
+    if (han && (held === undefined || held.families.size === 0)) throw new PrintError('font', SONG_FAMILY)
+    return
+  }
+  const plan = printFonts(families, catalog, han)
   const missing = selectNewPrintFonts(source, plan)
   if (missing.faces.length === 0 && missing.aliases.length === 0) return
   const loaded = new Set<string>()
@@ -454,7 +509,8 @@ export async function ensurePrintFonts(source: PrintFontTarget, families: readon
 
 /** `printFonts` against `GET /api/fonts`, then one extracted face per id. A face that fails to read is omitted. */
 export async function fetchPrintFonts(families: readonly string[], han: boolean): Promise<FetchedPrintFonts> {
-  const plan = printFonts(families, await readPrintCatalog(), han)
+  const catalog = await readPrintCatalog()
+  const plan = printFonts(families, catalog ?? [], han)
   const cached = new Map<string, Uint8Array>()
   const faces: { family: string; bytes: Uint8Array }[] = []
   for (const face of plan.faces) {
@@ -531,8 +587,10 @@ function claimBold(loaded: string, id: string, used: Set<string>): string {
   return claim(alt, used)
 }
 
-async function readPrintCatalog(): Promise<PrintCatalogFace[]> {
+/** `null` when the catalog could not be read. A loaded body that is not a list is an empty catalog. */
+async function readPrintCatalog(): Promise<PrintCatalogFace[] | null> {
   const body = await fontCatalog()
+  if (body === null) return null
   if (!Array.isArray(body)) return []
   const faces: PrintCatalogFace[] = []
   for (const item of body) {
