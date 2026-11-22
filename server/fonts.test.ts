@@ -1,20 +1,27 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { aliasChain } from '../src/fonts.ts'
 import server from '../server.ts'
 import { extractFace, readFaceMetrics, readFaces, resolveFont, scanFonts } from './fonts.ts'
 
-const directory = '/Users/lilleap/code/rdocx/crates/oxml-layout/fonts'
+// engine/Cargo.toml requires this kit, one directory above the repository.
+const directory =
+  process.env.WORD_TEST_FONTS ||
+  fileURLToPath(new URL('../../rdocx-editing-kit/crates/oxml-layout/fonts', import.meta.url))
 
-test('scanFonts finds Carlito and the Noto Sans SC subset', () => {
+const missingKit: string | false = existsSync(directory)
+  ? false
+  : `set WORD_TEST_FONTS (font kit not found at ${directory})`
+
+test('scanFonts finds Carlito and the Noto Sans SC subset', { skip: missingKit }, () => {
   const faces = scanFonts([directory])
   assert.ok(faces.some((face) => face.families.includes('Carlito')))
   assert.ok(faces.some((face) => face.cjk && face.path.includes('NotoSansSC')))
 })
 
-test('readFaces reports bold for Carlito-Bold', () => {
+test('readFaces reports bold for Carlito-Bold', { skip: missingKit }, () => {
   const bytes = readFileSync(`${directory}/Carlito-Bold.ttf`)
   const face = readFaces((offset, length) => bytes.subarray(offset, offset + length))[0]
   if (face === undefined) throw new Error('Carlito-Bold has no face')
@@ -22,15 +29,22 @@ test('readFaces reports bold for Carlito-Bold', () => {
   assert.ok(face.families.includes('Carlito'))
 })
 
-test('resolve 宋体 returns SimSun from the user font library', () => {
-  const faces = scanFonts([join(homedir(), 'Library', 'Fonts')])
+test('resolve 宋体 returns the first installed family of its alias chain', (t) => {
+  const faces = scanFonts()
+  const chain = aliasChain('宋体')
+  const expected = firstInstalled(faces, chain)
+  if (expected === undefined) {
+    t.skip("no installed family from aliasChain('宋体')")
+    return
+  }
   const resolved = resolveFont('宋体', faces)
   assert.ok(resolved, '宋体 resolves to an installed face')
-  assert.equal(resolved.family, 'SimSun', '宋体 resolves to SimSun')
-  assert.equal(resolved.metrics.unitsPerEm > 0, true, 'SimSun has unitsPerEm')
-  assert.equal(Number.isFinite(resolved.metrics.ascender), true, 'SimSun ascender is a number')
-  assert.equal(Number.isFinite(resolved.metrics.descender), true, 'SimSun descender is a number')
-  assert.equal(Number.isFinite(resolved.metrics.lineGap), true, 'SimSun lineGap is a number')
+  assert.ok(chain.includes(resolved.family), `${resolved.family} is outside aliasChain('宋体')`)
+  assert.equal(resolved.family, expected, `first installed family is ${expected}`)
+  assert.equal(resolved.metrics.unitsPerEm > 0, true, `${resolved.family} has unitsPerEm`)
+  assert.equal(Number.isFinite(resolved.metrics.ascender), true, `${resolved.family} ascender is a number`)
+  assert.equal(Number.isFinite(resolved.metrics.descender), true, `${resolved.family} descender is a number`)
+  assert.equal(Number.isFinite(resolved.metrics.lineGap), true, `${resolved.family} lineGap is a number`)
 })
 
 test('resolve Calibri returns Carlito or nothing, matching what is installed', () => {
@@ -45,13 +59,22 @@ test('resolve Calibri returns Carlito or nothing, matching what is installed', (
   )
 })
 
-test('GET /api/fonts/resolve returns SimSun for 宋体', async () => {
+test('GET /api/fonts/resolve returns the first installed family for 宋体', async (t) => {
+  const faces = scanFonts()
+  const chain = aliasChain('宋体')
+  const expected = firstInstalled(faces, chain)
+  if (expected === undefined) {
+    t.skip("no installed family from aliasChain('宋体')")
+    return
+  }
   const response = await server.fetch(
     new Request(`http://localhost/api/fonts/resolve?family=${encodeURIComponent('宋体')}`),
   )
   assert.equal(response.status, 200, '宋体 resolves over HTTP')
   const body: unknown = await response.json()
-  assert.equal(isFamily(body, 'SimSun'), true, 'HTTP resolve returns SimSun')
+  const family = familyOf(body)
+  assert.ok(family !== undefined && chain.includes(family), `HTTP resolve returned ${String(family)}`)
+  assert.equal(family, expected, `HTTP resolve returns ${expected}`)
 })
 
 test('extracts Hiragino Sans GB face 0 as a single sfnt', () => {
@@ -66,8 +89,15 @@ test('extracts Hiragino Sans GB face 0 as a single sfnt', () => {
   assert.equal(metrics?.ascender, honoredAscender(source, 0), 'honored ascender matches USE_TYPO_METRICS')
 })
 
-function isFamily(value: unknown, family: string): boolean {
-  return typeof value === 'object' && value !== null && 'family' in value && value.family === family
+function firstInstalled(faces: ReturnType<typeof scanFonts>, chain: readonly string[]): string | undefined {
+  return chain.find((name) =>
+    faces.some((face) => face.families.some((family) => family.toLowerCase() === name.toLowerCase())),
+  )
+}
+
+function familyOf(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || !('family' in value)) return undefined
+  return typeof value.family === 'string' ? value.family : undefined
 }
 
 function honoredAscender(bytes: Uint8Array, faceIndex: number): number {
