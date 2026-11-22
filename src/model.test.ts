@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  INDEX_CACHE_LIMIT,
   checkDoc,
   comparePos,
   flatText,
@@ -9,6 +10,7 @@ import {
   marksAt,
   newParaId,
   normalizeInlines,
+  type DocIndex,
 } from './model.ts'
 import {
   cell,
@@ -163,4 +165,32 @@ test('checkDoc reports broken text, source order, merge, cell, and baseline inva
     makeDoc([paragraph('p', [opaqueAtom('eq', '∫', true, 1)], {}, { src: 2 })]),
     makeDoc([paragraph('p', [removable], {}, { src: 2 })]),
   )
+})
+
+function indexShape(index: DocIndex): unknown[] {
+  return index.ordered.map((id) => {
+    const loc = index.get(id)
+    return { story: loc.story, path: loc.path, order: loc.order, para: loc.para }
+  })
+}
+
+test('indexOf keeps the most recent bodies and rebuilds one that fell out', () => {
+  const doc = makeDoc([paragraph('a', [text('one')]), paragraph('b', [text('two')])])
+  const first = indexOf(doc)
+  assert.equal(indexOf(doc), first, 'the same document reuses the index')
+  for (let i = 0; i < INDEX_CACHE_LIMIT + 1; i++) {
+    indexOf(makeDoc([paragraph(`q${i}`, [text('x')])]))
+  }
+  const again = indexOf(doc)
+  assert.notEqual(again, first, 'a body past the cache bound is indexed again')
+  assert.deepEqual(indexShape(again), indexShape(first), 'the rebuilt index matches')
+
+  const leftDoc = makeDoc([paragraph('l', [text('left')])])
+  const rightDoc = makeDoc([paragraph('r', [text('right')])])
+  const left = indexOf(leftDoc)
+  const right = indexOf(rightDoc)
+  for (let i = 0; i < 8; i++) {
+    const turn = i % 2 === 0 ? leftDoc : rightDoc
+    assert.equal(indexOf(turn), i % 2 === 0 ? left : right, `turn ${i} reuses the index`)
+  }
 })

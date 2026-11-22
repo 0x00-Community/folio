@@ -347,16 +347,34 @@ const MARK_KEYS = [
   'bold', 'italic', 'underline', 'strike', 'font', 'fontEastAsia', 'sizePt', 'color', 'highlight', 'vertAlign', 'charStyle', 'link',
 ] as const satisfies readonly (keyof Marks)[]
 
-const indexCache = new WeakMap<readonly Block[], DocIndex>()
 const textCache = new WeakMap<Paragraph, string>()
 let idCounter = 1
 
-/** Derived paragraph index, cached per body array identity. O(paragraphs) to rebuild, about 0.3 ms at 100 pages. */
+// Two slots are the undo/redo pair. The third keeps that pair when a command indexes one
+// intermediate body, the cleared selection, before the next keystroke indexes the result.
+export const INDEX_CACHE_LIMIT = 3
+
+interface IndexEntry {
+  readonly body: readonly Block[]
+  readonly index: DocIndex
+}
+
+const indexCache: IndexEntry[] = []
+
+/** Paragraph index of the most recently used bodies. Past INDEX_CACHE_LIMIT the least recently used is dropped, so a body the undo history still holds is rebuilt on its next use. O(paragraphs), about 0.3 ms at 100 pages. */
 export function indexOf(doc: Doc): DocIndex {
-  const cached = indexCache.get(doc.body)
-  if (cached) return cached
+  for (let i = 0; i < indexCache.length; i++) {
+    const entry = indexCache[i]
+    if (!entry || entry.body !== doc.body) continue
+    if (i !== 0) {
+      indexCache.splice(i, 1)
+      indexCache.unshift(entry)
+    }
+    return entry.index
+  }
   const built = buildIndex(doc)
-  indexCache.set(doc.body, built)
+  indexCache.unshift({ body: doc.body, index: built })
+  if (indexCache.length > INDEX_CACHE_LIMIT) indexCache.pop()
   return built
 }
 
