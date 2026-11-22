@@ -247,11 +247,11 @@ test('row height is an exact clip, a minimum, or nothing', () => {
   const auto = row([cell([paragraph('a', [text('a')])])])
   assert.deepEqual(rowFrame(auto), { height: null, minHeight: null, clip: false })
   const atLeast: Row = { ...auto, props: { heightPt: pt(18), heightRule: 'atLeast' } }
-  assert.deepEqual(rowFrame(atLeast), { height: null, minHeight: '24px', clip: false })
+  assert.deepEqual(rowFrame(atLeast), { height: '24px', minHeight: '24px', clip: false })
   const exact: Row = { ...auto, props: { heightPt: pt(24), heightRule: 'exact' } }
   assert.deepEqual(rowFrame(exact), { height: '32px', minHeight: null, clip: true })
   const implicit: Row = { ...auto, props: { heightPt: pt(12) } }
-  assert.deepEqual(rowFrame(implicit), { height: null, minHeight: '16px', clip: false }, 'a height with no rule is a minimum')
+  assert.deepEqual(rowFrame(implicit), { height: '16px', minHeight: '16px', clip: false }, 'a height with no rule is a minimum')
 })
 
 test('cell padding is the Word default, then the table, then the cell', () => {

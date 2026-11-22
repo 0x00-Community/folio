@@ -626,6 +626,127 @@ await check('tables.docx draws each file\'s borders, and an inserted table keeps
   sameJson(painted.map((part) => part.side).filter(Boolean).sort(), ['bottom', 'left', 'right', 'top'], 'reopened shadow')
 })
 
+await check('a tall row continues across pages and stays reachable', async () => {
+  await openBasic()
+  const lines = Array.from({ length: 120 }, (_, index) => `n${index}`).join('\n')
+  const built = evaluate(`(async () => {
+    const body = window.__word.editor.state.doc.body
+    const first = body.find((block) => block.kind === 'p')
+    if (!first) return { ok: false, step: 'no paragraph' }
+    const selected = await word.call({ op: 'select', at: { para: first.id, offset: 0 } })
+    if (!selected || selected.ok !== true) return { ok: false, step: 'select', code: selected && selected.code }
+    const inserted = await word.call({ op: 'insertTable', rows: 1, cols: 1 })
+    if (!inserted || inserted.ok !== true) return { ok: false, step: 'insertTable', code: inserted && inserted.code }
+    const typed = await word.call({ op: 'insertText', text: ${JSON.stringify(lines)} })
+    if (!typed || typed.ok !== true) return { ok: false, step: 'insertText', code: typed && typed.code }
+    return { ok: true }
+  })()`)
+  assert(built && built.ok === true, `build tall row failed at ${built && built.step} ${built && built.code || ''}`)
+  await until(`window.__word.editor.status().pagesFinal === true`, { timeout: 60000, label: 'tall row pagination' })
+  const laid = evaluate(`(() => {
+    const editor = window.__word.editor
+    function textOf(para) {
+      let text = ''
+      for (const inline of para.inlines) if (inline.kind === 'text') text += inline.text
+      return text
+    }
+    let table = null
+    for (const block of editor.state.doc.body) {
+      if (block.kind !== 'table') continue
+      const cell = block.rows[0] && block.rows[0].cells[0]
+      const firstPara = cell && cell.blocks.find((child) => child.kind === 'p')
+      if (firstPara && textOf(firstPara) === 'n0') table = block
+    }
+    if (!table) return { error: 'missing table' }
+    const paras = []
+    for (const child of table.rows[0].cells[0].blocks) {
+      if (child.kind === 'p') paras.push({ id: child.id, text: textOf(child) })
+    }
+    let pages = 0
+    for (const page of editor.view.layout.pages) {
+      if (page.slices.some((slice) => slice.block === table.id)) pages += 1
+    }
+    const clipped = []
+    for (const page of document.querySelectorAll('.page')) {
+      if (page.dataset.mounted !== '1') continue
+      const body = page.querySelector('.page-body')
+      if (body && body.scrollHeight > body.clientHeight + 1) clipped.push(body.scrollHeight - body.clientHeight)
+    }
+    let boundary = null
+    for (let i = 0; i < paras.length - 1; i++) {
+      const left = editor.view.pageOf({ p: paras[i].id, o: paras[i].text.length })
+      const right = editor.view.pageOf({ p: paras[i + 1].id, o: 0 })
+      if (right === left + 1) {
+        boundary = { from: paras[i].id, to: paras[i + 1].id, fromLength: paras[i].text.length }
+        break
+      }
+    }
+    return { pages, paras: paras.length, clipped, boundary, target: paras[99] || null }
+  })()`)
+  assert(laid && !laid.error, laid && laid.error)
+  assert(laid.paras === 120, `paragraphs ${laid.paras}`)
+  assert(laid.pages >= 3, `table pages ${laid.pages}`)
+  assert(laid.clipped.length === 0, `page body clips ${JSON.stringify(laid.clipped)}`)
+  assert(laid.boundary, 'no page boundary between cell paragraphs')
+  const from = laid.boundary.from
+  const to = laid.boundary.to
+  const selectedEnd = evaluate(`(async () => word.call({ op: 'select', at: { para: ${JSON.stringify(from)}, offset: 'end' } }))()`)
+  assert(selectedEnd && selectedEnd.ok === true, `select end ${selectedEnd && selectedEnd.code || ''}`)
+  const sink = focusSink()
+  act(sink, 'key', 'down')
+  const landed = evaluate(`(() => {
+    const sel = window.__word.editor.state.sel
+    return sel && sel.kind === 'text' ? sel.head.p : null
+  })()`)
+  assert(landed === to, `arrow down landed in ${landed}`)
+  act(sink, 'key', 'up')
+  const back = evaluate(`(() => {
+    const sel = window.__word.editor.state.sel
+    return sel && sel.kind === 'text' ? { p: sel.head.p, o: sel.head.o } : null
+  })()`)
+  assert(back && back.p === from && back.o === laid.boundary.fromLength, `arrow up landed at ${JSON.stringify(back)}`)
+  const target = laid.target
+  assert(target && target.text === 'n99', `100th paragraph ${target && target.text}`)
+  const selectedTarget = evaluate(`(async () => word.call({ op: 'select', at: { para: ${JSON.stringify(target.id)}, offset: 0 } }))()`)
+  assert(selectedTarget && selectedTarget.ok === true, `select 100th ${selectedTarget && selectedTarget.code || ''}`)
+  const caret = evaluate(`(() => {
+    const mark = document.querySelector('.caret')
+    const page = mark && mark.closest('.page')
+    const body = page && page.querySelector('.page-body')
+    if (!mark || !body) return null
+    const cr = mark.getBoundingClientRect()
+    const br = body.getBoundingClientRect()
+    return cr.top >= br.top - 1 && cr.bottom <= br.bottom + 1 && cr.left >= br.left - 1 && cr.right <= br.right + 1
+  })()`)
+  assert(caret === true, 'caret is outside its page body')
+  const typing = focusSink()
+  act(typing, 'type', 'Q')
+  const typed = evaluate(`(() => {
+    const sel = window.__word.editor.state.sel
+    if (!sel || sel.kind !== 'text') return null
+    function textOf(para) {
+      let text = ''
+      for (const inline of para.inlines) if (inline.kind === 'text') text += inline.text
+      return text
+    }
+    function find(blocks) {
+      for (const block of blocks) {
+        if (block.kind === 'p' && block.id === sel.head.p) return textOf(block)
+        if (block.kind !== 'table') continue
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            const hit = find(cell.blocks)
+            if (hit !== null) return hit
+          }
+        }
+      }
+      return null
+    }
+    return find(window.__word.editor.state.doc.body)
+  })()`)
+  assert(typed === 'Qn99', `typed ${JSON.stringify(typed)}`)
+})
+
 await check('console has no errors', async () => {
   const errors = consoleErrors()
   assert(errors.length === 0, errors.join('\n'))

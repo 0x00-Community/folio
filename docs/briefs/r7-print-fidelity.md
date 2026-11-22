@@ -12,14 +12,19 @@ their checks. Unit 3 passes on `basic.docx` and `long.docx` and not on the priva
 | Wasm memory after a preview, private document | 1,228 MB | 348 MB | under 512 MB |
 | Blocks that start on the same page, `basic.docx` | 0.91 | 1.00 | 0.9 |
 | Blocks that start on the same page, `long.docx` | 0.06 (50 and 59 pages) | 0.97 (55 and 55) | 0.9 |
-| Blocks that start on the same page, private document | 0.69 (33 and 37 pages) | 0.84 (33 and 37) | 0.9 |
+| Blocks that start on the same page, private document | 0.69 (33 and 37 pages) | 0.94 (39 and 37) | 0.9 |
+| Page count, private document, editing view against preview | 33 and 37 | 39 and 37 (Word: 35) | within 2 percent: missed |
 
 Open:
 
-- The private document misses the drift mark. The editing view does not continue a table row on the next page
-  (cause 1 of the diagnosis below). Not built: it waits for a decision. Seen in the window on 2026-11-22: the
-  page that holds such a row clips it (a page body 582 px high with 3,002 px of content, `overflow: hidden`), so
-  most of the row cannot be seen or reached in the editing view, and the page before it is left almost empty.
+- The private document reaches the share mark and misses the page count mark: the editing view is 39 pages, the
+  preview 37, Word 35. Not explained page by page. Known parts: one table cell uses a face this machine lacks
+  (`楷体_GB2312`, not in the alias table) and wraps to about four more lines in the editing view than in Word,
+  and the last table is 62 pt apart after the repeated headers are set aside.
+- rdocx lays some table cells out with one or two more lines than Word's PDF has (block 133 row 0: 622 pt
+  against Word's 578 pt and the editing view's content of 577 pt. Block 94 row 1: 12 lines against Word's 11).
+  The editing view was not made to copy it. Not fixed in the kit.
+- A vertically merged cell cut by a page shows its side lines and no closing line at the cut in the editing view.
 - The preview is 37 pages where Word's PDF is 35, and differs from it in character counts from page 1.
 - Thirteen `auto` paragraphs in `linesAndChars` sections are snapped to the grid pitch by rdocx. Whether Word
   does is not settled.
@@ -29,6 +34,14 @@ Open:
 - Caret motion and clicks across an inline page break were tested in `pages.test.ts`, not by hand in the window.
 - The kit's `rdocx-py` and `rpptx-py` crates were edited for the font bytes type and could not be compiled offline.
 - Finding 13: how the runtime counts wasm memory against `heapMb` is still not known.
+
+Unit 5 (2026-11-22, added after the diagnosis): a table row continues on the next page in the editing view.
+`Measure` carries the places inside a row where a cut crosses no line (`rowCuts`), and `placeTable` cuts there.
+A row taller than a page is always cut, whatever its properties, so no content is clipped. Every row used to be
+marked as not splittable. Down and Up cross the cut with the goal column kept: a caret that sat exactly on the
+cut was placed on the next page. An `atLeast` row height is now written as CSS `height`, because a table row
+ignores `min-height`. That alone was 54 pt on one table of the private document, and Word's row pitches agree
+with the minimum.
 
 Unit 2, second part and unit 3, third step (2026-11-22): the session passes `Arc` clones of its faces to the
 kit's shared entry point. An inline page break starts a page in the editing view. `w:trHeight` and cell margins

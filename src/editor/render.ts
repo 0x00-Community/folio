@@ -703,13 +703,17 @@ export interface RowFrame {
   readonly clip: boolean
 }
 
-/** Exact clips. atLeast, and a height with no rule, is a minimum. Auto sets neither. */
+/**
+ * Exact clips. atLeast, and a height with no rule, is a minimum.
+ * A table row honors `height` as that minimum and ignores `min-height`, so the
+ * minimum is written to both: `height` for the layout, `minHeight` for the paginator.
+ */
 export function rowFrame(row: Row): RowFrame {
   const height = row.props.heightPt
   if (height === undefined) return { height: null, minHeight: null, clip: false }
   const pxHeight = `${px(height)}px`
   if (row.props.heightRule === 'exact') return { height: pxHeight, minHeight: null, clip: true }
-  return { height: null, minHeight: pxHeight, clip: false }
+  return { height: pxHeight, minHeight: pxHeight, clip: false }
 }
 
 function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefined): HTMLElement {
@@ -744,8 +748,9 @@ function renderTable(table: Table, ctx: RenderContext, deco: Decoration | undefi
     else headerOpen = false
     const tr = document.createElement('tr')
     if (row.props.header) tr.dataset.header = '1'
-    tr.dataset.cantSplit = '1'
+    tr.dataset.cantSplit = row.props.cantSplit === true ? '1' : '0'
     const frame = rowFrame(row)
+    if (frame.clip) tr.dataset.exact = '1'
     if (frame.height !== null) tr.style.height = frame.height
     if (frame.minHeight !== null) tr.style.minHeight = frame.minHeight
     let col = 0

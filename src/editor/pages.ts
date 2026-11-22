@@ -34,7 +34,14 @@ export interface Measure {
   readonly lineBottoms: Float32Array
   /** Bottom of each row. Tables only. */
   readonly rowBottoms?: Float32Array
+  /** Y of each allowed cut inside a row, relative to the block top, ascending. Tables only. Row bottoms are not in it. */
+  readonly rowCuts?: Float32Array
+  /** 1 where the kit would split a row that still fits on a page. 0 is used only when the row is taller than the page. Absent means every cut is legal. */
+  readonly rowCutSplit?: Uint8Array
+  /** Minimum height of the first fragment of each row. Absent when every row has none. */
+  readonly rowMinPx?: Float32Array
   readonly headerRows: number
+  /** 1 when the kit keeps the row whole if it fits on a page. A row taller than the page is still cut. */
   readonly cantSplitRows?: Uint8Array
   readonly spaceBeforePx: number
   readonly spaceAfterPx: number
@@ -98,6 +105,215 @@ function childContentRects(child: HTMLElement): DOMRect[] {
   return [...range.getClientRects()]
 }
 
+export interface CutCell {
+  readonly top: number
+  readonly bottom: number
+  readonly contentEnd: number
+  readonly breaks: readonly { readonly y: number; readonly tight: boolean }[]
+}
+
+/** Allowed cuts inside rows. A y stays when every cell whose box contains it has a break there or has already ended. */
+export function tableRowCuts(
+  rowBottoms: Float32Array,
+  cells: readonly CutCell[],
+): { cuts: Float32Array; split: Uint8Array } {
+  const ys: number[] = []
+  for (const cell of cells) {
+    for (const item of cell.breaks) {
+      if (Number.isFinite(item.y)) ys.push(item.y)
+    }
+  }
+  ys.sort((a, b) => a - b)
+  const kept: number[] = []
+  const bits: number[] = []
+  let last = Number.NEGATIVE_INFINITY
+  for (const y of ys) {
+    if (y <= last + EPS) continue
+    if (!yInsideRow(rowBottoms, y)) continue
+    let tight = true
+    let covered = false
+    let blocked = false
+    for (const cell of cells) {
+      if (!cellCovers(cell, y)) continue
+      covered = true
+      if (!cellAccepts(cell, y, false)) {
+        blocked = true
+        break
+      }
+      if (!cellAccepts(cell, y, true)) tight = false
+    }
+    if (!covered || blocked) continue
+    last = y
+    kept.push(y)
+    bits.push(tight ? 1 : 0)
+  }
+  return { cuts: Float32Array.from(kept), split: Uint8Array.from(bits) }
+}
+
+function yInsideRow(bottoms: Float32Array, y: number): boolean {
+  let top = 0
+  for (let i = 0; i < bottoms.length; i++) {
+    const bottom = bottoms[i] ?? top
+    if (y > top + EPS && y < bottom - EPS) return true
+    if (y <= bottom + EPS) return false
+    top = bottom
+  }
+  return false
+}
+
+function cellCovers(cell: CutCell, y: number): boolean {
+  return y > cell.top + 0.01 && y <= cell.bottom + EPS
+}
+
+function cellAccepts(cell: CutCell, y: number, tight: boolean): boolean {
+  if (y >= cell.contentEnd - EPS) return true
+  for (const item of cell.breaks) {
+    if (Math.abs(item.y - y) > EPS) continue
+    if (tight && !item.tight) continue
+    return true
+  }
+  return false
+}
+
+interface ContentBreak {
+  readonly y: number
+  readonly tight: boolean
+}
+
+interface TableReading {
+  readonly rowBottoms: Float32Array
+  readonly cantSplitRows: Uint8Array
+  readonly rowCuts?: Float32Array
+  readonly rowCutSplit?: Uint8Array
+  readonly rowMinPx?: Float32Array
+}
+
+function readTable(table: HTMLTableElement, boxTop: number, zoom: number): TableReading {
+  const z = zoom > 0 ? zoom : 1
+  const n = table.rows.length
+  const rowBottoms = new Float32Array(n)
+  const cantSplitRows = new Uint8Array(n)
+  const mins = new Float32Array(n)
+  let anyMin = false
+  const cells: CutCell[] = []
+  for (let i = 0; i < n; i++) {
+    const row = table.rows[i]
+    if (!row) continue
+    let bottom = 0
+    for (const cell of row.cells) {
+      const rect = cell.getBoundingClientRect()
+      bottom = Math.max(bottom, rect.bottom - boxTop)
+      const top = (rect.top - boxTop) / z
+      const content = cellBreaks(cell, boxTop, z, top)
+      cells.push({ top, bottom: (rect.bottom - boxTop) / z, contentEnd: content.contentEnd, breaks: content.breaks })
+    }
+    rowBottoms[i] = bottom / z
+    if (rowRefusesSplit(row)) cantSplitRows[i] = 1
+    const min = parseFloat(row.style.minHeight)
+    if (Number.isFinite(min) && min > 0) {
+      mins[i] = min
+      anyMin = true
+    }
+  }
+  for (let i = 1; i < n; i++) {
+    const prev = rowBottoms[i - 1] ?? 0
+    if ((rowBottoms[i] ?? 0) < prev + 0.5) rowBottoms[i] = prev + 0.5
+  }
+  const found = tableRowCuts(rowBottoms, cells)
+  let loose = false
+  for (let i = 0; i < found.split.length; i++) if ((found.split[i] ?? 1) === 0) loose = true
+  return {
+    rowBottoms,
+    cantSplitRows,
+    ...(found.cuts.length > 0 ? { rowCuts: found.cuts } : {}),
+    ...(loose ? { rowCutSplit: found.split } : {}),
+    ...(anyMin ? { rowMinPx: mins } : {}),
+  }
+}
+
+function rowRefusesSplit(row: HTMLTableRowElement): boolean {
+  // The kit refuses the whole row for cantSplit, an exact height, or any direct paragraph with keep-next or a page break.
+  if (row.dataset.cantSplit === '1' || row.dataset.exact === '1') return true
+  for (const cell of row.cells) {
+    for (const child of cell.children) {
+      if (!(child instanceof HTMLElement) || !child.classList.contains('p')) continue
+      if (child.dataset.keepNext === '1' || child.dataset.pageBreakBefore === '1') return true
+    }
+  }
+  return false
+}
+
+function cellBreaks(
+  cell: HTMLElement,
+  boxTop: number,
+  zoom: number,
+  top: number,
+): { breaks: ContentBreak[]; contentEnd: number } {
+  const breaks: ContentBreak[] = []
+  let contentEnd = top
+  for (const child of cell.children) {
+    if (!(child instanceof HTMLElement)) continue
+    for (const item of blockBreaks(child, boxTop, zoom)) {
+      breaks.push(item)
+      if (item.y > contentEnd) contentEnd = item.y
+    }
+  }
+  return { breaks, contentEnd }
+}
+
+function blockBreaks(el: HTMLElement, boxTop: number, zoom: number): ContentBreak[] {
+  if (el.classList.contains('p')) return paragraphBreaks(el, boxTop, zoom)
+  if (el.classList.contains('t')) return nestedBreaks(el, boxTop, zoom)
+  const bottom = (el.getBoundingClientRect().bottom - boxTop) / zoom
+  return Number.isFinite(bottom) ? [{ y: bottom, tight: true }] : []
+}
+
+function paragraphBreaks(el: HTMLElement, boxTop: number, zoom: number): ContentBreak[] {
+  const lines = contentLineRects(el)
+  if (lines.length === 0) {
+    const bottom = (el.getBoundingClientRect().bottom - boxTop) / zoom
+    return Number.isFinite(bottom) ? [{ y: bottom, tight: true }] : []
+  }
+  // A line split needs four lines and the widow minimum on both sides. keep-lines, keep-next, and a page break do not.
+  const blocked = el.dataset.keepLines === '1' || el.dataset.keepNext === '1' || el.dataset.pageBreakBefore === '1'
+  const canSplit = !blocked && lines.length >= 4
+  const minimum = el.dataset.widow === '1' ? 2 : 1
+  const breaks: ContentBreak[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line) continue
+    const y = (line.bottom - boxTop) / zoom
+    if (!Number.isFinite(y)) continue
+    const kept = i + 1
+    const after = lines.length - kept
+    const tight = i === lines.length - 1 || (canSplit && kept >= minimum && after >= minimum)
+    breaks.push({ y, tight })
+  }
+  return breaks
+}
+
+function nestedBreaks(el: HTMLElement, boxTop: number, zoom: number): ContentBreak[] {
+  const table = el.querySelector(':scope > table')
+  if (!(table instanceof HTMLTableElement) || table.rows.length === 0) {
+    const bottom = (el.getBoundingClientRect().bottom - boxTop) / zoom
+    return Number.isFinite(bottom) ? [{ y: bottom, tight: true }] : []
+  }
+  const measured = readTable(table, boxTop, zoom)
+  const breaks: ContentBreak[] = []
+  for (let i = 0; i < measured.rowBottoms.length; i++) {
+    breaks.push({ y: measured.rowBottoms[i] ?? 0, tight: true })
+  }
+  const cuts = measured.rowCuts
+  const split = measured.rowCutSplit
+  if (cuts) {
+    for (let i = 0; i < cuts.length; i++) {
+      const tight = !split || (split[i] ?? 1) !== 0
+      breaks.push({ y: cuts[i] ?? 0, tight })
+    }
+  }
+  return breaks
+}
+
 /** Reads a mounted or hidden block element: offsetHeight, plus line bottoms grouped from Range.getClientRects(). */
 export function measureElement(el: HTMLElement, zoom: number): Measure {
   const z = zoom > 0 ? zoom : 1
@@ -118,22 +334,17 @@ export function measureElement(el: HTMLElement, zoom: number): Measure {
   }
   let rowBottoms: Float32Array | undefined
   let cantSplitRows: Uint8Array | undefined
+  let rowCuts: Float32Array | undefined
+  let rowCutSplit: Uint8Array | undefined
+  let rowMinPx: Float32Array | undefined
   const table = el.querySelector(':scope > table')
   if (table instanceof HTMLTableElement && table.rows.length > 0) {
-    rowBottoms = new Float32Array(table.rows.length)
-    cantSplitRows = new Uint8Array(table.rows.length)
-    for (let i = 0; i < table.rows.length; i++) {
-      const row = table.rows[i]
-      if (!row) continue
-      let bottom = 0
-      for (const cell of row.cells) bottom = Math.max(bottom, cell.getBoundingClientRect().bottom - box.top)
-      rowBottoms[i] = bottom / z
-      cantSplitRows[i] = 1
-    }
-    for (let i = 1; i < rowBottoms.length; i++) {
-      const prev = rowBottoms[i - 1] ?? 0
-      if ((rowBottoms[i] ?? 0) < prev + 0.5) rowBottoms[i] = prev + 0.5
-    }
+    const measured = readTable(table, box.top, z)
+    rowBottoms = measured.rowBottoms
+    cantSplitRows = measured.cantSplitRows
+    rowCuts = measured.rowCuts
+    rowCutSplit = measured.rowCutSplit
+    rowMinPx = measured.rowMinPx
   }
   const lastLine = lineBottoms.length > 0 ? (lineBottoms[lineBottoms.length - 1] ?? 0) : 0
   const lastRow = rowBottoms && rowBottoms.length > 0 ? (rowBottoms[rowBottoms.length - 1] ?? 0) : 0
@@ -144,6 +355,9 @@ export function measureElement(el: HTMLElement, zoom: number): Measure {
     heightPx: Math.max(box.height / z, lastLine, lastRow),
     lineBottoms,
     ...(rowBottoms ? { rowBottoms, cantSplitRows } : {}),
+    ...(rowCuts ? { rowCuts } : {}),
+    ...(rowCutSplit ? { rowCutSplit } : {}),
+    ...(rowMinPx ? { rowMinPx } : {}),
     headerRows: Number.isFinite(headerRows) ? headerRows : 0,
     spaceBeforePx,
     spaceAfterPx,
@@ -426,6 +640,7 @@ function placeTable(
   available: number,
   atTop: boolean,
   skip: number,
+  pageBody: number,
 ): Placed | null {
   const rows = m.rowBottoms
   if (!rows || rows.length === 0) return null
@@ -452,13 +667,26 @@ function placeTable(
     if (visual <= available + EPS) last = i
     else break
   }
+  const next = last + 1
+  if (next < n) {
+    const cut = cutInRow(m, next, start, available, repeatH, atTop, pageBody, headerRows)
+    if (cut !== null) return finishTableCut(id, m, start, cut, repeat, repeatH)
+  }
   if (last < first) {
     if (!atTop) return null
     last = first
   }
+  // A header-only page moves the table, or takes the next row when that row itself fits on a page.
   if (headerRows > 0 && last === headerRows - 1 && n > headerRows && first < headerRows) {
     if (!atTop) return null
-    last = Math.min(n - 1, headerRows)
+    const body = headerRows
+    if (body !== next) {
+      const cut = cutInRow(m, body, start, available, repeatH, atTop, pageBody, headerRows)
+      if (cut !== null) return finishTableCut(id, m, start, cut, repeat, repeatH)
+    }
+    const bodyTop = rows[body - 1] ?? 0
+    const bodyBottom = rows[body] ?? bodyTop
+    if (bodyBottom - bodyTop <= pageBody + EPS) last = Math.min(n - 1, headerRows)
   }
   const end = rows[last] ?? start
   const consumed = repeatH + (end - start)
@@ -468,6 +696,71 @@ function placeTable(
   }
   if (end <= start + 0.25) return atTop ? fit(id, start, end + 1, repeat, consumed + 1, end + 1) : null
   return fit(id, start, end, repeat, consumed, end)
+}
+
+function finishTableCut(
+  id: BlockId,
+  m: Measure,
+  start: number,
+  y: number,
+  repeat: number,
+  repeatH: number,
+): Placed {
+  let end = y
+  if (end < start + 0.5) end = Math.min(m.heightPx, start + 1)
+  if (end > m.heightPx) end = m.heightPx
+  if (end >= m.heightPx - EPS) return fit(id, start, m.heightPx, repeat, repeatH + Math.max(0, m.heightPx - start), null)
+  return fit(id, start, end, repeat, repeatH + (end - start), end)
+}
+
+function cutInRow(
+  m: Measure,
+  row: number,
+  start: number,
+  available: number,
+  repeatH: number,
+  atTop: boolean,
+  pageBody: number,
+  headerRows: number,
+): number | null {
+  const rows = m.rowBottoms
+  if (!rows || row < 0 || row >= rows.length || row < headerRows) return null
+  const top = row <= 0 ? 0 : (rows[row - 1] ?? 0)
+  const bottom = rows[row] ?? top
+  // A row taller than the page is cut even when the kit would paint it whole. Anything else follows the kit.
+  const taller = bottom - top > pageBody + EPS
+  if (!taller && (m.cantSplitRows?.[row] ?? 0) !== 0) return null
+  const cuts = m.rowCuts
+  const flags = m.rowCutSplit
+  let best = start
+  if (cuts) {
+    for (let i = 0; i < cuts.length; i++) {
+      const y = cuts[i] ?? 0
+      if (y <= start + EPS || y <= top + EPS || y >= bottom - EPS) continue
+      if (repeatH + (y - start) > available + EPS) continue
+      const legal = taller || !flags || i >= flags.length || (flags[i] ?? 1) !== 0
+      if (!legal) continue
+      if (y > best) best = y
+    }
+  }
+  if (best > start + 0.25) {
+    const fragment = best - Math.max(start, top)
+    const firstPiece = start <= top + EPS
+    const contentBefore = !atTop || repeatH > EPS
+    const minH = !taller && firstPiece && contentBefore ? (m.rowMinPx?.[row] ?? 0) : 0
+    if (fragment + EPS >= minH) return best
+    return null
+  }
+  if (!taller) return null
+  let end = start + Math.max(0, available - repeatH)
+  if (end <= top + 0.25) return null
+  if (end > bottom) end = bottom
+  if (end <= start + 0.25) {
+    if (!atTop) return null
+    end = Math.min(bottom, start + 1)
+  }
+  if (end <= start + 0.25 || end <= top + 0.25) return null
+  return end
 }
 
 function placeAtomic(id: BlockId, m: Measure, y0: number, available: number, atTop: boolean, skip: number): Placed | null {
@@ -487,7 +780,7 @@ function placeBlock(
   skip: number,
   pageBody: number,
 ): Placed | null {
-  if (m.rowBottoms && m.rowBottoms.length > 0) return placeTable(id, m, y0, available, atTop, skip)
+  if (m.rowBottoms && m.rowBottoms.length > 0) return placeTable(id, m, y0, available, atTop, skip, pageBody)
   if (m.lineBottoms.length > 0 || (m.inlineBreaks !== undefined && m.inlineBreaks.length > 0)) {
     return placeLines(id, m, y0, available, atTop, skip, pageBody)
   }
@@ -624,6 +917,59 @@ export function pageOfBlock(layout: Layout, id: string): number | null {
     }
   }
   return null
+}
+
+export interface SliceSpan {
+  readonly page: number
+  readonly y0: number
+  readonly y1: number
+}
+
+/**
+ * The page whose slice contains `y`. A y on the cut stays with the slice that ends there:
+ * the last line of a cell ends on that y, and the next slice starts after it.
+ */
+export function pageAtSliceY(spans: readonly SliceSpan[], y: number): number | null {
+  const hit = spans.find((span) => y >= span.y0 - 0.5 && y <= span.y1)
+  return hit ? hit.page : null
+}
+
+/**
+ * Y used to choose a slice. The caret after the last character of a paragraph is still on
+ * that character's line; a range at the end can report a y on the following line, past the cut.
+ */
+export function caretSliceY(offset: number, length: number, yAt: (offset: number) => number | null): number | null {
+  const y = yAt(offset)
+  if (y === null || offset <= 0 || offset < length) return y
+  const prev = yAt(offset - 1)
+  if (prev === null || prev >= y) return y
+  return prev
+}
+
+export interface VerticalLine {
+  readonly globalMid: number
+  readonly left: number
+  readonly right: number
+  readonly story: 'body' | 'header' | 'footer'
+}
+
+/** The next visual line in the same story. Header and footer lines are not steps of the body. */
+export function nextVerticalLine<T extends VerticalLine>(
+  lines: readonly T[],
+  current: T,
+  direction: 'up' | 'down',
+  goal: number,
+): T | null {
+  const forward = direction === 'down'
+  const candidates = lines.filter((line) => {
+    if (line === current || line.story !== current.story) return false
+    return forward ? line.globalMid > current.globalMid + 4 : line.globalMid < current.globalMid - 4
+  })
+  if (candidates.length === 0) return null
+  const containing = candidates.filter((line) => goal >= line.left - 16 && goal <= line.right + 16)
+  const pool = containing.length > 0 ? containing : candidates
+  pool.sort((a, b) => Math.abs(a.globalMid - current.globalMid) - Math.abs(b.globalMid - current.globalMid))
+  return pool[0] ?? null
 }
 
 function pageContaining(layout: Layout, id: BlockId): number {
@@ -821,8 +1167,8 @@ function wantsBlank(breakType: 'evenPage' | 'oddPage', pageNumber: number): bool
 
 /**
  * Word's page rules over cached measures: pageBreakBefore, an inline page break, keepNext chains (capped at one page),
- * keepLines, widow and orphan control, section breaks, rows that cannot split, header rows, and paragraph
- * spacing. The top of a page drops space before. Between two blocks the gap is the larger of the first's
+ * keepLines, widow and orphan control, section breaks, table rows (whole when they fit, cut inside a row when
+ * they do not), header rows, and paragraph spacing. The top of a page drops space before. Between two blocks the gap is the larger of the first's
  * space after and the second's space before. The measured height stays the block's own; the skip is applied
  * when the slice is placed. A break at the end of a block starts the next block on a new page, and that one
  * transition absorbs the next block's pageBreakBefore.
@@ -992,6 +1338,7 @@ interface LineBox {
   bottom: number
   globalMid: number
   paraId: string
+  story: 'body' | 'header' | 'footer'
 }
 
 function containsId(block: Block, id: string): boolean {
@@ -1473,7 +1820,7 @@ export class PageView {
     const lines = this.collectLines(neighbor >= 0 && neighbor < this._layout.pages.length ? [caret.page, neighbor] : [caret.page])
     const current = this.pickCurrent(lines, caret.page, caret.x, caret.top + caret.height / 2)
     if (!current) return { pos, goalX: goal }
-    const next = this.pickNext(lines, current, direction, goal)
+    const next = nextVerticalLine(lines, current, direction, goal)
     if (!next) return { pos, goalX: goal }
     return { pos: this.posOnLine(next, goal) ?? pos, goalX: goal }
   }
@@ -1685,7 +2032,11 @@ export class PageView {
     })
   }
 
-  /** Page index (0-based) holding a position, from the layout, without touching the DOM. */
+  /**
+   * Page index (0-based) holding a position. A paragraph uses its measured lines.
+   * A cell paragraph is not in that cache, so a row that continues onto another page
+   * reads one mounted copy and picks the slice that contains the caret.
+   */
   pageOf(pos: Pos): number {
     const place = this.index().get(pos.p)
     if (!place) return 0
@@ -1693,11 +2044,12 @@ export class PageView {
     const first = spots[0]
     if (!first) return 0
     if (spots.length === 1) return first.page
-    let y = 0
-    if (place.owner.kind === 'table') y = this.rowMiddle(place.owner, place.row)
-    else if (place.owner.kind === 'p') y = this.yForOffset(place.owner, pos.o)
-    const hit = spots.find((spot) => y >= spot.slice.y0 - 0.5 && y < spot.slice.y1 - 0.01)
-    return hit?.page ?? spots[spots.length - 1]?.page ?? 0
+    const y = this.sliceY(place, pos.o)
+    const page = pageAtSliceY(
+      spots.map((spot) => ({ page: spot.page, y0: spot.slice.y0, y1: spot.slice.y1 })),
+      y,
+    )
+    return page ?? spots[spots.length - 1]?.page ?? 0
   }
 
   destroy(): void {
@@ -2232,6 +2584,87 @@ export class PageView {
     return out
   }
 
+  private sliceY(place: Place, offset: number): number {
+    if (place.owner.kind === 'p') return this.yForOffset(place.owner, offset)
+    if (place.owner.kind !== 'table') return 0
+    const table = place.owner
+    if (this.rowContinues(table, place.row)) {
+      const length = flatText(place.para).length
+      const y = caretSliceY(offset, length, (at) => this.yInRow(table, place.para.id, at))
+      if (y !== null) return y
+    }
+    return this.rowMiddle(place.owner, place.row)
+  }
+
+  private rowContinues(table: Table, row: number): boolean {
+    const bottoms = this.measures.get(table)?.rowBottoms
+    if (!bottoms || row < 0 || row >= bottoms.length) return false
+    const top = row <= 0 ? 0 : (bottoms[row - 1] ?? 0)
+    const bottom = bottoms[row] ?? top
+    for (const spot of this.spots(table.id)) {
+      if (spot.slice.y1 <= top + EPS || spot.slice.y0 >= bottom - EPS) continue
+      if (spot.slice.y0 > top + EPS || spot.slice.y1 < bottom - EPS) return true
+    }
+    return false
+  }
+
+  private yInRow(table: Table, paraId: string, offset: number): number | null {
+    const spots = this.spots(table.id)
+    let pageIndex = -1
+    for (const spot of spots) {
+      const pageEl = this.pageEls[spot.page]
+      if (!pageEl || pageEl.dataset.mounted !== '1') continue
+      if (this.paraCopy(pageEl, paraId)) {
+        pageIndex = spot.page
+        break
+      }
+    }
+    if (pageIndex < 0) {
+      const first = spots[0]
+      if (!first) return null
+      this.mountPage(first.page)
+      pageIndex = first.page
+    }
+    const pageEl = this.pageEls[pageIndex]
+    if (!pageEl) return null
+    const paraEl = this.paraCopy(pageEl, paraId)
+    if (!paraEl) return null
+    const shift = paraEl.closest('.shift')
+    const blockEl = shift instanceof HTMLElement ? shift.firstElementChild : null
+    if (!(blockEl instanceof HTMLElement)) return null
+    const range = rangeIn(paraEl, offset, offset)
+    const rects = [...range.getClientRects()].filter((rect) => rect.height > 0)
+    const rect = rects[0] ?? paraEl.getBoundingClientRect()
+    const blockRect = blockEl.getBoundingClientRect()
+    const z = this.zoom > 0 ? this.zoom : 1
+    const y = (rect.top + Math.min(rect.height / 2, 1) - blockRect.top) / z
+    return Number.isFinite(y) ? y : null
+  }
+
+  private paraCopy(pageEl: HTMLElement, paraId: string): HTMLElement | null {
+    const found = blockElements(pageEl, paraId).find((el) => el.classList.contains('p') && !el.closest('.repeat-head'))
+    return found ?? null
+  }
+
+  private mountContinuedRows(start: Place, end: Place): void {
+    const seen = new Set<string>()
+    for (const place of this.index().values()) {
+      if (place.order < start.order || place.order > end.order) continue
+      if (place.owner.kind !== 'table') continue
+      const key = `${place.owner.id}:${place.row}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (!this.rowContinues(place.owner, place.row)) continue
+      const bottoms = this.measures.get(place.owner)?.rowBottoms
+      const top = place.row <= 0 ? 0 : (bottoms?.[place.row - 1] ?? 0)
+      const bottom = bottoms?.[place.row] ?? top
+      for (const spot of this.spots(place.owner.id)) {
+        if (spot.slice.y1 <= top + EPS || spot.slice.y0 >= bottom - EPS) continue
+        this.mountPage(spot.page)
+      }
+    }
+  }
+
   private rowMiddle(table: Table, row: number): number {
     const bottoms = this.measures.get(table)?.rowBottoms
     if (!bottoms || bottoms.length === 0) return 0
@@ -2277,9 +2710,7 @@ export class PageView {
     if (!only) return null
     if (all.length === 1) return only
     const place = this.index().get(pos.p)
-    let y = 0
-    if (place?.owner.kind === 'p') y = this.yForOffset(place.owner, pos.o)
-    else if (place?.owner.kind === 'table') y = this.rowMiddle(place.owner, place.row)
+    const y = place ? this.sliceY(place, pos.o) : 0
     for (const el of all) {
       const slice = el.closest('.slice')
       if (!(slice instanceof HTMLElement)) continue
@@ -2364,6 +2795,7 @@ export class PageView {
           if (!(child instanceof HTMLElement) || child.classList.contains('marker')) continue
           rects.push(...childContentRects(child))
         }
+        const story = para.closest('.page-header') ? 'header' : para.closest('.page-footer') ? 'footer' : 'body'
         for (const line of groupLineRects(rects)) {
           const visTop = clipRect ? Math.max(line.top, clipRect.top) : line.top
           const visBottom = clipRect ? Math.min(line.bottom, clipRect.bottom) : line.bottom
@@ -2378,6 +2810,7 @@ export class PageView {
             bottom,
             globalMid: base + (top + bottom) / 2,
             paraId: id,
+            story,
           })
         }
       }
@@ -2400,19 +2833,6 @@ export class PageView {
       }
     }
     return best
-  }
-
-  private pickNext(lines: readonly LineBox[], current: LineBox, direction: 'up' | 'down', goal: number): LineBox | null {
-    const forward = direction === 'down'
-    const candidates = lines.filter((line) => {
-      if (line === current) return false
-      return forward ? line.globalMid > current.globalMid + 4 : line.globalMid < current.globalMid - 4
-    })
-    if (candidates.length === 0) return null
-    const containing = candidates.filter((line) => goal >= line.left - 16 && goal <= line.right + 16)
-    const pool = containing.length > 0 ? containing : candidates
-    pool.sort((a, b) => Math.abs(a.globalMid - current.globalMid) - Math.abs(b.globalMid - current.globalMid))
-    return pool[0] ?? null
   }
 
   private posOnLine(line: LineBox, goalX: number): Pos | null {
@@ -2516,6 +2936,9 @@ export class PageView {
     const startPlace = index.get(start.p)
     const endPlace = index.get(end.p)
     if (!startPlace || !endPlace) return
+    this.mountPage(this.pageOf(start))
+    this.mountPage(this.pageOf(end))
+    this.mountContinuedRows(startPlace, endPlace)
     for (const place of index.values()) {
       if (place.order < startPlace.order || place.order > endPlace.order) continue
       const from = place.para.id === start.p ? start.o : 0

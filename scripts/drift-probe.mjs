@@ -19,6 +19,12 @@ const CSS_PAD_H = 5 * 0.75 * 2
 const WORD_CELL_DEFAULT = { top: 0, right: 5.4, bottom: 0, left: 5.4 }
 
 const arg = process.argv[2]
+const flags = process.argv.slice(3)
+const structureOnly = flags.includes('--structure')
+const rowIndexes = new Set(flags.filter((item) => /^\d+$/.test(item)).map(Number))
+if (structureOnly && rowIndexes.size === 0) {
+  for (const index of [133, 76, 94, 177]) rowIndexes.add(index)
+}
 const docPath = arg
   ? isAbsolute(arg)
     ? arg
@@ -45,8 +51,17 @@ let tempDir = null
 try {
   const importedJson = session.import()
   const imported = JSON.parse(importedJson)
-  const request = printFontRequest(importedJson)
   const faces = scanFonts(fontDirs())
+  if (structureOnly) {
+    console.error(`fonts scanned=${faces.length} structure=1`)
+    const model = buildModel(imported, [], faces)
+    console.log(`doc ${basename(docPath)} blocks=${model.records.length} structure=1`)
+    console.log(
+      `grid documentPitch=${fmt(model.documentPitch)} sections=${model.sections.map((section) => section.label).join(',')}`,
+    )
+    for (const line of model.rowDump) console.log(line)
+  } else {
+  const request = printFontRequest(importedJson)
   const added = addFaces(session, request, faces)
   console.error(`fonts faces=${added.count} bytes=${added.bytes} han=${request.han ? 1 : 0}`)
   layout = session.print_layout(keepPatch(imported))
@@ -90,6 +105,14 @@ try {
   console.log(`pages ${simLine('pdf', model.records, false, (record) => record.contentPt)}`)
   console.log(`pages ${simLine('breaks', model.records, true, (record) => record.contentPt)}`)
   causes(model, pageCount)
+  for (const line of model.rowDump) console.log(line)
+  if (rowIndexes.size > 0) {
+    const svgPath = join('tmp-pdf', 'print.svg')
+    execFileSync(join(POPPLER, 'pdftocairo'), ['-svg', printPdf, svgPath], { stdio: 'ignore' })
+    const printRules = svgRulePages(readFileSync(svgPath, 'utf8'))
+    for (const line of fragmentRules(model, printRules)) console.log(line)
+  }
+  }
   void wasm
 } finally {
   layout?.free()
@@ -196,6 +219,7 @@ function buildModel(imported, boxes, faces) {
   const margins = sections[0]?.margins ?? { top: 72, right: 72, bottom: 72, left: 72, header: 36, footer: 36, gutter: 0 }
   const records = []
   const lines = []
+  const rowDump = []
   let tableOrdinal = 0
   for (let index = 0; index < imported.body.length; index++) {
     const block = imported.body[index]
@@ -208,6 +232,11 @@ function buildModel(imported, boxes, faces) {
       const xml = xmlNodes.tables[tableOrdinal] ?? null
       tableOrdinal += 1
       const row = tableRecord(block, xml, section, print, index, defaultStyle, paraLooks, runLooks, metricsOf, documentPitch)
+      if (rowIndexes.has(index)) {
+        rowDump.push(
+          ...describeTable(block, section, print, index, defaultStyle, paraLooks, runLooks, metricsOf, documentPitch),
+        )
+      }
       const record = finishRecord(row.record, box, block, section, sections)
       records.push(record)
       lines.push(`${row.line} firstPage=${record.firstPage ?? 'none'} sectionBreak=${record.sectionBreak ?? 'none'}`)
@@ -271,6 +300,7 @@ function buildModel(imported, boxes, faces) {
     cellMargins,
     snap: snapSummary(body),
     bodyHeight: (sections[0]?.paperHeight ?? 0) - margins.top - margins.bottom,
+    rowDump,
   }
 }
 
@@ -495,6 +525,263 @@ function tableRecord(block, xml, section, print, index, defaultStyle, paraLooks,
   return { record, line }
 }
 
+function describeTable(block, section, print, index, defaultStyle, paraLooks, runLooks, metricsOf, documentPitch) {
+  const grid = block.gridPt ?? []
+  const tableBorders = block.borders ?? null
+  const tableMargins = block.margins ?? null
+  const rows = block.rows ?? []
+  const lines = []
+  lines.push(
+    [
+      `rows b=${index}`,
+      `n=${rows.length}`,
+      `print=${fmt(print)}`,
+      `grid=${grid.map((width) => fmt(width)).join('|')}`,
+      `mar=${marginText(tableMargins)}`,
+      `bdr=${borderSetText(tableBorders)}`,
+      `pitch=${fmt(documentPitch)}`,
+      `sectionPitch=${fmt(section?.pitch)}`,
+      `contentW=${fmt(section?.contentWidth)}`,
+      `gridSum=${fmt(grid.reduce((sum, width) => sum + width, 0))}`,
+    ].join(' '),
+  )
+  const tops = []
+  const bots = []
+  const placed = []
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r]
+    let col = 0
+    let tallest = 0
+    let tallestDrop = 0
+    let tallestBare = 0
+    let topW = 0
+    let bottomW = 0
+    const cellSigs = []
+    const rowPlaced = []
+    for (const cell of row?.cells ?? []) {
+      const span = cell.span > 0 ? cell.span : 1
+      if (cell.vMerge === 'continue') {
+        col += span
+        continue
+      }
+      const startCol = col
+      let width = 0
+      for (let c = 0; c < span; c++) width += grid[col + c] ?? 0
+      col += span
+      const pad = cellPadOf(tableMargins, cell.margins)
+      const inner = Math.max(1, width - pad.left - pad.right)
+      let cover = 1
+      if (cell.vMerge === 'restart') {
+        for (let below = r + 1; below < rows.length; below++) {
+          const next = cellAt(rows, below, startCol)
+          if (next?.vMerge !== 'continue') break
+          cover += 1
+        }
+      }
+      const paraBlocks = (cell.blocks ?? []).filter((child) => child.kind === 'p')
+      const nested = (cell.blocks ?? []).filter((child) => child.kind !== 'p').length
+      const images = imagePt(cell)
+      let stack = 0
+      let dropStack = 0
+      let previousAfter = null
+      const paraSigs = []
+      for (let pi = 0; pi < paraBlocks.length; pi++) {
+        const child = paraBlocks[pi]
+        const spacing = resolvedSpacing(child, paraLooks, defaultStyle)
+        const spec = dominantRun(runSpecs(child, spacing.style, runLooks, defaultStyle))
+        const metrics = metricsOf(spec.han ? spec.east : spec.ascii)
+        const line = editLinePt(metrics, spec.size, spacing.line, documentPitch)
+        const sectionLine = editLinePt(metrics, spec.size, spacing.line, section?.pitch > 0 ? section.pitch : null)
+        const units = textUnits(child)
+        const buckets = charBuckets(child)
+        const usable = Math.max(1, inner - spacing.indent)
+        const n = wrapLines(units, spec.size, usable, 0)
+        const before = previousAfter === null ? Math.max(0, spacing.before) : Math.max(0, spacing.before - previousAfter)
+        const after = Math.max(0, spacing.after)
+        const dropBefore = pi === 0 ? 0 : before
+        const dropAfter = pi === paraBlocks.length - 1 ? 0 : after
+        stack += n * line + before + after
+        dropStack += n * line + dropBefore + dropAfter
+        previousAfter = spacing.after
+        paraSigs.push(
+          [
+            `${n}x${fmt(line)}`,
+            lineText(spacing.line),
+            `sz${fmt(spec.size)}`,
+            `b${fmt(before)}`,
+            `a${fmt(after)}`,
+            `sec${fmt(sectionLine)}`,
+            `h${units.han}`,
+            `o${units.other}`,
+            `bk${buckets}`,
+            `w${fmt(usable)}`,
+            spacing.contextual ? 'ctx' : 'noctx',
+            metrics ? 'm1' : 'm0',
+            metrics ? '' : `font=${spec.han ? spec.east : spec.ascii}`,
+            child.props?.numbering ? 'num' : 'nonum',
+          ].join('/'),
+        )
+      }
+      const content = stack + pad.top + pad.bottom
+      const dropped = dropStack + pad.top + pad.bottom
+      const last = r === rows.length - 1
+      const tw = edgeWidth(cell.borders, 'top', tableBorders, r === 0 ? 'top' : 'insideH')
+      const bw = edgeWidth(cell.borders, 'bottom', tableBorders, last ? 'bottom' : 'insideH')
+      if (tw > topW) topW = tw
+      if (bw > bottomW) bottomW = bw
+      cellSigs.push(
+        `c${cellSigs.length} v=${cell.vMerge ?? 'none'} rows=${cover} span=${span} mar=${marginText(pad)} topW=${fmt(tw)} botW=${fmt(bw)} paras=${paraBlocks.length} nested=${nested} img=${fmt(images)} stack=${fmt(content)} ${paraSigs.join('+') || 'empty'}`,
+      )
+      rowPlaced.push({ cover, content, dropped, bare: stack })
+      if (cover === 1) {
+        if (content > tallest) tallest = content
+        if (dropped > tallestDrop) tallestDrop = dropped
+        if (stack > tallestBare) tallestBare = stack
+      }
+    }
+    tops.push(topW)
+    bots.push(bottomW)
+    placed.push(rowPlaced)
+    const declared = typeof row?.heightPt === 'number' ? row.heightPt : null
+    const rule = row?.heightRule || (declared === null ? 'auto' : 'implicit')
+    lines.push(
+      [
+        `row b=${index}`,
+        `r=${r}`,
+        `rule=${rule}`,
+        `h=${fmt(declared)}`,
+        `single=${fmt(tallest)}`,
+        `bare=${fmt(tallestBare)}`,
+        `drop=${fmt(tallestDrop)}`,
+        `topW=${fmt(topW)}`,
+        `botW=${fmt(bottomW)}`,
+        `header=${row?.header ? 1 : 0}`,
+        `cantSplit=${row?.cantSplit ? 1 : 0}`,
+        cellSigs.join(' '),
+      ].join(' '),
+    )
+  }
+  let borderSum = tops[0] ?? 0
+  for (let r = 0; r < rows.length; r++) {
+    if (r + 1 === rows.length) borderSum += bots[r] ?? 0
+    else borderSum += Math.max(bots[r] ?? 0, tops[r + 1] ?? 0)
+  }
+  const floors = rows.map((row) => {
+    const declared = typeof row?.heightPt === 'number' ? row.heightPt : 0
+    const rule = row?.heightRule || (declared === 0 ? 'auto' : 'implicit')
+    if (rule === 'exact') return 0
+    return declared
+  })
+  const flow = assignRowHeights(placed, floors.map(() => 0), 'content')
+  const least = assignRowHeights(placed, floors, 'content')
+  const dropped = assignRowHeights(placed, floors.map(() => 0), 'dropped')
+  const flowSum = sumOf(flow)
+  const leastSum = sumOf(least)
+  const dropSum = sumOf(dropped)
+  const col0 = rows.map((row) => row?.cells?.[0]?.vMerge ?? 'none').join(',')
+  lines.push(`merge b=${index} col0=${col0}`)
+  lines.push(
+    `fit b=${index} flow=${flow.map((value) => fmt(value)).join(',')} least=${least.map((value) => fmt(value)).join(',')}`,
+  )
+  lines.push(
+    [
+      `sum b=${index}`,
+      `flow=${fmt(flowSum)}`,
+      `least=${fmt(leastSum)}`,
+      `drop=${fmt(dropSum)}`,
+      `border=${fmt(borderSum)}`,
+      `flowBorder=${fmt(flowSum + borderSum)}`,
+      `leastBorder=${fmt(leastSum + borderSum)}`,
+      `dropBorder=${fmt(dropSum + borderSum)}`,
+      `print=${fmt(print)}`,
+    ].join(' '),
+  )
+  return lines
+}
+
+function cellAt(rows, rowIndex, col) {
+  let cursor = 0
+  for (const cell of rows[rowIndex]?.cells ?? []) {
+    const span = cell.span > 0 ? cell.span : 1
+    if (col >= cursor && col < cursor + span) return cell
+    cursor += span
+  }
+  return null
+}
+
+function assignRowHeights(placed, floors, key) {
+  const heights = floors.map((floor, row) => {
+    let single = floor
+    for (const cell of placed[row] ?? []) {
+      if (cell.cover === 1) single = Math.max(single, cell[key] ?? 0)
+    }
+    return single
+  })
+  let guard = 0
+  let changed = true
+  while (changed && guard < 32) {
+    changed = false
+    guard += 1
+    for (let row = 0; row < placed.length; row++) {
+      for (const cell of placed[row] ?? []) {
+        if (cell.cover <= 1) continue
+        let sum = 0
+        for (let i = 0; i < cell.cover; i++) sum += heights[row + i] ?? 0
+        const need = cell[key] ?? 0
+        if (need > sum + 0.01) {
+          heights[row + cell.cover - 1] += need - sum
+          changed = true
+        }
+      }
+    }
+  }
+  return heights
+}
+
+function sumOf(values) {
+  return values.reduce((sum, value) => sum + value, 0)
+}
+
+function cellPadOf(tableMargins, cellMargins) {
+  return {
+    top: padEdge(cellMargins?.top, tableMargins?.top, WORD_CELL_DEFAULT.top),
+    right: padEdge(cellMargins?.right, tableMargins?.right, WORD_CELL_DEFAULT.right),
+    bottom: padEdge(cellMargins?.bottom, tableMargins?.bottom, WORD_CELL_DEFAULT.bottom),
+    left: padEdge(cellMargins?.left, tableMargins?.left, WORD_CELL_DEFAULT.left),
+  }
+}
+
+function padEdge(cell, table, fallback) {
+  if (typeof cell === 'number') return cell
+  if (typeof table === 'number') return table
+  return fallback
+}
+
+function edgeWidth(own, key, tableBorders, tableKey) {
+  if (own && Object.hasOwn(own, key)) {
+    const edge = own[key]
+    return edge && typeof edge.widthPt === 'number' && edge.widthPt > 0 ? edge.widthPt : 0
+  }
+  const edge = tableBorders?.[tableKey]
+  return edge && typeof edge.widthPt === 'number' && edge.widthPt > 0 ? edge.widthPt : 0
+}
+
+function marginText(margins) {
+  if (!margins) return 'none'
+  return [margins.top, margins.right, margins.bottom, margins.left].map((value) => fmt(value)).join(',')
+}
+
+function borderSetText(borders) {
+  if (!borders) return 'none'
+  return ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map((key) => {
+      const edge = borders[key]
+      if (!edge) return `${key}:0`
+      return `${key}:${fmt(edge.widthPt)}`
+    })
+    .join(',')
+}
+
 function rowContent(row, grid, margins, section, defaultStyle, paraLooks, runLooks, metricsOf, documentPitch) {
   let col = 0
   let tallest = 0
@@ -539,6 +826,7 @@ function resolvedSpacing(block, paraLooks, defaultStyle) {
     after: numberOr(direct.spaceAfter, base.after ?? 0),
     line: direct.line ?? base.line ?? { rule: 'auto', multiple: 1 },
     indent,
+    contextual: look?.spacing?.contextual === true,
   }
 }
 
@@ -668,6 +956,41 @@ function matchPitch(print, before, after, pitch) {
     if (!best || err < best.err) best = { n, err, extra: option.extra, name: option.name }
   }
   return best
+}
+
+function imagePt(block) {
+  let height = 0
+  const visit = (node) => {
+    if (!node) return
+    if (node.kind === 'p') {
+      for (const inline of node.inlines ?? []) {
+        if (inline.kind === 'atom' && inline.atom?.type === 'image' && typeof inline.atom.heightPt === 'number') {
+          height += inline.atom.heightPt
+        }
+      }
+      return
+    }
+    for (const child of node.blocks ?? []) visit(child)
+  }
+  visit(block)
+  return height
+}
+
+function charBuckets(block) {
+  const counts = { han: 0, ascii: 0, digit: 0, fw: 0, punct: 0, other: 0 }
+  walkText(block, (text) => {
+    for (const ch of text) {
+      const cp = ch.codePointAt(0) ?? 0
+      if (cp <= 32) continue
+      if (cp >= 0xff00 && cp <= 0xff60) counts.fw += 1
+      else if ((cp >= 0x4e00 && cp <= 0x9fff) || (cp >= 0x3400 && cp <= 0x4dbf)) counts.han += 1
+      else if (cp >= 48 && cp <= 57) counts.digit += 1
+      else if (cp >= 65 && cp <= 90 || cp >= 97 && cp <= 122) counts.ascii += 1
+      else if (cp < 128) counts.punct += 1
+      else counts.other += 1
+    }
+  })
+  return [counts.han, counts.ascii, counts.digit, counts.fw, counts.punct, counts.other].join(',')
 }
 
 function charUnits(text) {
@@ -1427,4 +1750,62 @@ function lineText(line) {
 function fmt(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 'none'
   return (Math.round(value * 100) / 100).toFixed(2)
+}
+
+function svgRulePages(svg) {
+  const parts = svg.split('<page>')
+  return parts.slice(1).map((page) => {
+    const raw = []
+    const re = /\bd="([^"]+)"/g
+    let match
+    while ((match = re.exec(page))) {
+      const nums = (match[1].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)
+      if (nums.length < 4 || nums.length > 8) continue
+      const xs = []
+      const ys = []
+      for (let i = 0; i < nums.length; i += 2) {
+        xs.push(nums[i] ?? 0)
+        ys.push(nums[i + 1] ?? 0)
+      }
+      const width = Math.max(...xs) - Math.min(...xs)
+      const height = Math.max(...ys) - Math.min(...ys)
+      if (height < 0.8 && width >= 30) raw.push({ y: Math.min(...ys), w: width })
+    }
+    raw.sort((a, b) => a.y - b.y || b.w - a.w)
+    const lines = []
+    for (const rule of raw) {
+      const last = lines[lines.length - 1]
+      if (last && Math.abs(rule.y - last.y) < 0.6) last.ws.push(rule.w)
+      else lines.push({ y: rule.y, ws: [rule.w] })
+    }
+    return lines.map((line) => ({ y: line.y, w: Math.max(...line.ws) }))
+  })
+}
+
+function fragmentRules(model, pages) {
+  const lines = []
+  for (const record of model.records) {
+    if (!rowIndexes.has(record.index)) continue
+    const fragments = record.fragments ?? []
+    lines.push(
+      `frag b=${record.index} n=${fragments.length} h=${fmt(record.print)} ${fragments
+        .map((fragment) => `p${fragment.page}@${fmt(fragment.y)}+${fmt(fragment.height)}`)
+        .join(' ')}`,
+    )
+    const gaps = []
+    for (const fragment of fragments) {
+      const page = pages[fragment.page] ?? []
+      const inside = page.filter((rule) => rule.y >= fragment.y - 1.5 && rule.y <= fragment.y + fragment.height + 1.5)
+      const wide = inside.filter((rule) => rule.w >= 40)
+      const ys = wide.map((rule) => rule.y)
+      const deltas = []
+      for (let i = 1; i < ys.length; i++) deltas.push(ys[i] - ys[i - 1])
+      gaps.push(...deltas)
+      lines.push(
+        `rules b=${record.index} p=${fragment.page} n=${wide.length} span=${fmt(deltas.reduce((sum, value) => sum + value, 0))} d=${deltas.map((value) => fmt(value)).join(',')}`,
+      )
+    }
+    lines.push(`rulesum b=${record.index} gaps=${fmt(gaps.reduce((sum, value) => sum + value, 0))} n=${gaps.length}`)
+  }
+  return lines
 }

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import type { Block, BlockId, Doc, Paragraph, Pt, Section, StoryKey, StyleId } from '../model.ts'
 import { listMarkers } from './derive.ts'
 import { apply, deleteBackward, initialState, insertPageBreak, selectAll, setPageSetup, setSelection, toggleList } from './edit.ts'
-import { layoutPlan, pageOfBlock, paginate, type Layout, type Measure } from './pages.ts'
+import { caretSliceY, layoutPlan, nextVerticalLine, pageAtSliceY, pageOfBlock, paginate, tableRowCuts, type Layout, type Measure } from './pages.ts'
 import { cell, makeDoc, opaqueBlock, paragraph, row, table, text } from './testkit.ts'
 
 function pt(n: number): Pt {
@@ -56,6 +56,9 @@ function pm(height: number, lines: number[], extra: Partial<Measure> = {}): Meas
     heightPx: height,
     lineBottoms: extra.lineBottoms ?? Float32Array.from(lines),
     ...(extra.rowBottoms ? { rowBottoms: extra.rowBottoms, cantSplitRows: extra.cantSplitRows } : {}),
+    ...(extra.rowCuts ? { rowCuts: extra.rowCuts } : {}),
+    ...(extra.rowCutSplit ? { rowCutSplit: extra.rowCutSplit } : {}),
+    ...(extra.rowMinPx ? { rowMinPx: extra.rowMinPx } : {}),
     headerRows: extra.headerRows ?? 0,
     spaceBeforePx: extra.spaceBeforePx ?? 0,
     spaceAfterPx: extra.spaceAfterPx ?? 0,
@@ -640,4 +643,336 @@ test('pageOfBlock is the page of the first slice, or null when the layout has no
   const split = layoutOf([para('s')], new Map([['s', pm(80, [40, 80])]]), 50)
   assert.deepEqual(sig(split), ['s:0-40', 's:40-80'])
   assert.equal(pageOfBlock(split, 's'), 0, 'a block that continues answers the page of its first slice')
+})
+
+function blockSlices(layout: Layout, id: string): { y0: number; y1: number; repeatHeaderRows: number }[] {
+  const slices: { y0: number; y1: number; repeatHeaderRows: number }[] = []
+  for (const page of layout.pages) {
+    for (const slice of page.slices) {
+      if (slice.block === id) slices.push(slice)
+    }
+  }
+  return slices
+}
+
+function assertPartition(layout: Layout, id: string, height: number): void {
+  const slices = blockSlices(layout, id)
+  assert.ok(slices.length > 0)
+  assert.equal(slices[0]?.y0, 0)
+  for (let i = 1; i < slices.length; i++) assert.equal(slices[i]?.y0, slices[i - 1]?.y1)
+  assert.equal(slices[slices.length - 1]?.y1, height)
+}
+
+function assertNoSliceTaller(layout: Layout, id: string, bottoms: Float32Array, body: number): void {
+  for (const slice of blockSlices(layout, id)) {
+    const header = slice.repeatHeaderRows > 0 ? (bottoms[slice.repeatHeaderRows - 1] ?? 0) : 0
+    const visual = header + (slice.y1 - slice.y0)
+    assert.ok(visual <= body + 0.51, `${slice.y0}-${slice.y1} visual ${visual}`)
+  }
+}
+
+function assertLegalEnd(layout: Layout, id: string, bottoms: Float32Array, cuts: Float32Array): void {
+  const height = bottoms[bottoms.length - 1] ?? 0
+  for (const slice of blockSlices(layout, id)) {
+    if (Math.abs(slice.y1 - height) <= 0.51) continue
+    if ([...bottoms, ...cuts].some((y) => Math.abs(y - slice.y1) <= 0.51)) continue
+    let top = 0
+    let rowTop = 0
+    let found = false
+    for (let i = 0; i < bottoms.length; i++) {
+      const bottom = bottoms[i] ?? top
+      if (slice.y1 > top + 0.51 && slice.y1 < bottom - 0.51) {
+        rowTop = top
+        found = true
+        break
+      }
+      top = bottom
+    }
+    assert.equal(found, true, `end ${slice.y1} is not inside a row`)
+    const from = Math.max(slice.y0, rowTop)
+    for (const y of [...cuts, ...bottoms]) {
+      assert.ok(!(y > from + 0.51 && y < slice.y1 - 0.01), `end ${slice.y1} passed ${y}`)
+    }
+  }
+}
+
+test('a row that fits the remainder is placed whole even when it has cuts', () => {
+  const measures = new Map([
+    ['a', pm(20, [20])],
+    ['t', pm(50, [], { rowBottoms: Float32Array.from([50]), rowCuts: Float32Array.from([25]) })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('t')], measures, 100)), ['a:0-20|t:0-50'])
+})
+
+test('a row taller than the remainder and shorter than the page is cut where a cut fits', () => {
+  const bottoms = Float32Array.from([80])
+  const cuts = Float32Array.from([40])
+  const measures = new Map([
+    ['a', pm(50, [50])],
+    ['t', pm(80, [], { rowBottoms: bottoms, rowCuts: cuts })],
+  ])
+  const layout = layoutOf([para('a'), para('t')], measures, 100)
+  assert.equal(layout.complete, true)
+  assert.deepEqual(sig(layout), ['a:0-50|t:0-40', 't:40-80'])
+  assertPartition(layout, 't', 80)
+  assertLegalEnd(layout, 't', bottoms, cuts)
+})
+
+test('a row moves whole when no allowed cut fits the remainder', () => {
+  const measures = new Map([
+    ['a', pm(50, [50])],
+    ['t', pm(80, [], { rowBottoms: Float32Array.from([80]), rowCuts: Float32Array.from([70]) })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('t')], measures, 100)), ['a:0-50', 't:0-80'])
+})
+
+test('a row moves whole when the fitting cut is not one the kit would split at', () => {
+  const measures = new Map([
+    ['a', pm(50, [50])],
+    ['t', pm(80, [], {
+      rowBottoms: Float32Array.from([80]),
+      rowCuts: Float32Array.from([40]),
+      rowCutSplit: Uint8Array.from([0]),
+    })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('t')], measures, 100)), ['a:0-50', 't:0-80'])
+})
+
+test('a minimum keeps the largest fitting fragment and moves the row when that fragment is short', () => {
+  const cut = new Map([
+    ['a', pm(40, [40])],
+    ['t', pm(80, [], {
+      rowBottoms: Float32Array.from([80]),
+      rowCuts: Float32Array.from([30, 60]),
+      rowMinPx: Float32Array.from([50]),
+    })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('t')], cut, 100)), ['a:0-40|t:0-60', 't:60-80'])
+  const move = new Map([
+    ['a', pm(50, [50])],
+    ['t', pm(80, [], {
+      rowBottoms: Float32Array.from([80]),
+      rowCuts: Float32Array.from([30, 60]),
+      rowMinPx: Float32Array.from([50]),
+    })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('t')], move, 100)), ['a:0-50', 't:0-80'])
+})
+
+test('a minimum is ignored at the top of an empty page and applied once the page has content', () => {
+  const bottoms = Float32Array.from([20, 110])
+  const measure = pm(110, [], {
+    rowBottoms: bottoms,
+    headerRows: 1,
+    rowCuts: Float32Array.from([50]),
+    rowMinPx: Float32Array.from([0, 70]),
+  })
+  const atTop = layoutOf([para('t')], new Map([['t', measure]]), 100)
+  assert.deepEqual(sig(atTop), ['t:0-50', 't:50-110/r1'])
+  const after = layoutOf(
+    [para('a'), para('t')],
+    new Map([['a', pm(10, [10])], ['t', measure]]),
+    100,
+  )
+  assert.deepEqual(sig(after), ['a:0-10', 't:0-50', 't:50-110/r1'])
+})
+
+test('a row three pages tall repeats the header and covers the table once', () => {
+  const bottoms = Float32Array.from([20, 260])
+  const cuts = Float32Array.from([100, 180])
+  const measures = new Map([['t', pm(260, [], { rowBottoms: bottoms, headerRows: 1, rowCuts: cuts })]])
+  const layout = layoutOf([para('t')], measures, 100)
+  assert.equal(layout.complete, true)
+  assert.deepEqual(sig(layout), ['t:0-100', 't:100-180/r1', 't:180-260/r1'])
+  assertPartition(layout, 't', 260)
+  assertNoSliceTaller(layout, 't', bottoms, 100)
+  assertLegalEnd(layout, 't', bottoms, cuts)
+  assert.equal(layout.pages[1]?.slices[0]?.repeatHeaderRows, 1)
+  assert.equal(layout.pages[2]?.slices[0]?.repeatHeaderRows, 1)
+})
+
+test('a cantSplit row shorter than a page moves whole and one taller than a page is cut', () => {
+  const short = new Map([
+    ['a', pm(50, [50])],
+    ['t', pm(80, [], {
+      rowBottoms: Float32Array.from([80]),
+      rowCuts: Float32Array.from([40]),
+      cantSplitRows: Uint8Array.from([1]),
+    })],
+  ])
+  assert.deepEqual(sig(layoutOf([para('a'), para('t')], short, 100)), ['a:0-50', 't:0-80'])
+  const bottoms = Float32Array.from([250])
+  const cuts = Float32Array.from([100, 200])
+  const tall = new Map([['t', pm(250, [], { rowBottoms: bottoms, rowCuts: cuts, cantSplitRows: Uint8Array.from([1]) })]])
+  const layout = layoutOf([para('t')], tall, 100)
+  assert.equal(layout.complete, true)
+  assert.deepEqual(sig(layout), ['t:0-100', 't:100-200', 't:200-250'])
+  assertPartition(layout, 't', 250)
+  assertNoSliceTaller(layout, 't', bottoms, 100)
+})
+
+test('a loose cut still splits a row taller than the page', () => {
+  const bottoms = Float32Array.from([250])
+  const cuts = Float32Array.from([100, 200])
+  const measures = new Map([['t', pm(250, [], {
+    rowBottoms: bottoms,
+    rowCuts: cuts,
+    rowCutSplit: Uint8Array.from([0, 0]),
+  })]])
+  const layout = layoutOf([para('t')], measures, 100)
+  assert.deepEqual(sig(layout), ['t:0-100', 't:100-200', 't:200-250'])
+  assertLegalEnd(layout, 't', bottoms, cuts)
+})
+
+test('a header row is not cut even when it is taller than the page', () => {
+  const measures = new Map([['t', pm(150, [], {
+    rowBottoms: Float32Array.from([150]),
+    headerRows: 1,
+    rowCuts: Float32Array.from([50, 100]),
+  })]])
+  assert.deepEqual(sig(layoutOf([para('t')], measures, 100)), ['t:0-150'])
+})
+
+test('a cut with no allowed position falls at the page end', () => {
+  const bottoms = Float32Array.from([250])
+  const none = new Map([['t', pm(250, [], { rowBottoms: bottoms })]])
+  const open = layoutOf([para('t')], none, 100)
+  assert.equal(open.complete, true)
+  assert.deepEqual(sig(open), ['t:0-100', 't:100-200', 't:200-250'])
+  assertPartition(open, 't', 250)
+  assertNoSliceTaller(open, 't', bottoms, 100)
+  assertLegalEnd(open, 't', bottoms, new Float32Array())
+  const later = Float32Array.from([150, 250])
+  const skipped = new Map([['t', pm(300, [], { rowBottoms: Float32Array.from([300]), rowCuts: later })]])
+  const layout = layoutOf([para('t')], skipped, 100)
+  assert.deepEqual(sig(layout), ['t:0-100', 't:100-150', 't:150-250', 't:250-300'])
+  assertLegalEnd(layout, 't', Float32Array.from([300]), later)
+  assertNoSliceTaller(layout, 't', Float32Array.from([300]), 100)
+})
+
+test('interior cuts that do not fit the remainder leave the old row packing', () => {
+  const measures = new Map([['t', pm(120, [], {
+    rowBottoms: Float32Array.from([30, 60, 90, 120]),
+    headerRows: 1,
+    rowCuts: Float32Array.from([15, 45, 75, 105]),
+  })]])
+  assert.deepEqual(sig(layoutOf([para('t')], measures, 70)), ['t:0-60', 't:60-90/r1', 't:90-120/r1'])
+})
+
+test('a cut that fits the remainder splits that row', () => {
+  const bottoms = Float32Array.from([30, 60, 90, 120])
+  const cuts = Float32Array.from([65])
+  const measures = new Map([['t', pm(120, [], { rowBottoms: bottoms, headerRows: 1, rowCuts: cuts })]])
+  const layout = layoutOf([para('t')], measures, 70)
+  assert.deepEqual(sig(layout), ['t:0-65', 't:65-90/r1', 't:90-120/r1'])
+  assertLegalEnd(layout, 't', bottoms, cuts)
+})
+
+test('an edit in a cut row reuses the pages before the table', () => {
+  const measures = new Map([
+    ['a', pm(100, [100])],
+    ['b', pm(100, [100])],
+    ['t', pm(250, [], { rowBottoms: Float32Array.from([250]), rowCuts: Float32Array.from([100, 200]) })],
+  ])
+  const blocks = [para('a'), para('b'), para('t')]
+  const full = layoutOf(blocks, measures, 100)
+  assert.deepEqual(sig(full), ['a:0-100', 'b:0-100', 't:0-100', 't:100-200', 't:200-250'])
+  const again = layoutOf(blocks, measures, 100, full, ['t'])
+  assert.equal(again.pages[0], full.pages[0])
+  const first = pagesFor(full, 't')[0] ?? 0
+  assert.ok(first >= 2, 'the table starts after a page the restart can keep')
+  for (let i = 0; i < first; i++) assert.deepEqual(again.pages[i]?.slices, full.pages[i]?.slices)
+  assert.deepEqual(sig(again), sig(full))
+})
+
+test('cuts fall only where every covering cell has a line bottom or has ended', () => {
+  const both = tableRowCuts(Float32Array.from([40]), [
+    { top: 0, bottom: 40, contentEnd: 30, breaks: [{ y: 10, tight: true }, { y: 20, tight: true }, { y: 30, tight: true }] },
+    { top: 0, bottom: 40, contentEnd: 30, breaks: [{ y: 15, tight: true }, { y: 30, tight: true }] },
+  ])
+  assert.deepEqual([...both.cuts], [30])
+  const ended = tableRowCuts(Float32Array.from([40]), [
+    { top: 0, bottom: 40, contentEnd: 20, breaks: [{ y: 10, tight: true }, { y: 20, tight: true }] },
+    { top: 0, bottom: 40, contentEnd: 30, breaks: [{ y: 10, tight: true }, { y: 20, tight: true }, { y: 30, tight: true }] },
+  ])
+  assert.deepEqual([...ended.cuts], [10, 20, 30])
+})
+
+test('a row-spanning cell blocks a cut through its text in every row it covers', () => {
+  const found = tableRowCuts(Float32Array.from([40, 80]), [
+    { top: 0, bottom: 80, contentEnd: 72, breaks: [{ y: 16, tight: true }, { y: 56, tight: true }, { y: 72, tight: true }] },
+    { top: 0, bottom: 40, contentEnd: 32, breaks: [{ y: 16, tight: true }, { y: 32, tight: true }] },
+    { top: 40, bottom: 80, contentEnd: 64, breaks: [{ y: 48, tight: true }, { y: 56, tight: true }, { y: 64, tight: true }] },
+  ])
+  assert.deepEqual([...found.cuts], [16, 56, 72])
+})
+
+test('a cut is tight only when every covering cell accepts it tightly', () => {
+  const one = tableRowCuts(Float32Array.from([100]), [
+    {
+      top: 0,
+      bottom: 100,
+      contentEnd: 100,
+      breaks: [
+        { y: 20, tight: false },
+        { y: 40, tight: true },
+        { y: 60, tight: false },
+        { y: 80, tight: true },
+      ],
+    },
+  ])
+  assert.deepEqual([...one.cuts], [20, 40, 60, 80])
+  assert.deepEqual([...one.split], [0, 1, 0, 1])
+  const disagree = tableRowCuts(Float32Array.from([80]), [
+    { top: 0, bottom: 80, contentEnd: 80, breaks: [{ y: 40, tight: true }] },
+    { top: 0, bottom: 80, contentEnd: 80, breaks: [{ y: 40, tight: false }] },
+  ])
+  assert.deepEqual([...disagree.cuts], [40])
+  assert.deepEqual([...disagree.split], [0])
+})
+
+test('a caret on the cut stays on the page that ends there', () => {
+  const spans = [
+    { page: 0, y0: 0, y1: 400 },
+    { page: 1, y0: 400, y1: 800 },
+    { page: 2, y0: 800, y1: 1100 },
+  ]
+  assert.equal(pageAtSliceY(spans, 400), 0, 'the last line of a cell ends on the cut')
+  assert.equal(pageAtSliceY(spans, 399), 0)
+  assert.equal(pageAtSliceY(spans, 401), 1, 'the next line starts after the cut')
+  assert.equal(pageAtSliceY(spans, 800), 1)
+  assert.equal(pageAtSliceY(spans, 800.5), 2)
+  assert.equal(pageAtSliceY(spans, 200), 0)
+})
+
+test('the caret after the last character stays on that character\'s line', () => {
+  const yAt = (offset: number): number | null => (offset >= 4 ? 420 : 380)
+  assert.equal(caretSliceY(4, 4, yAt), 380, 'an end caret past the cut keeps the last character')
+  assert.equal(caretSliceY(2, 4, yAt), 380, 'a caret inside the line keeps its own y')
+  assert.equal(caretSliceY(0, 4, () => 10), 10)
+  assert.equal(caretSliceY(3, 3, () => 50), 50, 'an end caret on the same y stays')
+})
+
+test('up and down across a cut stay in the body and keep the goal column\'s line', () => {
+  const body = (globalMid: number, id: string) => ({ globalMid, left: 100, right: 140, story: 'body' as const, id })
+  const from = body(900, 'from')
+  const header = { globalMid: 1040, left: 80, right: 400, story: 'header' as const, id: 'header' }
+  const to = body(1120, 'to')
+  const after = body(1160, 'after')
+  const lines = [from, header, to, after]
+  const goal = 138
+  const down = nextVerticalLine(lines, from, 'down', goal)
+  assert.equal(down?.id, 'to', 'down crosses the cut into the next cell paragraph, not the header')
+  const back = down ? nextVerticalLine(lines, down, 'up', goal) : null
+  assert.equal(back?.id, 'from', 'up from the first line on the next page returns to the line before the cut')
+  assert.equal(back?.left, from.left)
+  assert.equal(back?.right, from.right)
+})
+
+test('a rejected candidate does not swallow the next cut', () => {
+  const found = tableRowCuts(Float32Array.from([40]), [
+    { top: 0, bottom: 40, contentEnd: 40, breaks: [{ y: 10, tight: true }, { y: 10.25, tight: true }] },
+    { top: 0, bottom: 9.5, contentEnd: 20, breaks: [{ y: 4, tight: true }] },
+  ])
+  assert.deepEqual([...found.cuts], [10.25])
 })
