@@ -3,6 +3,7 @@ import type {
   Block,
   BlockId,
   Doc,
+  LineSpacing,
   Paragraph,
   ParaId,
   Pos,
@@ -11,6 +12,7 @@ import type {
   StoryKey,
   Table,
 } from '../model.ts'
+import { documentGridPitch } from './derive.ts'
 import {
   blockElements,
   domPoint,
@@ -1045,8 +1047,8 @@ function restart(previous: Layout, body: readonly Block[], changed: ReadonlySet<
     if (pageIndex < 0) pageIndex = pageOfEarlier(previous, body, earliest)
     if (pageIndex < 0) return { pageIndex: 0, cursor: { index: 0, y0: 0 }, soft: false }
   }
-  // diffIds cannot name a block that is gone. A page that still holds one is an
-  // earlier anchor than the next surviving block, which may sit pages later.
+  // `changed` names blocks that are still in the body. A page that still holds a
+  // removed block is an earlier anchor than the next surviving block, which may sit pages later.
   const removed = earliestRemovedPage(previous, body)
   if (removed >= 0 && (pageIndex < 0 || removed < pageIndex)) pageIndex = removed
   if (pageIndex < 0) pageIndex = Math.max(0, previous.pages.length - 1)
@@ -1209,15 +1211,20 @@ export function paginate(doc: Doc, measure: MeasureFn, previous: Layout | null, 
     softNext = start.soft
   } else if (previous && previous.pages.length > 0) {
     let from = geometrySame ? 0 : firstDivergentPage(previous, keys)
+    let located = cursorFromPage(previous, body, from)
     if (changed.length > 0) {
       const start = restart(previous, body, changedSet)
-      if (start.pageIndex < from) from = start.pageIndex
+      // cursorFromPage anchors on the old page's first slice. A block inserted before that
+      // slice is on no previous page, so restart's cursor is the one that still places it.
+      if (start.pageIndex < from || (start.pageIndex === from && start.cursor.index < located.cursor.index)) {
+        from = start.pageIndex
+        located = start
+      }
     }
     for (let i = 0; i < from; i++) {
       const page = previous.pages[i]
       if (page) pages.push(page)
     }
-    const located = cursorFromPage(previous, body, from)
     cursor = located.cursor
     softNext = located.soft
   }
@@ -1371,26 +1378,18 @@ function caretFromPoint(x: number, y: number): { node: Node; offset: number } | 
   return { node: range.startContainer, offset: range.startOffset }
 }
 
-function diffIds(prev: readonly Block[], next: readonly Block[]): BlockId[] {
-  const ids: BlockId[] = []
-  const limit = Math.max(prev.length, next.length)
-  for (let i = 0; i < limit; i++) {
-    if (prev[i] !== next[i]) {
-      const block = next[i] ?? (i > 0 ? next[i - 1] : undefined)
-      if (block && !ids.includes(block.id)) ids.push(block.id)
-    }
-  }
-  return ids
-}
-
 export interface LayoutPlan {
   readonly remeasure: readonly BlockId[]
   readonly paint: readonly BlockId[]
+  /** Ids `paginate` uses to restart. A removal names the surviving neighbor, which keeps its measure. */
+  readonly changed: readonly BlockId[]
 }
 
 /**
- * What an edit invalidates. A replaced block, or a block in a section whose page object changed, is measured again.
- * A paragraph whose marker text changed is painted again and not measured: the marker sits outside the line.
+ * What an edit invalidates. A block is measured again when its object is new, when its section's page
+ * object changed, or when it now sits in a section whose content width differs. A paragraph whose marker
+ * text changed is painted again and not measured: the marker sits outside the line. A marker that appears
+ * or disappears on a hanging indent is measured again, because that is when the line-box padding changes.
  */
 export function layoutPlan(
   previous: Doc,
@@ -1398,20 +1397,26 @@ export function layoutPlan(
   previousMarkers: ReadonlyMap<ParaId, string>,
   nextMarkers: ReadonlyMap<ParaId, string>,
 ): LayoutPlan {
-  const remeasure = diffIds(previous.body, next.body)
-  const seen = new Set<string>(remeasure)
-  const limit = Math.max(previous.sections.length, next.sections.length)
-  for (let i = 0; i < limit; i++) {
-    const before = previous.sections[i]
-    const after = next.sections[i]
-    if (before?.page === after?.page) continue
-    if (!after) continue
-    for (const id of sectionMeasureIds(next, i)) {
-      if (seen.has(id)) continue
-      seen.add(id)
-      remeasure.push(id)
-    }
+  const remeasure: BlockId[] = []
+  const seen = new Set<string>()
+  const add = (id: BlockId): void => {
+    if (seen.has(id)) return
+    seen.add(id)
+    remeasure.push(id)
   }
+  const delta = bodyDelta(previous.body, next.body)
+  if (delta === 'mixed') addMovedBlocks(previous, next, add)
+  else if (delta !== 'same') add(delta.id)
+  addSectionPageChanges(previous, next, add)
+  addMeasureContext(previous, next, add)
+  addMarkerBoxes(next, previousMarkers, nextMarkers, add)
+
+  const structural = delta === 'mixed'
+    ? structureIds(previous.body, next.body)
+    : delta === 'same'
+      ? []
+      : [delta.id]
+  const changed = mergeChanged(structural, remeasure)
   const paint = remeasure.slice()
   const painted = new Set<string>(paint)
   for (const id of markerPaintIds(next.body, previousMarkers, nextMarkers)) {
@@ -1419,7 +1424,264 @@ export function layoutPlan(
     painted.add(id)
     paint.push(id)
   }
-  return { remeasure, paint }
+  return { remeasure, paint, changed }
+}
+
+function sectionMark(block: Block | undefined): number | null {
+  return block?.kind === 'p' ? block.sectionEnd : null
+}
+
+/** `'same'` when every block object matches. A `Block` when one slot was replaced and section marks match. */
+function bodyDelta(prev: readonly Block[], next: readonly Block[]): 'same' | 'mixed' | Block {
+  if (prev.length !== next.length) return 'mixed'
+  let changed: Block | null = null
+  for (let i = 0; i < next.length; i++) {
+    const before = prev[i]
+    const after = next[i]
+    if (before === after) continue
+    // A new section mark moves every later block. One pass cannot see that.
+    if (changed || sectionMark(before) !== sectionMark(after) || !after) return 'mixed'
+    changed = after
+  }
+  return changed ?? 'same'
+}
+
+function mergeChanged(structural: BlockId[], remeasure: readonly BlockId[]): BlockId[] {
+  const seen = new Set<string>(structural)
+  for (const id of remeasure) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    structural.push(id)
+  }
+  return structural
+}
+
+// measureBatch sizes the block from these. Page height and the vertical margins do not change the measure.
+function sameContentWidth(before: Section | undefined, after: Section | undefined): boolean {
+  if (before === after) return true
+  const a = before?.page
+  const b = after?.page
+  if (!a || !b) return false
+  if (a === b) return true
+  return a.widthPt === b.widthPt
+    && a.margin.left === b.margin.left
+    && a.margin.right === b.margin.right
+    && a.margin.gutter === b.margin.gutter
+}
+
+function bodyHasSectionEnd(body: readonly Block[]): boolean {
+  for (const block of body) {
+    if (block.kind === 'p' && block.sectionEnd !== null) return true
+  }
+  return false
+}
+
+function addMovedBlocks(previous: Doc, next: Doc, add: (id: BlockId) => void): void {
+  // Without a section mark, later blocks stay on the same page. Only a new object can need a new measure.
+  if (
+    !bodyHasSectionEnd(previous.body)
+    && !bodyHasSectionEnd(next.body)
+    && sameContentWidth(previous.sections[0], next.sections[0])
+  ) {
+    const prevBlocks = new Set<Block>(previous.body)
+    for (const block of next.body) {
+      if (!prevBlocks.has(block)) add(block.id)
+    }
+    return
+  }
+  const prevSection = sectionIndexes(previous.body)
+  const nextSection = sectionIndexes(next.body)
+  const prevAt = new Map<Block, number>()
+  for (let i = 0; i < previous.body.length; i++) {
+    const block = previous.body[i]
+    if (block) prevAt.set(block, prevSection[i] ?? 0)
+  }
+  for (let i = 0; i < next.body.length; i++) {
+    const block = next.body[i]
+    if (!block) continue
+    const beforeAt = prevAt.get(block)
+    if (beforeAt === undefined) {
+      add(block.id)
+      continue
+    }
+    if (!sameContentWidth(previous.sections[beforeAt], next.sections[nextSection[i] ?? 0])) add(block.id)
+  }
+}
+
+function addSectionPageChanges(previous: Doc, next: Doc, add: (id: BlockId) => void): void {
+  const limit = Math.max(previous.sections.length, next.sections.length)
+  for (let i = 0; i < limit; i++) {
+    const before = previous.sections[i]
+    const after = next.sections[i]
+    // A section inserted or dropped is not a page change of the blocks now at that index.
+    if (!before || !after || before.page === after.page) continue
+    for (const id of sectionMeasureIds(next, i)) add(id)
+  }
+}
+
+function addMeasureContext(previous: Doc, next: Doc, add: (id: BlockId) => void): void {
+  if (previous.sections !== next.sections && documentGridPitch(previous) !== documentGridPitch(next)) {
+    for (const block of next.body) add(block.id)
+    for (const blocks of next.stories.values()) {
+      for (const block of blocks) add(block.id)
+    }
+    return
+  }
+  if (previous.lists === next.lists && previous.styles === next.styles) return
+  const previousKey = new Map<Block, string>()
+  const remember = (doc: Doc, block: Block): void => {
+    previousKey.set(block, blockMeasureKey(doc, block))
+  }
+  for (const block of previous.body) remember(previous, block)
+  for (const blocks of previous.stories.values()) {
+    for (const block of blocks) remember(previous, block)
+  }
+  const consider = (doc: Doc, block: Block): void => {
+    const before = previousKey.get(block)
+    if (before === undefined || before === blockMeasureKey(doc, block)) return
+    add(block.id)
+  }
+  for (const block of next.body) consider(next, block)
+  for (const blocks of next.stories.values()) {
+    for (const block of blocks) consider(next, block)
+  }
+}
+
+function blockMeasureKey(doc: Doc, block: Block): string {
+  if (block.kind === 'p') return resolvedMeasureKey(doc, block)
+  if (block.kind === 'opaque') {
+    let key = ''
+    for (const para of block.preview) key += `${resolvedMeasureKey(doc, para)}\n`
+    return key
+  }
+  let key = ''
+  for (const row of block.rows) {
+    for (const cell of row.cells) {
+      for (const child of cell.blocks) key += `${blockMeasureKey(doc, child)}\n`
+    }
+  }
+  return key
+}
+
+// A marker is absolutely positioned, so a new string does not change the line box. Its presence does:
+// with a positive hanging indent the padding moves from left + hanging to left.
+function addMarkerBoxes(
+  doc: Doc,
+  previousMarkers: ReadonlyMap<ParaId, string>,
+  nextMarkers: ReadonlyMap<ParaId, string>,
+  add: (id: BlockId) => void,
+): void {
+  const seen = new Set<string>()
+  const consider = (id: ParaId): void => {
+    if (seen.has(id)) return
+    seen.add(id)
+    const had = Boolean(previousMarkers.get(id))
+    const has = Boolean(nextMarkers.get(id))
+    if (had === has) return
+    const found = ownedParagraph(doc, id)
+    if (!found || !(resolvedHanging(doc, found.para) > 0)) return
+    add(found.owner)
+  }
+  for (const id of previousMarkers.keys()) consider(id)
+  for (const id of nextMarkers.keys()) consider(id)
+}
+
+function ownedParagraph(doc: Doc, id: string): { owner: BlockId, para: Paragraph } | null {
+  const inBlocks = (blocks: readonly Block[]): { owner: BlockId, para: Paragraph } | null => {
+    for (const block of blocks) {
+      const para = paragraphInside(block, id)
+      if (para) return { owner: block.id, para }
+    }
+    return null
+  }
+  const body = inBlocks(doc.body)
+  if (body) return body
+  for (const blocks of doc.stories.values()) {
+    const found = inBlocks(blocks)
+    if (found) return found
+  }
+  return null
+}
+
+function paragraphInside(block: Block, id: string): Paragraph | null {
+  if (block.kind === 'p') return block.id === id ? block : null
+  if (block.kind === 'opaque') {
+    for (const para of block.preview) if (para.id === id) return para
+    return null
+  }
+  for (const row of block.rows) {
+    for (const cell of row.cells) {
+      for (const child of cell.blocks) {
+        const para = paragraphInside(child, id)
+        if (para) return para
+      }
+    }
+  }
+  return null
+}
+
+function resolvedHanging(doc: Doc, para: Paragraph): number {
+  const style = doc.styles.paragraph.get(para.props.style ?? doc.styles.defaultParagraph)?.look
+  const props = para.props
+  const numbering = props.numbering === undefined ? (style?.numbering ?? null) : props.numbering
+  const level = numbering ? doc.lists.byNum.get(numbering.num)?.levels[numbering.level] : undefined
+  return props.indent?.hanging ?? level?.hanging ?? style?.indent.hanging ?? 0
+}
+
+function lineSpacingKey(line: LineSpacing | undefined): string {
+  if (!line) return ''
+  if (line.rule === 'auto') return `auto:${line.multiple}`
+  return `${line.rule}:${line.pt}`
+}
+
+// List level indent and the paragraph style are read at measure time. The paragraph object does not carry them.
+function resolvedMeasureKey(doc: Doc, para: Paragraph): string {
+  const style = doc.styles.paragraph.get(para.props.style ?? doc.styles.defaultParagraph)?.look
+  const props = para.props
+  const numbering = props.numbering === undefined ? (style?.numbering ?? null) : props.numbering
+  const level = numbering ? doc.lists.byNum.get(numbering.num)?.levels[numbering.level] : undefined
+  const left = props.indent?.left ?? level?.indentLeft ?? style?.indent.left
+  const hanging = resolvedHanging(doc, para)
+  const right = props.indent?.right ?? style?.indent.right
+  const first = props.indent?.firstLine ?? style?.indent.firstLine
+  const chars = props.indent?.firstLineChars ?? style?.indent.firstLineChars
+  const before = props.spacing?.before ?? style?.spacing.before
+  const after = props.spacing?.after ?? style?.spacing.after
+  const line = lineSpacingKey(props.spacing?.line ?? style?.spacing.line)
+  const keepNext = props.keepNext ?? style?.keepNext
+  const keepLines = props.keepLines ?? style?.keepLines
+  const pageBreakBefore = props.pageBreakBefore ?? style?.pageBreakBefore
+  const widow = props.widowControl ?? style?.widowControl
+  return `${left},${right},${first},${hanging},${chars}|${before},${after},${line}|${keepNext}${keepLines}${pageBreakBefore}${widow}`
+}
+
+function structureIds(prev: readonly Block[], next: readonly Block[]): BlockId[] {
+  let prefix = 0
+  const shared = Math.min(prev.length, next.length)
+  while (prefix < shared && prev[prefix] === next[prefix]) prefix += 1
+  let prevEnd = prev.length - 1
+  let nextEnd = next.length - 1
+  while (prevEnd >= prefix && nextEnd >= prefix && prev[prevEnd] === next[nextEnd]) {
+    prevEnd -= 1
+    nextEnd -= 1
+  }
+  const ids: BlockId[] = []
+  const seen = new Set<string>()
+  const push = (block: Block | undefined): void => {
+    if (!block || seen.has(block.id)) return
+    seen.add(block.id)
+    ids.push(block.id)
+  }
+  if (nextEnd >= prefix) {
+    for (let i = prefix; i <= nextEnd; i++) push(next[i])
+    return ids
+  }
+  if (prefix === prev.length && prefix === next.length) return ids
+  // A pure removal has no new block. Name the survivor at the hole, or the new last block when
+  // the tail was removed, so pagination does not reuse the page that still shows the removed block.
+  if (prefix < next.length) push(next[prefix])
+  else if (prefix > 0) push(next[prefix - 1])
+  return ids
 }
 
 function sectionMeasureIds(doc: Doc, sectionIndex: number): BlockId[] {
@@ -1635,8 +1897,10 @@ export class PageView {
   }
 
   /**
-   * After a transaction. Remeasures a block whose object changed, and every block in a section whose page changed.
-   * A paragraph whose list marker changed is painted again without a new measure. Unmounted pages only get new slice lists.
+   * After a transaction. Remeasures a block whose object is new, a section whose page object changed, and a block
+   * that moved into a section with a different content width. A removal restarts pagination at the surviving
+   * neighbor and keeps that neighbor's measure. A paragraph whose list marker changed is painted again without
+   * a new measure. Unmounted pages only get new slice lists.
    */
   update(
     previous: Doc,
@@ -1660,7 +1924,7 @@ export class PageView {
       this.lineStartCache.delete(located.block)
       this.measureOne(located.block, located.section)
     }
-    this._layout = paginate(next, (block) => this.measures.get(block), this._layout, plan.remeasure)
+    this._layout = paginate(next, (block) => this.measures.get(block), this._layout, plan.changed)
     this.changedIds = new Set(plan.paint)
     this.syncPages()
     this.changedIds = null
@@ -2466,13 +2730,12 @@ export class PageView {
       return
     }
     if (!this.changedIds) return
-    let touches = false
-    for (const slice of page.slices) {
-      if (this.changedIds.has(slice.block)) touches = true
-    }
-    if (!touches) return
     const ctx = this.ctxFor(i + 1)
-    for (const id of this.changedIds) {
+    const painted = new Set<string>()
+    for (const slice of page.slices) {
+      const id = slice.block
+      if (!this.changedIds.has(id) || painted.has(id)) continue
+      painted.add(id)
       const located = this.locateOwner(id)
       if (!located) continue
       for (const node of blockElements(el, id)) {
@@ -2480,7 +2743,7 @@ export class PageView {
         node.replaceWith(renderBlock(located.block, ctx, this.decoFor(located.block)))
       }
     }
-    this.hideExtraCopies()
+    if (painted.size > 0) this.hideExtraCopies()
   }
 
   private clearPage(i: number): void {

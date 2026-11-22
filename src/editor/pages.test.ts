@@ -1,10 +1,29 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { Block, BlockId, Doc, Paragraph, Pt, Section, StoryKey, StyleId } from '../model.ts'
+import { flatText } from '../model.ts'
+import type { Block, BlockId, Doc, Paragraph, Pos, Pt, Section, StoryKey, StyleId } from '../model.ts'
 import { listMarkers } from './derive.ts'
-import { apply, deleteBackward, initialState, insertPageBreak, selectAll, setPageSetup, setSelection, toggleList } from './edit.ts'
-import { caretSliceY, layoutPlan, nextVerticalLine, pageAtSliceY, pageOfBlock, paginate, tableRowCuts, type Layout, type Measure } from './pages.ts'
-import { cell, makeDoc, opaqueBlock, paragraph, row, table, text } from './testkit.ts'
+import {
+  apply,
+  deleteBackward,
+  deleteSelection,
+  deleteTable,
+  initialState,
+  insertPageBreak,
+  insertTable,
+  insertText,
+  selectAll,
+  setPageSetup,
+  setSelection,
+  splitParagraph,
+  toggleList,
+  undo,
+  type Command,
+  type EditorState,
+} from './edit.ts'
+import { caretSliceY, layoutPlan, nextVerticalLine, pageAtSliceY, pageOfBlock, paginate, tableRowCuts, type Layout, type LayoutPlan, type Measure } from './pages.ts'
+import { PT_TO_PX } from './render.ts'
+import { cell, makeDoc, mulberry32, numId, opaqueBlock, page, paragraph, row, section, table, text } from './testkit.ts'
 
 function pt(n: number): Pt {
   return n as Pt
@@ -975,4 +994,339 @@ test('a rejected candidate does not swallow the next cut', () => {
     { top: 0, bottom: 9.5, contentEnd: 20, breaks: [{ y: 4, tight: true }] },
   ])
   assert.deepEqual([...found.cuts], [10.25])
+})
+
+// PageView.update needs a document, layout boxes, and IntersectionObserver. The kit has none of those,
+// so these tests drive paginate the way update does: measure the plan's blocks, then read the cache.
+const LONG_COUNT = 1000
+
+function contentWidthPx(part: Section): number {
+  const margin = part.page.margin
+  return Math.max(1, (part.page.widthPt - margin.left - margin.gutter - margin.right) * PT_TO_PX)
+}
+
+function synthetic(block: Block, part: Section): Measure {
+  const width = contentWidthPx(part)
+  const chars = block.kind === 'p' ? Math.max(1, flatText(block).length) : 12
+  const lines = Math.max(1, Math.ceil((chars * 7) / width))
+  const bottoms = Array.from({ length: lines }, (_, index) => (index + 1) * 18)
+  return pm(lines * 18, bottoms)
+}
+
+function sectionOf(doc: Doc, block: Block): Section {
+  let index = 0
+  for (const item of doc.body) {
+    if (item === block) {
+      const found = doc.sections[index] ?? doc.sections[0]
+      assert.ok(found, 'section')
+      return found
+    }
+    if (item.kind === 'p' && item.sectionEnd !== null) index = item.sectionEnd + 1
+  }
+  const first = doc.sections[0]
+  assert.ok(first, 'section')
+  return first
+}
+
+function many(count: number, value: string): Paragraph[] {
+  const blocks: Paragraph[] = []
+  for (let i = 0; i < count; i++) blocks.push(paragraph(`p${i}`, [text(value)]))
+  return blocks
+}
+
+function thousand(): { doc: Doc, state: EditorState } {
+  const doc = makeDoc(many(LONG_COUNT, 'abcdef'))
+  return { doc, state: initialState(doc) }
+}
+
+function place(state: EditorState, anchor: Pos, head: Pos = anchor): EditorState {
+  const tr = setSelection({ kind: 'text', anchor, head })(state)
+  if (!tr) {
+    assert.deepEqual(anchor, head, 'selection did not apply')
+    return state
+  }
+  return apply(state, tr, 0)
+}
+
+function run(state: EditorState, command: Command): EditorState {
+  const tr = command(state)
+  assert.ok(tr, 'command did not apply')
+  return apply(state, tr, 0)
+}
+
+function newIds(prev: readonly Block[], next: readonly Block[]): string[] {
+  const old = new Set<Block>(prev)
+  const ids: string[] = []
+  for (const block of next) if (!old.has(block)) ids.push(block.id)
+  return ids
+}
+
+function findBlock(doc: Doc, id: string): Block | null {
+  for (const block of doc.body) if (block.id === id) return block
+  return null
+}
+
+interface CachedView {
+  cache: WeakMap<Block, Measure>
+  layout: Layout
+}
+
+function showLayout(doc: Doc): CachedView {
+  const cache = new WeakMap<Block, Measure>()
+  for (const block of doc.body) cache.set(block, synthetic(block, sectionOf(doc, block)))
+  const layout = paginate(doc, (block) => cache.get(block), null, [])
+  assert.equal(layout.complete, true, 'the fresh layout finished')
+  return { cache, layout }
+}
+
+function assertLayouts(actual: Layout, full: Layout, label: string): void {
+  assert.equal(actual.complete, full.complete, `${label} complete`)
+  assert.equal(actual.pages.length, full.pages.length, `${label} pages ${actual.pages.length} vs ${full.pages.length}`)
+  for (let i = 0; i < full.pages.length; i++) assert.deepEqual(actual.pages[i], full.pages[i], `${label} page ${i}`)
+  assert.deepEqual(actual.sectionKeys, full.sectionKeys, `${label} section keys`)
+}
+
+function checkUpdate(before: Doc, after: Doc, view: CachedView | null, label: string): { measured: number, plan: LayoutPlan } {
+  const base = view ?? showLayout(before)
+  const plan = layoutPlan(before, after, new Map(), new Map())
+  const overlay = new WeakMap<Block, Measure>()
+  let measured = 0
+  for (const id of plan.remeasure) {
+    const block = findBlock(after, id)
+    assert.ok(block, `${label} remeasure ${id} is not in the body`)
+    overlay.set(block, synthetic(block, sectionOf(after, block)))
+    measured += 1
+  }
+  const missing = new Set<string>()
+  const layout = paginate(after, (block) => {
+    const found = overlay.get(block) ?? base.cache.get(block)
+    if (!found) missing.add(block.id)
+    return found
+  }, base.layout, plan.changed)
+  assert.equal(missing.size, 0, `${label} uncached ${[...missing].join(',')}`)
+  const fresh = paginate(after, (block, part) => synthetic(block, part), null, [])
+  assertLayouts(layout, fresh, label)
+  return { measured, plan }
+}
+
+interface Sample {
+  name: string
+  before: Doc
+  after: Doc
+}
+
+function requireParagraph(block: Block | undefined, label: string): Paragraph {
+  assert.ok(block?.kind === 'p', label)
+  return block
+}
+
+function samples(state: EditorState): Sample[] {
+  const body = state.doc.body
+  const fifth = requireParagraph(body[4], 'paragraph 5')
+  const hundredth = requireParagraph(body[99], 'paragraph 100')
+  const victim = requireParagraph(body[40], 'deleted paragraph')
+  const victimNext = requireParagraph(body[41], 'paragraph after the deletion')
+  const pasted = requireParagraph(body[10], 'pasted paragraph')
+  const host = requireParagraph(body[19], 'table host')
+
+  const entered = run(place(state, { p: fifth.id, o: 3 }), splitParagraph)
+  const undone = undo(entered)
+  assert.ok(undone, 'undo of enter')
+  const joined = run(place(state, { p: hundredth.id, o: 0 }), deleteBackward('char'))
+  const deleted = run(
+    place(state, { p: victim.id, o: 0 }, { p: victimNext.id, o: 0 }),
+    deleteSelection,
+  )
+  const pastedState = run(
+    place(state, { p: pasted.id, o: 0 }, { p: pasted.id, o: flatText(pasted).length }),
+    insertText('one\ntwo\nthree'),
+  )
+  const withTable = run(place(state, { p: host.id, o: flatText(host).length }), insertTable(2, 2))
+  const grid = withTable.doc.body.find((block) => block.kind === 'table')
+  assert.ok(grid?.kind === 'table', 'inserted table')
+  const withoutTable = run(withTable, deleteTable(grid.id))
+
+  assert.equal(entered.doc.body.length, state.doc.body.length + 1, 'enter adds a paragraph')
+  assert.equal(joined.doc.body.length, state.doc.body.length - 1, 'backspace removes a paragraph')
+  assert.equal(deleted.doc.body.length, state.doc.body.length - 1, 'deleting a paragraph removes it')
+  assert.equal(pastedState.doc.body.length, state.doc.body.length + 2, 'the paste makes three paragraphs of one')
+  assert.equal(newIds(state.doc.body, pastedState.doc.body).length, 3, 'the paste adds three new paragraph objects')
+  assert.equal(withTable.doc.body.length, state.doc.body.length + 1, 'the table is one new block')
+  assert.equal(withoutTable.doc.body.length, withTable.doc.body.length - 1, 'deleting the table removes it')
+  assert.equal(undone.doc.body.length, state.doc.body.length, 'undo restores the paragraph count')
+
+  return [
+    { name: 'enter', before: state.doc, after: entered.doc },
+    { name: 'backspace join', before: state.doc, after: joined.doc },
+    { name: 'delete paragraph', before: state.doc, after: deleted.doc },
+    { name: 'paste', before: state.doc, after: pastedState.doc },
+    { name: 'insert table', before: state.doc, after: withTable.doc },
+    { name: 'delete table', before: withTable.doc, after: withoutTable.doc },
+    { name: 'undo enter', before: entered.doc, after: undone.doc },
+  ]
+}
+
+test('layoutPlan on a long document remeasures only the new blocks', () => {
+  const { state } = thousand()
+  for (const sample of samples(state)) {
+    const plan = layoutPlan(sample.before, sample.after, new Map(), new Map())
+    assert.deepEqual([...plan.remeasure], newIds(sample.before.body, sample.after.body), sample.name)
+    if (sample.name === 'enter') assert.ok(plan.remeasure.length <= 2, `enter remeasures ${plan.remeasure.length}`)
+    if (sample.name === 'delete table') assert.deepEqual([...plan.remeasure], [], 'deleting a table measures nothing')
+  }
+})
+
+test('a section break remeasures later blocks only when the page width changes', () => {
+  const paras = many(50, `${'abcdef '.repeat(40)}`)
+  const wide = section(page(612, 792))
+  const prev = makeDoc(paras, { sections: [wide] })
+  const breaker = paragraph('break', [text('end')], {}, { sectionEnd: 0 })
+  const moved = { ...prev, body: [breaker, ...paras], sections: [wide, section(page(280, 792))] }
+  const stayed = { ...prev, body: [breaker, ...paras], sections: [wide, section(page(612, 792))] }
+  const different = layoutPlan(prev, moved, new Map(), new Map())
+  const equal = layoutPlan(prev, stayed, new Map(), new Map())
+  assert.deepEqual([...different.remeasure], [breaker.id, ...paras.map((para) => para.id)], 'a narrower page measures the blocks that moved')
+  assert.deepEqual([...equal.remeasure], [breaker.id], 'equal pages leave the following blocks cached')
+  checkUpdate(prev, moved, null, 'narrower section')
+  checkUpdate(prev, stayed, null, 'equal section')
+})
+
+test('incremental layout matches a fresh layout after each long-document edit', () => {
+  const { doc, state } = thousand()
+  const view = showLayout(doc)
+  assert.ok(view.layout.pages.length > 5, 'the document covers more than one page')
+  for (const sample of samples(state)) {
+    const checked = checkUpdate(sample.before, sample.after, sample.before === doc ? view : null, sample.name)
+    if (sample.name === 'enter') assert.ok(checked.measured <= 2, `measured ${checked.measured}`)
+  }
+})
+
+test('typing one character remeasures only that paragraph', () => {
+  const { doc, state } = thousand()
+  const para = requireParagraph(doc.body[400], 'typed paragraph')
+  const next = run(place(state, { p: para.id, o: 1 }), insertText('x'))
+  const plan = layoutPlan(doc, next.doc, new Map(), new Map())
+  assert.deepEqual([...plan.remeasure], [para.id])
+  const checked = checkUpdate(doc, next.doc, null, 'type')
+  assert.equal(checked.measured, 1)
+})
+
+test('a list indent change remeasures only the paragraph that uses the level', () => {
+  const listed = paragraph('a', [text('abcdef')], { numbering: { num: numId(1), level: 0 } })
+  const other = paragraph('b', [text('bbbbbb')])
+  const lists = (hanging: number) => ({
+    byNum: new Map([[numId(1), {
+      fresh: true,
+      levels: [{
+        format: 'decimal' as const,
+        text: '%1.',
+        start: 1,
+        indentLeft: pt(36),
+        hanging: pt(hanging),
+      }],
+    }]]),
+  })
+  const prev = makeDoc([listed, other], { lists: lists(18) })
+  const changed = layoutPlan(prev, { ...prev, lists: lists(36) }, new Map(), new Map())
+  const same = layoutPlan(prev, { ...prev, lists: lists(18) }, new Map(), new Map())
+  assert.deepEqual([...changed.remeasure], [listed.id], 'the level indent changes the paragraph measure')
+  assert.deepEqual([...same.remeasure], [], 'the same indent leaves the measure cached')
+})
+
+test('a marker that appears on a hanging indent remeasures that paragraph', () => {
+  const para = paragraph('a', [text('abcdef')], { indent: { left: pt(36), hanging: pt(18) } })
+  const lists = {
+    byNum: new Map([[numId(1), {
+      fresh: true,
+      levels: [{
+        format: 'decimal' as const,
+        text: '%1.',
+        start: 1,
+        indentLeft: pt(36),
+        hanging: pt(18),
+      }],
+    }]]),
+  }
+  const prev = makeDoc([para], { lists })
+  const styleId = prev.styles.defaultParagraph
+  const entry = prev.styles.paragraph.get(styleId)
+  assert.ok(entry, 'the default paragraph style')
+  const paragraphStyles = new Map(prev.styles.paragraph)
+  paragraphStyles.set(styleId, { ...entry, look: { ...entry.look, numbering: { num: numId(1), level: 0 } } })
+  const next = { ...prev, styles: { ...prev.styles, paragraph: paragraphStyles } }
+  assert.equal(listMarkers(prev).get(para.id), undefined, 'the paragraph has no marker yet')
+  assert.equal(listMarkers(next).get(para.id), '1.', 'the style numbering supplies a marker')
+  const plan = layoutPlan(prev, next, listMarkers(prev), listMarkers(next))
+  assert.deepEqual([...plan.remeasure], [para.id], 'the marker changes the hanging line box')
+})
+
+test('a document grid change remeasures every block', () => {
+  const blocks = [paragraph('g0', [text('a')]), paragraph('g1', [text('b')])]
+  const plain = section()
+  const prev = makeDoc(blocks, { sections: [plain] })
+  const next = { ...prev, sections: [{ ...plain, grid: { type: 'lines' as const, linePitch: pt(18) } }] }
+  const plan = layoutPlan(prev, next, new Map(), new Map())
+  const first = blocks[0]
+  const second = blocks[1]
+  assert.ok(first && second)
+  assert.deepEqual([...plan.remeasure], [first.id, second.id])
+})
+
+test('incremental layout matches a fresh layout for 200 random edits', { timeout: 60_000 }, () => {
+  const { doc, state } = thousand()
+  const view = showLayout(doc)
+  const rng = mulberry32(1)
+  const kinds = ['enter', 'join', 'delete', 'paste', 'insertTable', 'deleteTable', 'undo'] as const
+  for (let n = 0; n < 200; n++) {
+    const kind = kinds[Math.floor(rng() * kinds.length)] ?? 'enter'
+    const body = state.doc.body
+    const last = body.length - 1
+    let before = state.doc
+    let after = state.doc
+    if (kind === 'enter') {
+      const index = Math.floor(rng() * body.length)
+      const para = requireParagraph(body[index], `enter ${n}`)
+      const offset = Math.floor(rng() * (flatText(para).length + 1))
+      after = run(place(state, { p: para.id, o: offset }), splitParagraph).doc
+    } else if (kind === 'join') {
+      const index = 1 + Math.floor(rng() * last)
+      const para = requireParagraph(body[index], `join ${n}`)
+      after = run(place(state, { p: para.id, o: 0 }), deleteBackward('char')).doc
+    } else if (kind === 'delete') {
+      const index = Math.floor(rng() * last)
+      const para = requireParagraph(body[index], `delete ${n}`)
+      const next = requireParagraph(body[index + 1], `delete next ${n}`)
+      after = run(place(state, { p: para.id, o: 0 }, { p: next.id, o: 0 }), deleteSelection).doc
+    } else if (kind === 'paste') {
+      const index = Math.floor(rng() * body.length)
+      const para = requireParagraph(body[index], `paste ${n}`)
+      after = run(
+        place(state, { p: para.id, o: 0 }, { p: para.id, o: flatText(para).length }),
+        insertText('one\ntwo\nthree'),
+      ).doc
+    } else if (kind === 'insertTable') {
+      const index = Math.floor(rng() * last)
+      const para = requireParagraph(body[index], `table ${n}`)
+      after = run(place(state, { p: para.id, o: flatText(para).length }), insertTable(2, 2)).doc
+    } else if (kind === 'deleteTable') {
+      const index = Math.floor(rng() * last)
+      const para = requireParagraph(body[index], `drop table ${n}`)
+      const inserted = run(place(state, { p: para.id, o: flatText(para).length }), insertTable(2, 2))
+      const grid = inserted.doc.body.find((block) => block.kind === 'table')
+      assert.ok(grid?.kind === 'table', `table ${n}`)
+      before = inserted.doc
+      after = run(inserted, deleteTable(grid.id)).doc
+    } else {
+      const index = Math.floor(rng() * body.length)
+      const para = requireParagraph(body[index], `undo ${n}`)
+      const offset = Math.floor(rng() * (flatText(para).length + 1))
+      const entered = run(place(state, { p: para.id, o: offset }), splitParagraph)
+      const undone = undo(entered)
+      assert.ok(undone, `undo ${n}`)
+      before = entered.doc
+      after = undone.doc
+    }
+    const checked = checkUpdate(before, after, before === doc ? view : null, `${kind} ${n}`)
+    assert.deepEqual([...checked.plan.remeasure], newIds(before.body, after.body), `${kind} ${n} remeasure`)
+  }
 })

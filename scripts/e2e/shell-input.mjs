@@ -329,6 +329,84 @@ await check('a keystroke on long.docx stays under 8ms at p95', async () => {
   assert(bench.p95 < 8, `p95 ${bench.p95} ms (max ${bench.max})`)
 })
 
+await check('enter and undo on long.docx stay under 16ms at p95', async () => {
+  const placed = evaluate(`(() => {
+    const editor = window.__word.editor
+    const paras = editor.state.doc.body.filter((block) => block.kind === 'p')
+    const para = paras[6]
+    if (!para) return { error: 'no seventh paragraph' }
+    let length = 0
+    for (const inline of para.inlines) length += inline.kind === 'text' ? inline.text.length : 1
+    if (length < 3) return { error: 'paragraph is shorter than 3', length }
+    const pos = { p: para.id, o: 3 }
+    editor.run(window.__word.setSelection({ kind: 'text', anchor: pos, head: pos }))
+    window.__benchPara = para.id
+    return { id: para.id, pages: editor.status().pages }
+  })()`)
+  assert(!placed.error, String(placed.error || JSON.stringify(placed)))
+  await until(`!!document.querySelector('.page[data-mounted="1"] .blk[data-id="' + window.__benchPara + '"]')`, {
+    timeout: 8000,
+    label: 'seventh paragraph mounted',
+  })
+  evaluate(`(() => {
+    window.__enterBench = null
+    const editor = window.__word.editor
+    const pagesBefore = editor.status().pages
+    const enter = []
+    const undo = []
+    const frames = () => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    })
+    ;(async () => {
+      try {
+        for (let i = 0; i < 20; i++) {
+          const t0 = performance.now()
+          const entered = await window.word.call({ op: 'enter' })
+          enter.push(performance.now() - t0)
+          if (!entered.ok) {
+            window.__enterBench = { error: JSON.stringify({ entered }) }
+            return
+          }
+          await frames()
+          const t1 = performance.now()
+          const undone = await window.word.call({ op: 'undo' })
+          undo.push(performance.now() - t1)
+          if (!undone.ok) {
+            window.__enterBench = { error: JSON.stringify({ undone }) }
+            return
+          }
+          await frames()
+        }
+        const rank = (times) => {
+          const sorted = times.slice().sort((a, b) => a - b)
+          const index = Math.ceil(0.95 * sorted.length) - 1
+          return { p95: sorted[index] ?? 0, max: sorted[sorted.length - 1] ?? 0 }
+        }
+        const status = editor.status()
+        window.__enterBench = {
+          enter: rank(enter),
+          undo: rank(undo),
+          pagesBefore,
+          pagesAfter: status.pages,
+          pagesFinal: status.pagesFinal,
+          samples: enter.length,
+        }
+      } catch (error) {
+        window.__enterBench = { error: String(error && error.message || error) }
+      }
+    })()
+    return 1
+  })()`)
+  const bench = await until(`window.__enterBench`, { timeout: 20000, label: 'enter undo bench' })
+  console.log(`  ${JSON.stringify(bench)}`)
+  assert(!bench.error, String(bench.error))
+  assert(bench.samples === 20, `samples ${bench.samples}`)
+  assert(bench.enter.p95 < 16, `enter p95 ${bench.enter.p95} ms (max ${bench.enter.max})`)
+  assert(bench.undo.p95 < 16, `undo p95 ${bench.undo.p95} ms (max ${bench.undo.max})`)
+  assert(bench.pagesAfter === bench.pagesBefore, `pages ${bench.pagesBefore} -> ${bench.pagesAfter}`)
+  assert(bench.pagesFinal === true, 'pages are not final')
+})
+
 await check('console has no errors after the long document', async () => {
   const errors = consoleErrors()
   assert(errors.length === 0, errors.join('\n'))
