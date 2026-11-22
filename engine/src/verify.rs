@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rdocx::{
     BodyItemRef, CellItemRef, ContentControlRef, Document, HyperlinkItemRef, ParagraphItemRef,
-    ParagraphRef, RunItemRef, RunRef, StoryKind, TableRef,
+    ParagraphRef, RunItemRef, RunRef, StagedParts, StoryKind, TableRef,
 };
 
 use crate::wire::{self, Atom, Block, Inline, LineSpacing, Marks, ParaProps, Patch, PatchBlock};
@@ -19,29 +19,22 @@ pub struct Ledger {
 }
 
 pub fn ledger(doc: &Document) -> Ledger {
+    let mut counts = body_counts(doc);
+    // `part_xml` stages the whole package on every call, so every part is read from one staging.
+    if let Ok(staged) = doc.staged_parts() {
+        scan_unmodeled_parts(doc, &staged, &mut counts);
+    }
+    Ledger { counts }
+}
+
+/// Body-item fingerprints. Part XML is not read.
+#[doc(hidden)]
+pub fn body_counts(doc: &Document) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for item in doc.body_items() {
         accumulate_body(&item, &mut counts);
     }
-    if let Ok(stories) = doc.stories() {
-        let mut parts = BTreeSet::new();
-        for story in stories {
-            if story.kind() == StoryKind::Body {
-                continue;
-            }
-            if parts.insert(story.part_name().to_string()) {
-                accumulate_part(doc, story.part_name(), &mut counts);
-            }
-        }
-    }
-    for part in [
-        "/word/comments.xml",
-        "/word/footnotes.xml",
-        "/word/endnotes.xml",
-    ] {
-        accumulate_part(doc, part, &mut counts);
-    }
-    Ledger { counts }
+    counts
 }
 
 pub(crate) fn run_counts(run: &RunRef<'_>) -> BTreeMap<String, usize> {
@@ -71,13 +64,13 @@ pub fn verify(
     list_ids: &BTreeMap<i32, u32>,
     media: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let actual = ledger(written);
+    // `import` already counted this document. Counting again would stage the package a second time.
+    let again = crate::import::import(written);
     let mut expected = pristine.clone();
     subtract(&mut expected, removed)?;
-    if let Some(difference) = ledger_diff(&expected, &actual) {
+    if let Some(difference) = ledger_diff(&expected, &again.ledger) {
         return Err(difference);
     }
-    let again = crate::import::import(written);
     let want = project_patch(patch, imported, list_ids)?;
     let got = project_blocks(&again.imported.body);
     if let Some(difference) = projection_diff(&want, &got, media) {
@@ -181,8 +174,33 @@ fn bump(counts: &mut BTreeMap<String, usize>, key: String) {
     *counts.entry(key).or_insert(0) += 1;
 }
 
-fn accumulate_part(doc: &Document, part: &str, counts: &mut BTreeMap<String, usize>) {
-    let Ok(xml) = doc.part_xml(part) else {
+fn scan_unmodeled_parts(
+    doc: &Document,
+    staged: &StagedParts,
+    counts: &mut BTreeMap<String, usize>,
+) {
+    if let Ok(stories) = doc.stories() {
+        let mut parts = BTreeSet::new();
+        for story in stories {
+            if story.kind() == StoryKind::Body {
+                continue;
+            }
+            if parts.insert(story.part_name().to_string()) {
+                scan_part(staged, story.part_name(), counts);
+            }
+        }
+    }
+    for part in [
+        "/word/comments.xml",
+        "/word/footnotes.xml",
+        "/word/endnotes.xml",
+    ] {
+        scan_part(staged, part, counts);
+    }
+}
+
+fn scan_part(staged: &StagedParts, part: &str, counts: &mut BTreeMap<String, usize>) {
+    let Ok(xml) = staged.xml(part) else {
         return;
     };
     scan_xml(&xml, counts);
@@ -317,7 +335,8 @@ fn squeeze(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn scan_xml(xml: &str, counts: &mut BTreeMap<String, usize>) {
+#[doc(hidden)]
+pub fn scan_xml(xml: &str, counts: &mut BTreeMap<String, usize>) {
     for tag in tags(xml, "bookmarkStart") {
         if let Some(name) = attr(&tag, "name") {
             bump(counts, format!("bookmark:{name}"));
