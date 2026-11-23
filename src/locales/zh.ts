@@ -1,5 +1,5 @@
 const messages: Record<string, string> = {
-  title: 'Word',
+  title: 'Folio',
   engineReady: '引擎就绪：{count} 个段落',
   inputLabel: '文档正文',
   untitled: '未命名.docx',

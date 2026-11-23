@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 export const root = new URL('../..', import.meta.url).pathname
-const APP = 'word'
+const APP = 'folio'
 
 function acde(args, { allowFail = false, maxBuffer = 64 * 1024 * 1024 } = {}) {
   try {

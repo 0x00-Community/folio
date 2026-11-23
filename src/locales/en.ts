@@ -1,5 +1,5 @@
 const messages: Record<string, string> = {
-  title: 'Word',
+  title: 'Folio',
   engineReady: 'engine ready: {count} paragraphs',
   inputLabel: 'Document text',
   untitled: 'Untitled.docx',

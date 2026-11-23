@@ -314,7 +314,7 @@ function historyPast() {
 
 // `acde act` has click and drag-to-a-ref. A sized stroke is `acde input`: move, down, move, up.
 function pointer(events) {
-  execFileSync('acde', ['input', 'word', JSON.stringify(events)], {
+  execFileSync('acde', ['input', 'folio', JSON.stringify(events)], {
     cwd: root,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -1,4 +1,4 @@
-# Word for Dopame OS
+# Folio for Dopame
 
 [English](README.md) | 简体中文
 

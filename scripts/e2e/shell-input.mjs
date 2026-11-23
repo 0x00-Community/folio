@@ -93,7 +93,7 @@ function dialogInfo() {
 function discardUnsaved() {
   const lang = evaluate('document.documentElement.lang')
   const title = evaluate('document.title')
-  const named = /^• (.+) - Word$/.exec(title)
+  const named = /^• (.+) - Folio$/.exec(title)
   assert(named, `dirty title ${title}`)
   const fileName = named[1]
   const ask = lang === 'zh' ? `是否保存对 ${fileName} 的更改？` : `Save changes to ${fileName}?`
