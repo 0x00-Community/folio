@@ -130,7 +130,7 @@ export interface ParaProps {
     readonly right?: Pt
     readonly firstLine?: Pt
     readonly hanging?: Pt
-    /** w:firstLineChars in hundredths of a character (200 is the common 首行缩进 2 字符). Read-only until rdocx can set it. */
+    /** w:firstLineChars in hundredths of a character (200 is the common 首行缩进 2 字符). */
     readonly firstLineChars?: number
   }
   readonly spacing?: { readonly before?: Pt; readonly after?: Pt; readonly line?: LineSpacing }

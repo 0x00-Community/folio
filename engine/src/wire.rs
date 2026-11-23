@@ -182,7 +182,7 @@ pub struct ParaProps {
     pub first_line: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hanging: Option<f64>,
-    /// Hundredths of a character. Omitted: the facade has no getter for it.
+    /// Hundredths of a character (`w:firstLineChars`). `None` clears a direct value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_line_chars: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]

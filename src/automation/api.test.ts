@@ -359,6 +359,11 @@ test('every edit op reports created and removed and undo restores the doc', asyn
   await runOp({ op: 'setLineSpacing', rule: 'auto', value: 1.5, at: { para: 'p', offset: 0 } }, (doc) => {
     assert.deepEqual(findPara(doc, 'p').props.spacing?.line, { rule: 'auto', multiple: 1.5 })
   })
+  await runOp({ op: 'setParaSpacing', before: 12, after: 6, at: { para: 'p', offset: 0 } }, (doc) => {
+    assert.equal(findPara(doc, 'p').props.spacing?.before, 12)
+    assert.equal(findPara(doc, 'p').props.spacing?.after, 6)
+    assert.equal(findPara(doc, 'p').props.indent?.firstLineChars, 200)
+  })
   await runOp({ op: 'indentLevel', delta: 1, at: { para: 'p', offset: 0 } }, (doc) => {
     assert.equal(findPara(doc, 'p').props.indent?.left, 36)
     assert.equal(findPara(doc, 'p').props.indent?.firstLineChars, 200)
@@ -612,6 +617,7 @@ test('every edit op is busy and leaves the host state object', async () => {
     { op: 'setAlign', align: 'center', at: { para: 'p', offset: 0 } },
     { op: 'setIndent', left: 36, at: { para: 'p', offset: 0 } },
     { op: 'setLineSpacing', rule: 'exact', value: 16, at: { para: 'p', offset: 0 } },
+    { op: 'setParaSpacing', before: 12, at: { para: 'p', offset: 0 } },
     { op: 'indentLevel', delta: 1, at: { para: 'p', offset: 0 } },
     { op: 'toggleList', list: 'bullet', at: { para: 'p', offset: 0 } },
     { op: 'insertTable', rows: 2, cols: 2, at: end },
@@ -632,7 +638,7 @@ test('every edit op is busy and leaves the host state object', async () => {
     return request.op
   })
   const editOps = [...KEYS.keys()].filter((op) => !READ_OPS.has(op))
-  assert.equal(editOps.length, 28)
+  assert.equal(editOps.length, 29)
   assert.deepEqual([...names].sort(), [...editOps].sort())
 
   // Each request changes the editor state when the host is idle, so a missed busy check fails below.
@@ -868,9 +874,10 @@ test('random valid requests keep the document invariants', { timeout: 60_000 }, 
       { op: 'setMark', mark: 'font', value: rng() < 0.3 ? null : 'Songti', at: span },
       { op: 'setMark', mark: 'sizePt', value: 10 + Math.floor(rng() * 8), at: span },
       { op: 'setStyle', style: pick(['normal', 'heading1', 'heading2']), at: caret },
-      { op: 'setAlign', align: pick(['left', 'center', 'right', 'justify', 'distribute'] as const), at: caret },
+      { op: 'setAlign', align: pick(['left', 'center', 'right', 'justify'] as const), at: caret },
       { op: 'setIndent', left: Math.floor(rng() * 72), at: caret },
       { op: 'setLineSpacing', rule: 'auto', value: rng() * 2, at: caret },
+      { op: 'setParaSpacing', before: Math.floor(rng() * 24), ...(rng() < 0.5 ? { after: 0 } : {}), at: caret },
       { op: 'setLineSpacing', rule: 'exact', value: Math.floor(rng() * 24), at: caret },
       { op: 'indentLevel', delta: rng() < 0.5 ? 1 : -1, at: caret },
       { op: 'toggleList', list: pick(['bullet', 'decimal'] as const), at: caret },

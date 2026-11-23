@@ -3,7 +3,7 @@ import type { Opened, Source } from '../engine/engine.ts'
 import { cssStack, fetchMetrics, rememberedFamilies } from '../fonts.ts'
 import type { FontMetrics } from '../fonts.ts'
 import { indexOf } from '../model.ts'
-import type { Block, Doc, Paragraph, ParaId, Pos, Table } from '../model.ts'
+import type { Block, Doc, Paragraph, ParaId, ParaLook, Pos, Table } from '../model.ts'
 import { apply, initialState, redo as redoState, setSelection, toolbarState, undo as undoState, wordCount } from './edit.ts'
 import type { Command, EditorState, ToolbarState } from './edit.ts'
 import { attachInput } from './input-dom.ts'
@@ -197,6 +197,11 @@ export class Editor implements EditingSurface {
 
   toolbar(): ToolbarState {
     return toolbarState(this.current, (para, marks) => this.session.look(para, marks))
+  }
+
+  /** The look the page paints: direct properties over the style chain, including a list level's indent. */
+  paraLook(para: Paragraph): ParaLook {
+    return this.session.paraLook(para, this.current.doc.lists)
   }
 
   status(): Status {

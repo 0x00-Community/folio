@@ -533,6 +533,7 @@ fn nil_is_null_none_is_unset_and_an_unnamed_style_is_single() {
 fn direct_exact_line_spacing_imports_as_exact() {
     let mut doc = Document::new();
     doc.add_paragraph("exact").set_line_spacing(16.0);
+    doc.add_paragraph("least").set_line_spacing_at_least(14.0);
     doc.add_paragraph("auto").set_line_spacing_multiple(1.5);
     doc.add_paragraph("plain");
     let bytes = doc.to_bytes().expect("bytes");
@@ -542,11 +543,15 @@ fn direct_exact_line_spacing_imports_as_exact() {
         panic!("exact paragraph");
     };
     assert_eq!(exact.props.line, Some(LineSpacing::Exact { pt: 16.0 }));
-    let Block::P(auto) = &imported.body[1] else {
+    let Block::P(least) = &imported.body[1] else {
+        panic!("at least paragraph");
+    };
+    assert_eq!(least.props.line, Some(LineSpacing::AtLeast { pt: 14.0 }));
+    let Block::P(auto) = &imported.body[2] else {
         panic!("auto paragraph");
     };
     assert_eq!(auto.props.line, Some(LineSpacing::Auto { multiple: 1.5 }));
-    let Block::P(plain) = &imported.body[2] else {
+    let Block::P(plain) = &imported.body[3] else {
         panic!("plain paragraph");
     };
     assert!(

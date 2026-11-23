@@ -9,8 +9,10 @@ import {
   move,
   selectAll,
   splitParagraph,
+  clearMarks,
   tabKey,
   toggleMark,
+  toggleVertAlign,
   wordRange,
 } from './edit.ts'
 import type { Command, LogicalUnit } from './edit.ts'
@@ -131,7 +133,24 @@ const markCommand = {
   underline: toggleMark('underline'),
 } as const
 
-export type ShortcutName = 'bold' | 'italic' | 'underline' | 'undo' | 'redo' | 'save' | 'saveAs'
+// Shift and "=" arrive as key "+", named "plus" so a chord can be split on "+".
+const formatCommand = {
+  superscript: toggleVertAlign('super'),
+  subscript: toggleVertAlign('sub'),
+  clearFormatting: clearMarks,
+} as const
+
+export type ShortcutName =
+  | 'bold'
+  | 'italic'
+  | 'underline'
+  | 'undo'
+  | 'redo'
+  | 'save'
+  | 'saveAs'
+  | 'superscript'
+  | 'subscript'
+  | 'clearFormatting'
 
 /** The chord `defaultKeymap` binds for a toolbar command, or null when the keymap has none. Redo is the first binding. */
 export function shortcutChord(platform: Platform, name: ShortcutName): string | null {
@@ -143,6 +162,11 @@ export function shortcutChord(platform: Platform, name: ShortcutName): string | 
       && (name === 'bold' || name === 'italic' || name === 'underline')
       && action.command === markCommand[name]
     ) return chord
+    if (action.kind === 'command' && name === 'superscript' && action.command === formatCommand.superscript) return chord
+    if (action.kind === 'command' && name === 'subscript' && action.command === formatCommand.subscript) return chord
+    if (action.kind === 'command' && name === 'clearFormatting' && action.command === formatCommand.clearFormatting) {
+      return chord
+    }
   }
   return null
 }
@@ -194,6 +218,9 @@ export function defaultKeymap(platform: Platform): Keymap {
     ['mod+b', run(markCommand.bold)],
     ['mod+i', run(markCommand.italic)],
     ['mod+u', run(markCommand.underline)],
+    ['mod+shift+plus', run(formatCommand.superscript)],
+    ['mod+=', run(formatCommand.subscript)],
+    ['mod+space', run(formatCommand.clearFormatting)],
     ['mod+z', { kind: 'history', step: 'undo' }],
     ['mod+y', { kind: 'history', step: 'redo' }],
     ['mod+shift+z', { kind: 'history', step: 'redo' }],

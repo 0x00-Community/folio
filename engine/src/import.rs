@@ -1724,7 +1724,9 @@ pub(crate) fn direct_props(doc: &Document, paragraph: &ParagraphRef<'_>) -> Para
             .map(Length::to_pt),
         first_line,
         hanging,
-        first_line_chars: None,
+        first_line_chars: paragraph
+            .first_line_chars()
+            .and_then(|value| i32::try_from(value).ok()),
         space_before: paragraph.space_before().map(Length::to_pt),
         space_after: paragraph.space_after().map(Length::to_pt),
         line,

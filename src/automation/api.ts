@@ -23,6 +23,7 @@ import {
   setAlign,
   setIndent,
   setLineSpacing,
+  setSpacing,
   setMark,
   setPageSetup,
   setParaStyle,
@@ -99,6 +100,7 @@ export const KEYS: ReadonlyMap<string, readonly string[]> = new Map([
   ['setAlign', ['op', 'v', 'at', 'align']],
   ['setIndent', ['op', 'v', 'at', 'left', 'right', 'firstLine', 'hanging']],
   ['setLineSpacing', ['op', 'v', 'at', 'rule', 'value']],
+  ['setParaSpacing', ['op', 'v', 'at', 'before', 'after']],
   ['indentLevel', ['op', 'v', 'at', 'delta']],
   ['toggleList', ['op', 'v', 'at', 'list']],
   ['insertTable', ['op', 'v', 'at', 'rows', 'cols']],
@@ -242,6 +244,8 @@ function route(
       return setIndentOp(host, note, request)
     case 'setLineSpacing':
       return setLineSpacingOp(host, note, request)
+    case 'setParaSpacing':
+      return setParaSpacingOp(host, note, request)
     case 'indentLevel':
       return indentOp(host, note, request)
     case 'toggleList':
@@ -486,6 +490,18 @@ function setIndentOp(host: Host, note: () => number, record: Record<string, unkn
   if (firstLine !== undefined) indent.firstLine = points(firstLine)
   if (hanging !== undefined) indent.hanging = points(hanging)
   return plainEdit(host, note, record, 'setIndent', setIndent(indent), true)
+}
+
+function setParaSpacingOp(host: Host, note: () => number, record: Record<string, unknown>): Response | Deferred {
+  const before = optionalPoint(record, 'before')
+  if (isRefusal(before)) return before
+  const after = optionalPoint(record, 'after')
+  if (isRefusal(after)) return after
+  if (before === undefined && after === undefined) return bad('before')
+  const spacing: { before?: Pt, after?: Pt } = {}
+  if (before !== undefined) spacing.before = points(before)
+  if (after !== undefined) spacing.after = points(after)
+  return plainEdit(host, note, record, 'setParaSpacing', setSpacing(spacing), true)
 }
 
 function setLineSpacingOp(host: Host, note: () => number, record: Record<string, unknown>): Response | Deferred {

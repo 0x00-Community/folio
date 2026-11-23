@@ -406,6 +406,88 @@ export function setLineSpacing(line: LineSpacing): Command {
   }
 }
 
+const DIRECT_MARKS = [
+  'bold', 'italic', 'underline', 'strike', 'font', 'fontEastAsia', 'sizePt', 'color', 'highlight', 'vertAlign', 'charStyle',
+] as const
+
+/**
+ * Removes direct character formatting from the selection and leaves the hyperlink.
+ * Paragraph properties stay as they are: unlike Word's button, this does not reset the paragraph style.
+ * A collapsed caret stores empty marks, so the next typed text does not inherit the caret's formatting.
+ */
+export const clearMarks: Command = (state) => {
+  if (state.sel.kind !== 'text') return null
+  const index = indexOf(state.doc)
+  const ordered = orderRange(index, state.sel.anchor, state.sel.head)
+  if (comparePos(index, ordered.from, ordered.to) === 0) {
+    if (ordered.fromLoc.story !== 'body') return null
+    const stored: Marks = {}
+    if (state.stored && marksEqual(state.stored, stored)) return null
+    return { doc: state.doc, sel: state.sel, stored, intent: 'none' }
+  }
+  const doc = mapCovered(state.doc, ordered, clearedMarks)
+  if (!doc) return null
+  return done(doc, state.sel, null, 'discrete')
+}
+
+/** Superscript and subscript share one mark, so turning one on replaces the other. Choosing the active one clears it. */
+export function toggleVertAlign(which: 'super' | 'sub'): Command {
+  return (state) => {
+    if (state.sel.kind !== 'text') return null
+    const index = indexOf(state.doc)
+    const ordered = orderRange(index, state.sel.anchor, state.sel.head)
+    if (comparePos(index, ordered.from, ordered.to) === 0) {
+      if (ordered.fromLoc.story !== 'body') return null
+      const base = state.stored ?? marksAt(ordered.fromLoc.para, ordered.from.o).marks
+      const stored = applyMarkValue(base, { mark: 'vertAlign', value: base.vertAlign === which ? undefined : which })
+      if (state.stored && marksEqual(state.stored, stored)) return null
+      return { doc: state.doc, sel: state.sel, stored, intent: 'none' }
+    }
+    const on = coveredText(state.doc, ordered).some(sample => sample.marks.vertAlign !== which)
+    const doc = mapCovered(state.doc, ordered, (marks) => applyMarkValue(marks, {
+      mark: 'vertAlign',
+      value: on ? which : undefined,
+    }))
+    if (!doc) return null
+    return done(doc, state.sel, null, 'discrete')
+  }
+}
+
+/** null removes that direct value. An omitted field is left alone. */
+export interface IndentEdit {
+  readonly left?: Pt
+  readonly right?: Pt
+  readonly firstLine?: Pt | null
+  readonly hanging?: Pt | null
+  readonly firstLineChars?: number | null
+}
+
+export interface SpacingEdit {
+  readonly before?: Pt
+  readonly after?: Pt
+  readonly line?: LineSpacing
+}
+
+/** The paragraph dialog applies one of these as a single undo entry. */
+export interface ParaFormat {
+  readonly align?: NonNullable<ParaProps['align']>
+  readonly indent?: IndentEdit
+  readonly spacing?: SpacingEdit
+}
+
+/** Sets spacing before and after. An omitted edge is left alone, including the line rule. */
+export function setSpacing(spacing: { readonly before?: Pt, readonly after?: Pt }): Command {
+  return (state) => {
+    if (spacing.before === undefined && spacing.after === undefined) return null
+    return applyParaFormat(state, { spacing })
+  }
+}
+
+/** Alignment, indent and spacing in one history entry. An empty patch changes nothing. */
+export function setParaFormat(format: ParaFormat): Command {
+  return (state) => applyParaFormat(state, format)
+}
+
 export function setIndent(indent: NonNullable<ParaProps['indent']>): Command {
   return (state) => {
     const doc = mapTouched(state.doc, state.sel, (para) => {
@@ -846,6 +928,12 @@ export interface ToolbarState {
   readonly sizePt: Pt | 'mixed'
   readonly color: Hex | 'auto' | 'mixed'
   readonly highlight: HighlightName | 'none' | 'mixed'
+  readonly vertAlign: 'super' | 'sub' | 'none' | 'mixed'
+  /** The shared auto multiple of every touched paragraph, or null when they do not share one. */
+  readonly lineMultiple: number | null
+  /** Direct spacing of the paragraph at the caret, in points. A missing value is 0. */
+  readonly spaceBefore: number
+  readonly spaceAfter: number
   readonly style: StyleId | 'mixed'
   readonly align: NonNullable<ParaProps['align']> | 'mixed'
   readonly list: 'bullet' | 'decimal' | 'none' | 'mixed'
@@ -882,6 +970,11 @@ export function toolbarState(state: EditorState, look: (para: Paragraph, marks: 
   const sizePt = uniform(looks.map(item => item.sizePt))
   const color = uniform(looks.map(item => item.color))
   const highlight = uniform(looks.map(item => item.highlight ?? 'none'))
+  const vertAlign = vertAlignOf(markSamples(state))
+  const lineMultiple = sharedMultiple(paras)
+  const caret = caretParagraph(state)
+  const spaceBefore = Number(caret?.props.spacing?.before ?? 0)
+  const spaceAfter = Number(caret?.props.spacing?.after ?? 0)
   const style = uniform(paras.map(para => para.props.style ?? state.doc.styles.defaultParagraph))
   const align = uniform(paras.map(para => effectiveAlign(state.doc, para)))
   const list = uniform(paras.map(para => listKindOf(state.doc, para)))
@@ -889,7 +982,8 @@ export function toolbarState(state: EditorState, look: (para: Paragraph, marks: 
   const hit = tableHit(state)
   const tools = hit ? tableEditTools(hit.table) : { rows: false, columns: false }
   return {
-    bold, italic, underline, strike, font, sizePt, color, highlight, style, align, list, inTable,
+    bold, italic, underline, strike, font, sizePt, color, highlight, vertAlign, lineMultiple,
+    spaceBefore, spaceAfter, style, align, list, inTable,
     rowTools: tools.rows,
     columnTools: tools.columns,
     canUndo: state.history.past.length > 0,
@@ -2097,7 +2191,7 @@ function mapTouched(doc: Doc, sel: Selection, fn: (para: Paragraph) => Paragraph
   return changed ? next : null
 }
 
-function touchedParagraphs(doc: Doc, sel: Selection): Paragraph[] {
+export function touchedParagraphs(doc: Doc, sel: Selection): Paragraph[] {
   if (sel.kind === 'cells') {
     const found = findTable(doc.body, sel.table, [])
     if (!found) return []
@@ -2222,6 +2316,111 @@ function mapTextRange(inlines: readonly Inline[], from: number, to: number, fn: 
     if (start < lo || hi < end) changed = true
   }
   return changed ? out : inlines
+}
+
+function clearedMarks(marks: Marks): Marks {
+  let direct = false
+  for (const key of DIRECT_MARKS) {
+    if (marks[key] !== undefined) direct = true
+  }
+  if (!direct) return marks
+  return marks.link === undefined ? {} : { link: marks.link }
+}
+
+function applyParaFormat(state: EditorState, format: ParaFormat): Transaction | null {
+  if (format.align === undefined && format.indent === undefined && format.spacing === undefined) return null
+  const doc = mapTouched(state.doc, state.sel, (para) => formatParagraph(para, format))
+  if (!doc) return null
+  return done(doc, state.sel, null, 'discrete')
+}
+
+function formatParagraph(para: Paragraph, format: ParaFormat): Paragraph {
+  let props = para.props
+  if (format.align !== undefined && props.align !== format.align) props = { ...props, align: format.align }
+  if (format.indent) {
+    const indent = mergeIndent(props.indent, format.indent)
+    if (indent !== props.indent) props = indent === undefined ? without(props, 'indent') : { ...props, indent }
+  }
+  if (format.spacing) {
+    const spacing = mergeSpacing(props.spacing, format.spacing)
+    if (spacing !== props.spacing) props = spacing === undefined ? without(props, 'spacing') : { ...props, spacing }
+  }
+  if (props === para.props) return para
+  return { ...para, props }
+}
+
+function without(props: ParaProps, key: 'indent' | 'spacing'): ParaProps {
+  const next: ParaProps = { ...props }
+  delete next[key]
+  return next
+}
+
+function mergeIndent(prev: ParaProps['indent'], edit: IndentEdit): ParaProps['indent'] | undefined {
+  const next: {
+    left?: Pt
+    right?: Pt
+    firstLine?: Pt
+    hanging?: Pt
+    firstLineChars?: number
+  } = { ...prev }
+  let touched = false
+  if (edit.left !== undefined && next.left !== edit.left) {
+    next.left = edit.left
+    touched = true
+  }
+  if (edit.right !== undefined && next.right !== edit.right) {
+    next.right = edit.right
+    touched = true
+  }
+  if (edit.firstLine === null && next.firstLine !== undefined) {
+    delete next.firstLine
+    touched = true
+  } else if (edit.firstLine !== undefined && edit.firstLine !== null && next.firstLine !== edit.firstLine) {
+    next.firstLine = edit.firstLine
+    touched = true
+  }
+  if (edit.hanging === null && next.hanging !== undefined) {
+    delete next.hanging
+    touched = true
+  } else if (edit.hanging !== undefined && edit.hanging !== null && next.hanging !== edit.hanging) {
+    next.hanging = edit.hanging
+    touched = true
+  }
+  if (edit.firstLineChars === null && next.firstLineChars !== undefined) {
+    delete next.firstLineChars
+    touched = true
+  } else if (
+    edit.firstLineChars !== undefined && edit.firstLineChars !== null && next.firstLineChars !== edit.firstLineChars
+  ) {
+    next.firstLineChars = edit.firstLineChars
+    touched = true
+  }
+  if (!touched) return prev
+  if (
+    next.left === undefined && next.right === undefined && next.firstLine === undefined
+    && next.hanging === undefined && next.firstLineChars === undefined
+  ) return undefined
+  return next
+}
+
+function mergeSpacing(prev: ParaProps['spacing'], edit: SpacingEdit): ParaProps['spacing'] | undefined {
+  const next: { before?: Pt, after?: Pt, line?: LineSpacing } = { ...prev }
+  let touched = false
+  if (edit.before !== undefined && next.before !== edit.before) {
+    next.before = edit.before
+    touched = true
+  }
+  if (edit.after !== undefined && next.after !== edit.after) {
+    next.after = edit.after
+    touched = true
+  }
+  if (edit.line !== undefined && !(next.line && sameLine(next.line, edit.line))) {
+    next.line = edit.line
+    touched = true
+  }
+  if (!touched) return prev
+  if (next.before === undefined && next.after === undefined && next.line === undefined) return undefined
+  return next
 }
 
 function applyMarkValue(marks: Marks, change: MarkValue): Marks {
@@ -2590,6 +2789,44 @@ function blockPlain(blocks: readonly Block[]): string {
   }
   walk(blocks)
   return parts.join('\n')
+}
+
+function markSamples(state: EditorState): Marks[] {
+  if (state.sel.kind === 'cells') return touchedParagraphs(state.doc, state.sel).map(() => ({}))
+  const index = indexOf(state.doc)
+  const ordered = orderRange(index, state.sel.anchor, state.sel.head)
+  if (comparePos(index, ordered.from, ordered.to) === 0) {
+    return [state.stored ?? marksAt(ordered.fromLoc.para, ordered.from.o).marks]
+  }
+  const covered = coveredText(state.doc, ordered)
+  if (covered.length === 0) return [marksAt(ordered.fromLoc.para, ordered.from.o).marks]
+  return covered.map(sample => sample.marks)
+}
+
+function vertAlignOf(marks: readonly Marks[]): ToolbarState['vertAlign'] {
+  if (marks.length === 0) return 'none'
+  const values = marks.map((item) => item.vertAlign === 'super' || item.vertAlign === 'sub' ? item.vertAlign : 'none')
+  const first = values[0]
+  if (first === undefined) return 'none'
+  for (const value of values) if (value !== first) return 'mixed'
+  return first
+}
+
+function caretParagraph(state: EditorState): Paragraph | null {
+  if (state.sel.kind === 'text') return safeLoc(indexOf(state.doc), state.sel.head.p)?.para ?? null
+  return touchedParagraphs(state.doc, state.sel)[0] ?? null
+}
+
+function sharedMultiple(paras: readonly Paragraph[]): number | null {
+  if (paras.length === 0) return null
+  let found: number | null = null
+  for (const para of paras) {
+    const line = para.props.spacing?.line
+    if (!line || line.rule !== 'auto') return null
+    if (found === null) found = line.multiple
+    else if (found !== line.multiple) return null
+  }
+  return found
 }
 
 function runLooks(state: EditorState, look: (para: Paragraph, marks: Marks) => RunLook): RunLook[] {

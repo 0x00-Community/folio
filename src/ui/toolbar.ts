@@ -4,7 +4,8 @@ import type { Platform, ShortcutName } from '../editor/input.ts'
 import { shortcutChord } from '../editor/input.ts'
 import { installedFamilies } from '../fonts.ts'
 import { t } from '../i18n.ts'
-import type { Doc } from '../model.ts'
+import type { Doc, HighlightName } from '../model.ts'
+import { createFormatChrome } from './format-menu.ts'
 import { icon } from './icons.ts'
 import type { IconName } from './icons.ts'
 import { createFileMenu } from './menu.ts'
@@ -28,6 +29,13 @@ export interface ToolbarHandlers {
   onAlign(align: Align): void
   onList(kind: 'bullet' | 'decimal'): void
   onIndent(delta: 1 | -1): void
+  onColor(hex: string | undefined): void
+  onHighlight(name: HighlightName | undefined): void
+  onVertAlign(which: 'super' | 'sub'): void
+  onClearMarks(): void
+  onLineSpacing(multiple: number): void
+  onParaSpacing(edge: 'before' | 'after', points: number): void
+  onParagraph(): void
   onPageSetup(): void
   onPrint(): void
   onInsertTable(): void
@@ -103,7 +111,16 @@ export function createToolbar(
     underline: toggleButton(t('underline'), 'underline', platform, () => handlers.onMark('underline'), 'underline'),
     strike: toggleButton(t('strike'), null, platform, () => handlers.onMark('strike'), 'strike'),
   }
-  group(root).append(marks.bold, marks.italic, marks.underline, marks.strike)
+  const format = createFormatChrome(platform, {
+    onColor: (hex) => handlers.onColor(hex),
+    onHighlight: (name) => handlers.onHighlight(name),
+    onVertAlign: (which) => handlers.onVertAlign(which),
+    onClear: () => handlers.onClearMarks(),
+    onLineSpacing: (multiple) => handlers.onLineSpacing(multiple),
+    onParaSpacing: (edge, points) => handlers.onParaSpacing(edge, points),
+    onParagraph: () => handlers.onParagraph(),
+  }, () => fileMenu.close(false))
+  group(root).append(marks.bold, marks.italic, marks.underline, marks.strike, format.color, format.highlight, format.more)
 
   const bullet = toggleButton(t('list.bullet'), null, platform, () => handlers.onList('bullet'), 'list-bullet')
   const numbered = toggleButton(t('list.number'), null, platform, () => handlers.onList('decimal'), 'list-number')
@@ -117,7 +134,13 @@ export function createToolbar(
     right: toggleButton(t('align.right'), null, platform, () => handlers.onAlign('right'), 'align-right'),
     justify: toggleButton(t('align.justify'), null, platform, () => handlers.onAlign('justify'), 'align-justify'),
   }
-  group(root).append(alignButtons.left, alignButtons.center, alignButtons.right, alignButtons.justify)
+  group(root).append(
+    alignButtons.left,
+    alignButtons.center,
+    alignButtons.right,
+    alignButtons.justify,
+    format.spacing,
+  )
 
   const styleSelect = labeledSelect(t('style'), 'style')
   watchSelect(styleSelect, () => {
@@ -262,6 +285,7 @@ export function createToolbar(
       covered = next
       root.hidden = next
       fileMenu.close(false)
+      format.close(false)
       syncStrip(tableOpen, false)
     },
     render(state, doc, used, canSave) {
@@ -294,6 +318,7 @@ export function createToolbar(
         paintStyles(doc, state.style)
         paintFont(used, state.font)
         paintSize(state.sizePt)
+        format.sync(state)
         syncStrip(state.inTable, !covered)
       } finally {
         painting = false

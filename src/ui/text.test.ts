@@ -84,6 +84,10 @@ test('formatChord spells the platform modifier', () => {
   assert.equal(formatChord('mod+shift+z', 'other'), 'Ctrl+Shift+Z')
   assert.equal(formatChord('mod+shift+z', 'mac'), '⌘⇧Z')
   assert.equal(formatChord('mod+y', 'mac'), '⌘Y')
+  assert.equal(formatChord('mod+space', 'other'), 'Ctrl+Space')
+  assert.equal(formatChord('mod+=', 'mac'), '⌘=')
+  assert.equal(formatChord('mod+shift+plus', 'mac'), '⌘⇧+')
+  assert.equal(formatChord('mod+shift+plus', 'other'), 'Ctrl+Shift++')
 })
 
 test('commandTitle keeps the label when the keymap has no chord', () => {

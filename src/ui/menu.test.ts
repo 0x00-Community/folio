@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { FILE_MENU, menuKey } from './menu.ts'
+import { FILE_MENU, gridKey, menuKey } from './menu.ts'
 import type { MenuFlag } from './menu.ts'
 
 function items(disabled: readonly string[] = []): MenuFlag[] {
@@ -58,4 +58,30 @@ test('a letter or an unrelated arrow does nothing', () => {
     assert.deepEqual(menuKey(1, rows, key), { kind: 'stay' }, key)
   }
   assert.deepEqual(menuKey(1, [], 'ArrowDown'), { kind: 'stay' })
+})
+
+function cells(count: number, disabled: readonly number[] = []): MenuFlag[] {
+  return Array.from({ length: count }, (_, index) => ({ disabled: disabled.includes(index) }))
+}
+
+test('palette arrows move by row and wrap inside a short row', () => {
+  const rows = [1, 10, 5]
+  const items = cells(16)
+  assert.deepEqual(gridKey(0, rows, items, 'ArrowDown'), { kind: 'move', index: 1 })
+  assert.deepEqual(gridKey(1, rows, items, 'ArrowRight'), { kind: 'move', index: 2 })
+  assert.deepEqual(gridKey(10, rows, items, 'ArrowRight'), { kind: 'move', index: 1 })
+  assert.deepEqual(gridKey(1, rows, items, 'ArrowLeft'), { kind: 'move', index: 10 })
+  assert.deepEqual(gridKey(5, rows, items, 'ArrowDown'), { kind: 'move', index: 15 })
+  assert.deepEqual(gridKey(15, rows, items, 'ArrowDown'), { kind: 'move', index: 0 })
+  assert.deepEqual(gridKey(15, rows, items, 'ArrowRight'), { kind: 'move', index: 11 })
+  assert.deepEqual(gridKey(11, rows, items, 'ArrowUp'), { kind: 'move', index: 1 })
+  assert.deepEqual(gridKey(0, rows, items, 'ArrowUp'), { kind: 'move', index: 11 })
+  assert.deepEqual(gridKey(7, rows, items, 'Home'), { kind: 'move', index: 0 })
+  assert.deepEqual(gridKey(0, rows, items, 'End'), { kind: 'move', index: 15 })
+  assert.deepEqual(gridKey(4, rows, items, 'Enter'), { kind: 'activate', index: 4 })
+  assert.deepEqual(gridKey(4, rows, items, ' '), { kind: 'activate', index: 4 })
+  assert.deepEqual(gridKey(4, rows, items, 'Escape'), { kind: 'close' })
+  assert.deepEqual(gridKey(4, rows, items, 'a'), { kind: 'stay' })
+  assert.deepEqual(gridKey(2, rows, cells(16, [3]), 'ArrowRight'), { kind: 'move', index: 4 })
+  assert.deepEqual(gridKey(4, rows, cells(16, [4]), 'Enter'), { kind: 'stay' })
 })

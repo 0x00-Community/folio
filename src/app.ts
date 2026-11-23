@@ -4,7 +4,7 @@ import { createInterface } from './automation/api.ts'
 import type { Word } from './automation/api.ts'
 import type { Host } from './automation/host.ts'
 import { Editor } from './editor/editor.ts'
-import { changeIndentLevel, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertImage, insertRow, insertTable, setAlign, setMark, setPageSetup, setParaStyle, toggleList, toggleMark } from './editor/edit.ts'
+import { changeIndentLevel, clearMarks, deleteColumns, deleteEnclosingTable, deleteRows, insertColumn, insertImage, insertRow, insertTable, setAlign, setLineSpacing, setMark, setPageSetup, setParaFormat, setParaStyle, setSpacing, toggleList, toggleMark, toggleVertAlign, touchedParagraphs } from './editor/edit.ts'
 import { listMarkers } from './editor/derive.ts'
 import type { ToggleMark } from './editor/edit.ts'
 import { detectPlatform } from './editor/input.ts'
@@ -14,12 +14,13 @@ import { OpenError, SaveVerifyError, SaveWriteError, documentHasHan, engineBootM
 import type { Opened, PrintFontInfo, PrintLayout } from './engine/engine.ts'
 import { ensurePrintFonts } from './fonts.ts'
 import { locale, t } from './i18n.ts'
-import type { Doc, ParaId, Pt, StyleId } from './model.ts'
+import type { Doc, Hex, HighlightName, ParaId, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
 import { createToolbar } from './ui/toolbar.ts'
 import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
 import { isDialogOpen } from './ui/dialog.ts'
 import { openPageSetup } from './ui/page-setup.ts'
+import { openParagraph } from './ui/paragraph.ts'
 import { openInsertTable } from './ui/table-tools.ts'
 import { createUnsavedDialog } from './ui/unsaved.ts'
 import type { UnsavedChoice } from './ui/unsaved.ts'
@@ -178,6 +179,43 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     },
     onIndent(delta) {
       edit(() => { current().run(changeIndentLevel(delta)) })
+    },
+    onColor(hex) {
+      edit(() => { current().run(setMark({ mark: 'color', value: hex === undefined ? undefined : hex as Hex })) })
+    },
+    onHighlight(name: HighlightName | undefined) {
+      edit(() => { current().run(setMark({ mark: 'highlight', value: name })) })
+    },
+    onVertAlign(which) {
+      edit(() => { current().run(toggleVertAlign(which)) })
+    },
+    onClearMarks() {
+      edit(() => { current().run(clearMarks) })
+    },
+    onLineSpacing(multiple) {
+      edit(() => { current().run(setLineSpacing({ rule: 'auto', multiple })) })
+    },
+    onParaSpacing(edge, points) {
+      const spacing = edge === 'before' ? { before: points as Pt } : { after: points as Pt }
+      edit(() => { current().run(setSpacing(spacing)) })
+    },
+    onParagraph() {
+      const editorNow = current()
+      if (isDialogOpen()) return
+      const paras = touchedParagraphs(editorNow.state.doc, editorNow.state.sel)
+      const page = editorNow.state.doc.sections[editorNow.status().section]?.page
+      if (!page || paras.length === 0) {
+        editorNow.focus()
+        return
+      }
+      const looks = paras.map((para) => editorNow.paraLook(para))
+      void openParagraph(looks, page).then((format) => {
+        if (!format) {
+          current().focus()
+          return
+        }
+        edit(() => { current().run(setParaFormat(format)) })
+      })
     },
     onPageSetup() {
       const editorNow = current()

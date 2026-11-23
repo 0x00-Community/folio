@@ -35,15 +35,22 @@ export type IconName =
   | 'chevron'
   | 'zoom-out'
   | 'zoom-in'
+  | 'font-color'
+  | 'highlight'
+  | 'check'
+  | 'more'
+  | 'line-spacing'
 
-type MarkIcon = 'bold' | 'italic' | 'underline' | 'strike'
+type MarkIcon = 'bold' | 'italic' | 'underline' | 'strike' | 'font-color'
 
-const MARK: Record<MarkIcon, string> = { bold: 'B', italic: 'I', underline: 'U', strike: 'S' }
+const MARK: Record<Exclude<MarkIcon, 'font-color'>, string> = { bold: 'B', italic: 'I', underline: 'U', strike: 'S' }
 
 const STROKE = '1.5'
 const FAINT = 0.6
 
 export function icon(name: IconName): SVGSVGElement | HTMLSpanElement {
+  if (name === 'font-color') return fontColorGlyph()
+  if (name === 'highlight') return highlightGlyph()
   if (name === 'bold' || name === 'italic' || name === 'underline' || name === 'strike') return glyph(name)
   const svg = document.createElementNS(SVG_NS, 'svg')
   svg.setAttribute('viewBox', '0 0 18 18')
@@ -55,7 +62,7 @@ export function icon(name: IconName): SVGSVGElement | HTMLSpanElement {
   return svg
 }
 
-function glyph(kind: MarkIcon): HTMLSpanElement {
+function glyph(kind: Exclude<MarkIcon, 'font-color'>): HTMLSpanElement {
   const el = document.createElement('span')
   el.className = `glyph ${kind}`
   el.setAttribute('aria-hidden', 'true')
@@ -63,7 +70,35 @@ function glyph(kind: MarkIcon): HTMLSpanElement {
   return el
 }
 
-function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
+function fontColorGlyph(): HTMLSpanElement {
+  const el = document.createElement('span')
+  el.className = 'glyph color'
+  el.setAttribute('aria-hidden', 'true')
+  el.append(document.createTextNode('A'))
+  const bar = document.createElement('span')
+  bar.className = 'bar'
+  el.append(bar)
+  return el
+}
+
+function highlightGlyph(): HTMLSpanElement {
+  const el = document.createElement('span')
+  el.className = 'glyph color'
+  el.setAttribute('aria-hidden', 'true')
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('viewBox', '0 0 18 14')
+  svg.setAttribute('width', '18')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('fill', 'none')
+  drawMarker(svg)
+  const bar = document.createElement('span')
+  bar.className = 'bar'
+  el.append(svg, bar)
+  return el
+}
+
+function draw(name: Exclude<IconName, MarkIcon | 'highlight'>, svg: SVGSVGElement): void {
   switch (name) {
     case 'doc':
       return drawDoc(svg)
@@ -121,6 +156,12 @@ function draw(name: Exclude<IconName, MarkIcon>, svg: SVGSVGElement): void {
       return drawZoomOut(svg)
     case 'zoom-in':
       return drawZoomIn(svg)
+    case 'check':
+      return drawCheck(svg)
+    case 'more':
+      return drawMore(svg)
+    case 'line-spacing':
+      return drawLineSpacing(svg)
     default: {
       const unexpected: never = name
       throw new Error(`unknown icon ${unexpected}`)
@@ -186,6 +227,33 @@ function drawZoomOut(svg: SVGSVGElement): void {
 function drawZoomIn(svg: SVGSVGElement): void {
   path(svg, 'M4.5 9.5 H13.5')
   path(svg, 'M9.5 4.5 V13.5')
+}
+
+function drawMarker(svg: SVGSVGElement): void {
+  path(svg, 'M12.5 1.5 L16.5 4.5 L9.5 11.5 L5.5 8.5 Z')
+  path(svg, 'M9.5 4.5 L13.5 7.5')
+  path(svg, 'M5.5 8.5 L3.5 11.5 L8.5 12.5 L9.5 11.5')
+}
+
+function drawCheck(svg: SVGSVGElement): void {
+  path(svg, 'M4.5 9.5 L7.5 12.5')
+  path(svg, 'M7.5 12.5 L13.5 5.5')
+}
+
+function drawMore(svg: SVGSVGElement): void {
+  dot(svg, 4.5, 9.5)
+  dot(svg, 9, 9.5)
+  dot(svg, 13.5, 9.5)
+}
+
+function drawLineSpacing(svg: SVGSVGElement): void {
+  path(svg, 'M4.5 3.5 V6.5')
+  path(svg, 'M3.5 5 L4.5 3.5 L5.5 5')
+  path(svg, 'M4.5 14.5 V11.5')
+  path(svg, 'M3.5 13 L4.5 14.5 L5.5 13')
+  hline(svg, 8.5, 14.5, 5.5)
+  hline(svg, 8.5, 14.5, 9.5)
+  hline(svg, 8.5, 14.5, 13.5)
 }
 
 function drawUndo(svg: SVGSVGElement): void {

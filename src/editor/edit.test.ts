@@ -4,6 +4,7 @@ import { checkDoc, flatText, indexOf } from '../model.ts'
 import type { Block, Doc, Marks, Paragraph, Row, RunLook, Table, TextRun } from '../model.ts'
 import {
   apply,
+  clearMarks,
   changeIndentLevel,
   COALESCE_MS,
   deleteBackward,
@@ -38,12 +39,15 @@ import {
   setLineSpacing,
   setMark,
   setPageSetup,
+  setParaFormat,
   setParaStyle,
+  setSpacing,
   setSelection,
   splitParagraph,
   tableEditTools,
   toggleList,
   toggleMark,
+  toggleVertAlign,
   toolbarState,
   undo,
   wordCount,
@@ -415,6 +419,88 @@ test('range marks turn on everywhere when any covered text lacks the mark', () =
   assert.ok(collapsed, 'setMark at a caret stores the value')
   assert.equal(collapsed.doc, state.doc, 'setMark at a caret does not change the document')
   assert.equal(collapsed.stored?.color, hex('FF0000'), 'the color is stored')
+})
+
+test('clearMarks removes direct character formatting and keeps the link', () => {
+  const link = 'https://example.com/' as Marks['link']
+  const para = paragraph('p', [
+    text('ab', 1, { bold: true, color: hex('C00000'), sizePt: pt(20), vertAlign: 'super', link, charStyle: HEADING }),
+    text('c', 2, { italic: true }),
+  ])
+  const doc = makeDoc([para])
+  let state = rangeAt(initialState(doc), { p: para.id, o: 0 }, { p: para.id, o: 2 })
+  state = run(state, clearMarks)
+  const runs = textRuns(asParagraph(state.doc.body[0]))
+  assert.deepEqual(runs[0]?.marks, { link }, 'a range clear keeps only the link')
+  assert.equal(runs[1]?.marks.italic, true, 'text outside the range stays')
+  assert.equal(state.history.past.length, 1, 'a range clear is one undo entry')
+  const undone = undo(state)
+  assert.ok(undone)
+  assert.equal(undone.doc, doc, 'undo restores the original document')
+  checkDoc(state.doc)
+
+  const caret = clearMarks(initialState(doc))
+  assert.ok(caret)
+  assert.equal(caret.doc, doc, 'a caret clear does not change the document')
+  assert.deepEqual(caret.stored, {}, 'a caret clear stores empty marks')
+  assert.equal(caret.intent, 'none', 'a caret clear is not an undo entry')
+  assert.equal(clearMarks(apply(initialState(doc), caret, 0)), null, 'clearing empty stored marks changes nothing')
+
+  const styled = paragraph('s', [text('ab', 1, { bold: true })], { style: HEADING, align: 'center', spacing: { before: pt(6) } })
+  const styledDoc = makeDoc([styled])
+  const cleared = run(rangeAt(initialState(styledDoc), { p: styled.id, o: 0 }, { p: styled.id, o: 2 }), clearMarks)
+  assert.equal(asParagraph(cleared.doc.body[0]).props, styled.props, 'clear formatting does not touch paragraph properties')
+  assert.equal(textRuns(asParagraph(cleared.doc.body[0]))[0]?.marks.bold, undefined)
+})
+
+test('setSpacing and setParaFormat are one undo entry each', () => {
+  const para = paragraph('p', [text('ab')], {
+    align: 'left',
+    indent: { left: pt(12), firstLineChars: 200 },
+    spacing: { before: pt(3), line: { rule: 'auto', multiple: 1 } },
+  })
+  const doc = makeDoc([para])
+  let state = run(initialState(doc), setSpacing({ before: pt(12), after: pt(6) }))
+  const spacing = asParagraph(state.doc.body[0]).props.spacing
+  assert.equal(spacing?.before, pt(12))
+  assert.equal(spacing?.after, pt(6))
+  assert.deepEqual(spacing?.line, { rule: 'auto', multiple: 1 }, 'setSpacing leaves the line rule')
+  assert.equal(asParagraph(state.doc.body[0]).props.indent?.firstLineChars, 200, 'setSpacing leaves the indent')
+  assert.equal(state.history.past.length, 1)
+  assert.equal(undo(state)?.doc, doc, 'undo restores the original document')
+  assert.equal(setSpacing({})(initialState(doc)), null, 'an empty spacing patch changes nothing')
+
+  state = run(initialState(doc), setParaFormat({
+    align: 'justify',
+    indent: { left: pt(18), firstLine: pt(24), hanging: null, firstLineChars: null },
+    spacing: { before: pt(6), after: pt(6), line: { rule: 'exact', pt: pt(20) } },
+  }))
+  const props = asParagraph(state.doc.body[0]).props
+  assert.equal(props.align, 'justify')
+  assert.equal(props.indent?.left, pt(18))
+  assert.equal(props.indent?.firstLine, pt(24))
+  assert.equal(props.indent?.hanging, undefined)
+  assert.equal(props.indent?.firstLineChars, undefined)
+  assert.equal(props.spacing?.before, pt(6))
+  assert.equal(props.spacing?.after, pt(6))
+  assert.deepEqual(props.spacing?.line, { rule: 'exact', pt: pt(20) })
+  assert.equal(state.history.past.length, 1, 'the dialog applies one undo entry')
+  const restored = undo(state)
+  assert.ok(restored)
+  assert.equal(restored.doc, doc, 'undo restores the original document')
+  checkDoc(state.doc)
+  assert.equal(setParaFormat({})(initialState(doc)), null, 'an empty paragraph patch changes nothing')
+})
+
+test('superscript and subscript replace each other', () => {
+  const para = paragraph('p', [text('abcd')])
+  let state = rangeAt(initialState(makeDoc([para])), { p: para.id, o: 1 }, { p: para.id, o: 3 })
+  state = run(state, toggleVertAlign('super'))
+  assert.equal(textRuns(asParagraph(state.doc.body[0]))[1]?.marks.vertAlign, 'super')
+  state = run(state, toggleVertAlign('sub'))
+  assert.equal(textRuns(asParagraph(state.doc.body[0]))[1]?.marks.vertAlign, 'sub', 'subscript replaces superscript')
+  state = run(state, toggleVertAlign('sub'))
+  assert.equal(textRuns(asParagraph(state.doc.body[0]))[1]?.marks.vertAlign, undefined, 'choosing the active one clears it')
 })
 
 test('tables insert, grow, shrink, and clear cells without dropping structure', () => {
@@ -792,6 +878,7 @@ test('move, select, selected text, and word count', () => {
 test('toolbar state uses the look callback and reports mixed', () => {
   const heading = paragraph('h', [text('Title')], { style: HEADING })
   const head = toolbarState(initialState(makeDoc([heading])), look)
+  assert.equal(head.vertAlign, 'none', 'a heading without a vertical alignment mark is none')
   assert.equal(head.bold, true, 'a heading reads bold from the look, without a direct mark')
   assert.equal(head.sizePt, pt(16), 'the heading size comes from the look')
   assert.equal(head.font, '宋体', 'the font slot shown is East Asian')
@@ -806,6 +893,17 @@ test('toolbar state uses the look callback and reports mixed', () => {
   assert.ok(stored)
   state = apply(state, stored, 0)
   assert.equal(toolbarState(state, look).bold, true, 'stored bold is what the caret shows')
+  const raised = toggleVertAlign('super')(state)
+  assert.ok(raised)
+  assert.equal(toolbarState(apply(state, raised, 0), look).vertAlign, 'super', 'stored superscript is what the caret shows')
+  const splitAlign = paragraph('m', [text('a', 1, { vertAlign: 'super' }), text('b', 2, { vertAlign: 'sub' })])
+  const mixedState = rangeAt(initialState(makeDoc([splitAlign])), { p: splitAlign.id, o: 0 }, { p: splitAlign.id, o: 2 })
+  assert.equal(toolbarState(mixedState, look).vertAlign, 'mixed', 'different vertical alignments are mixed')
+  const lowered = paragraph('d', [text('ab', 1, { vertAlign: 'sub' })])
+  assert.equal(
+    toolbarState(rangeAt(initialState(makeDoc([lowered])), { p: lowered.id, o: 0 }, { p: lowered.id, o: 2 }), look).vertAlign,
+    'sub',
+  )
 
   const mixed = paragraph('m', [text('a', 1, { bold: true, fontEastAsia: '宋体' }), text('b', 2, { fontEastAsia: '黑体' })], {}, { src: 3 })
   const other = paragraph('o', [text('c')], { align: 'center' })

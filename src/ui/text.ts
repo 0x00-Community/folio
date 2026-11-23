@@ -89,6 +89,8 @@ export function formatChord(chord: string, platform: Platform): string {
   const parts = chord.split('+').filter(part => part.length > 0).map(part => {
     const named = word[part]
     if (named !== undefined) return named
+    if (part === 'space') return 'Space'
+    if (part === 'plus') return '+'
     return part.length === 1 ? part.toUpperCase() : part
   })
   return mac ? parts.join('') : parts.join('+')

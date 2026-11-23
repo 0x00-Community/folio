@@ -179,6 +179,18 @@ test('shortcutChord reads the chord the keymap bound', () => {
     assert.equal(shortcutChord(platform, 'redo'), 'mod+y', platform)
     assert.equal(shortcutChord(platform, 'save'), 'mod+s', platform)
     assert.equal(shortcutChord(platform, 'saveAs'), 'mod+shift+s', platform)
+    assert.equal(shortcutChord(platform, 'superscript'), 'mod+shift+plus', platform)
+    assert.equal(shortcutChord(platform, 'subscript'), 'mod+=', platform)
+  }
+})
+
+test('superscript is the plus key Shift delivers, and subscript stays on mod+=', () => {
+  for (const [platform, held] of [['mac', cmd], ['other', ctrl]] as const) {
+    assert.equal(chordOf(keyEvent('+', { ...held, ...shift }), platform), 'mod+shift+plus')
+    const raised = press(stateAt(second, 6), platform, keyEvent('+', { ...held, ...shift }))
+    assert.equal(raised.stored?.vertAlign, 'super')
+    const lowered = press(stateAt(second, 6), platform, keyEvent('=', held))
+    assert.equal(lowered.stored?.vertAlign, 'sub')
   }
 })
 

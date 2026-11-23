@@ -2835,6 +2835,54 @@ fn empty_paragraph_of_the_same_src_precedes_kept_paragraph() {
 }
 
 #[test]
+fn first_line_chars_round_trip() {
+    let (session, before) = opened("basic.docx");
+    let mut para = body_para(&before, 2).clone();
+    para.props.first_line_chars = Some(200);
+    let written = save(
+        &session,
+        &patch_replacing(&before.imported, 2, vec![changed_para(para)]),
+    );
+    let after = reopen(&written);
+    assert_eq!(
+        para_by_src(&after.imported.body, 2).props.first_line_chars,
+        Some(200)
+    );
+
+    let session = Session::from_bytes(&written).expect("reopen session");
+    let imported = reopen(&written);
+    let mut cleared = para_by_src(&imported.imported.body, 2).clone();
+    cleared.props.first_line_chars = None;
+    let again = save(
+        &session,
+        &patch_replacing(&imported.imported, 2, vec![changed_para(cleared)]),
+    );
+    let restored = reopen(&again);
+    assert_eq!(
+        para_by_src(&restored.imported.body, 2)
+            .props
+            .first_line_chars,
+        None
+    );
+}
+
+#[test]
+fn line_spacing_at_least_round_trips() {
+    let (session, before) = opened("basic.docx");
+    let mut para = body_para(&before, 2).clone();
+    para.props.line = Some(rdocx_word_engine::wire::LineSpacing::AtLeast { pt: 14.0 });
+    let written = save(
+        &session,
+        &patch_replacing(&before.imported, 2, vec![changed_para(para)]),
+    );
+    let after = reopen(&written);
+    assert_eq!(
+        para_by_src(&after.imported.body, 2).props.line,
+        Some(rdocx_word_engine::wire::LineSpacing::AtLeast { pt: 14.0 })
+    );
+}
+
+#[test]
 fn two_keeps_of_one_src_are_refused() {
     let (session, before) = opened("basic.docx");
     let src = 3;

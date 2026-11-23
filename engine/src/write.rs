@@ -3734,11 +3734,10 @@ fn apply_props<S: Story>(
     list_ids: &BTreeMap<i32, u32>,
 ) -> Result<(), WriteError> {
     let current = loc.direct_props(index)?;
-    if let Some(chars) = desired.first_line_chars
-        && current.first_line_chars != Some(chars)
-    {
+    if current.first_line_chars != desired.first_line_chars {
+        let chars = desired.first_line_chars;
         loc.with_para(index, |paragraph| {
-            paragraph.set_first_line_chars_value(Some(i64::from(chars)));
+            paragraph.set_first_line_chars_value(chars.map(i64::from));
             Ok(())
         })?;
     }
@@ -3824,8 +3823,12 @@ fn apply_props<S: Story>(
                     Ok(())
                 })?;
             }
-            Some(LineSpacing::AtLeast { .. }) => {
-                return Err(contract("line spacing atLeast"));
+            Some(LineSpacing::AtLeast { pt }) => {
+                let pt = *pt;
+                loc.with_para(index, |paragraph| {
+                    paragraph.set_line_spacing_at_least(pt);
+                    Ok(())
+                })?;
             }
         }
     }

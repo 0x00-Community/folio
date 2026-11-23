@@ -568,6 +568,17 @@ export type EditRequest = { at?: Place } & (
   }
   | {
     /**
+     * Set spacing before and after a paragraph, in points. An omitted edge is left unchanged.
+     * At least one of `before` and `after` is required. This does not change the line rule.
+     */
+    op: 'setParaSpacing'
+    /** Space before the paragraph, in points. */
+    before?: number
+    /** Space after the paragraph, in points. */
+    after?: number
+  }
+  | {
+    /**
      * Set line spacing. For `auto`, `value` is a multiple of single spacing (1 is single).
      * For `exact` and `atLeast`, `value` is points.
      */

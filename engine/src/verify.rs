@@ -568,8 +568,6 @@ fn mapped_props(props: &ParaProps, list_ids: &BTreeMap<i32, u32>) -> ParaProps {
     {
         props.numbering = Some(Some((*real as i32, level)));
     }
-    // Import does not read w:firstLineChars, so a saved value cannot come back through it.
-    props.first_line_chars = None;
     props
 }
 

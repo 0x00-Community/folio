@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { apply, deleteBackward, deleteForward, initialState, insertImage, insertPageBreak, insertText, move, redo, setAlign, setMark, setParaStyle, setPageSetup, setSelection, splitParagraph, toggleList, toggleMark, undo } from '../editor/edit.ts'
+import { apply, clearMarks, deleteBackward, deleteForward, initialState, insertImage, insertPageBreak, insertText, move, redo, setAlign, setIndent, setLineSpacing, setMark, setParaFormat, setParaStyle, setPageSetup, setSelection, setSpacing, splitParagraph, toggleList, toggleMark, undo } from '../editor/edit.ts'
 import type { Command, EditorState } from '../editor/edit.ts'
 import { withCaretParagraph } from '../editor/derive.ts'
+import { hex, pt } from '../editor/testkit.ts'
 import { flatText, indexOf, type Block, type Doc, type Marks, type MediaKey, type Paragraph, type Pt, type StyleId } from '../model.ts'
 import {
   SaveVerifyError,
@@ -798,3 +799,130 @@ test('a fresh image saves from its bytes and a second save still carries them', 
     opened.source.free()
   }
 })
+
+test('character formatting, spacing and indents save and reopen', () => {
+  const opened = engine.blank()
+  let again: Opened | undefined
+  try {
+    let state = run(initialState(withCaretParagraph(opened.doc)), insertText('alpha beta'))
+    const para = bodyParas(state.doc)[0]
+    assert.ok(para)
+    const id = para.id
+    state = run(state, setSelection({ kind: 'text', anchor: { p: id, o: 0 }, head: { p: id, o: 10 } }))
+    state = run(state, setMark({ mark: 'color', value: hex('C00000') }))
+    state = run(state, setMark({ mark: 'highlight', value: 'yellow' }))
+    state = run(state, setMark({ mark: 'vertAlign', value: 'super' }))
+    state = run(state, setSelection({ kind: 'text', anchor: { p: id, o: 0 }, head: { p: id, o: 5 } }))
+    state = run(state, clearMarks)
+    state = run(state, setSpacing({ before: pt(12), after: pt(6) }))
+    state = run(state, setIndent({ left: pt(36), right: pt(18), firstLine: pt(24) }))
+    state = run(state, setLineSpacing({ rule: 'auto', multiple: 1.5 }))
+    state = run(state, setSelection({ kind: 'text', anchor: { p: id, o: 10 }, head: { p: id, o: 10 } }))
+    state = run(state, splitParagraph)
+    const second = bodyParas(state.doc)[1]
+    assert.ok(second)
+    state = run(state, setParaFormat({
+      indent: { hanging: pt(18), firstLine: null },
+      spacing: { line: { rule: 'exact', pt: pt(20) } },
+    }))
+    const bytes = opened.source.save(state.doc)
+    again = engine.open(bytes)
+    const [got, next] = bodyParas(again.doc)
+    assert.ok(got && next)
+    assert.equal(flatText(got), 'alpha beta')
+    const runs = got.inlines.filter((inline) => inline.kind === 'text')
+    const head = runs[0]
+    const tail = runs[runs.length - 1]
+    assert.ok(head && head.kind === 'text' && tail && tail.kind === 'text')
+    assert.equal(head.text, 'alpha')
+    assert.equal(head.marks.color, undefined)
+    assert.equal(head.marks.highlight, undefined)
+    assert.equal(head.marks.vertAlign, undefined)
+    assert.equal(tail.marks.color, 'C00000')
+    assert.equal(tail.marks.highlight, 'yellow')
+    assert.equal(tail.marks.vertAlign, 'super')
+    assert.ok(near(got.props.spacing?.before, 12), `before ${got.props.spacing?.before}`)
+    assert.ok(near(got.props.spacing?.after, 6), `after ${got.props.spacing?.after}`)
+    assert.deepEqual(got.props.spacing?.line, { rule: 'auto', multiple: 1.5 })
+    assert.ok(near(got.props.indent?.left, 36))
+    assert.ok(near(got.props.indent?.right, 18))
+    assert.ok(near(got.props.indent?.firstLine, 24))
+    assert.ok(near(next.props.indent?.hanging, 18))
+    assert.equal(next.props.indent?.firstLine, undefined)
+    assert.deepEqual(next.props.spacing?.line, { rule: 'exact', pt: 20 })
+  } finally {
+    again?.source.free()
+    opened.source.free()
+  }
+})
+
+test('at least line spacing saves and reopens', () => {
+  const opened = engine.blank()
+  let again: Opened | undefined
+  try {
+    const state = run(initialState(withCaretParagraph(opened.doc)), setLineSpacing({ rule: 'atLeast', pt: pt(14) }))
+    const bytes = opened.source.save(state.doc)
+    again = engine.open(bytes)
+    const para = bodyParas(again.doc)[0]
+    assert.ok(para)
+    assert.deepEqual(para.props.spacing?.line, { rule: 'atLeast', pt: pt(14) })
+  } finally {
+    again?.source.free()
+    opened.source.free()
+  }
+})
+
+test('preserve.docx keeps its ledger through each formatting edit', () => {
+  const text = 'An editable paragraph after the preserved content.'
+  const edits: Command[] = [
+    setMark({ mark: 'color', value: hex('0070C0') }),
+    setMark({ mark: 'highlight', value: 'green' }),
+    setMark({ mark: 'vertAlign', value: 'super' }),
+    clearPainted,
+    setSpacing({ before: pt(12) }),
+    setSpacing({ after: pt(0) }),
+    setLineSpacing({ rule: 'auto', multiple: 2 }),
+    setLineSpacing({ rule: 'exact', pt: pt(16) }),
+    setIndent({ left: pt(36) }),
+    setIndent({ right: pt(18) }),
+    setIndent({ firstLine: pt(24) }),
+    setIndent({ hanging: pt(12) }),
+  ]
+  for (const command of edits) {
+    const opened = engine.open(fixture('preserve.docx'))
+    try {
+      const para = paraByText(opened.doc, text)
+      let state = initialState(opened.doc)
+      state = run(state, setSelection({
+        kind: 'text',
+        anchor: { p: para.id, o: 0 },
+        head: { p: para.id, o: Math.min(4, flatText(para).length) },
+      }))
+      const tr = command(state)
+      assert.ok(tr, 'the edit applies to the editable paragraph')
+      state = apply(state, tr, 0)
+      assert.ok(opened.source.save(state.doc).byteLength > 0, 'save keeps the ledger')
+    } finally {
+      opened.source.free()
+    }
+  }
+})
+
+const clearPainted: Command = (state) => {
+  const painted = setMark({ mark: 'color', value: hex('FF0000') })(state)
+  if (!painted || painted.sel.kind !== 'text') return painted
+  const next = apply(state, painted, 0)
+  if (next.sel.kind !== 'text') return painted
+  const start = Math.min(next.sel.anchor.o, next.sel.head.o)
+  const moved = setSelection({
+    kind: 'text',
+    anchor: { p: next.sel.anchor.p, o: start },
+    head: { p: next.sel.anchor.p, o: start + 2 },
+  })(next)
+  const selected = moved ? apply(next, moved, 0) : next
+  return clearMarks(selected) ?? painted
+}
+
+function near(actual: number | undefined, expected: number): boolean {
+  return actual !== undefined && Math.abs(actual - expected) < 0.05
+}

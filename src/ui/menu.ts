@@ -82,6 +82,66 @@ function mod(value: number, count: number): number {
   return ((value % count) + count) % count
 }
 
+/**
+ * Arrow keys move through a palette. Left and right wrap inside the row. Up and down keep the column
+ * and clamp it when the next row is shorter. Home and End jump. Enter and Space choose. Escape and Tab close.
+ */
+export function gridKey(index: number, rows: readonly number[], items: readonly MenuFlag[], key: string): MenuKeyResult {
+  if (key === 'Escape' || key === 'Tab') return { kind: 'close' }
+  const count = items.length
+  if (count === 0 || rows.length === 0) return { kind: 'stay' }
+  if (key === 'Enter' || key === ' ') {
+    const current = items[index]
+    if (!current || current.disabled) return { kind: 'stay' }
+    return { kind: 'activate', index }
+  }
+  if (key === 'Home') return { kind: 'move', index: edge(items, 'start') }
+  if (key === 'End') return { kind: 'move', index: edge(items, 'end') }
+  if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'ArrowUp' && key !== 'ArrowDown') return { kind: 'stay' }
+  const place = cellOf(rows, index)
+  if (!place) return { kind: 'move', index: edge(items, 'start') }
+  if (key === 'ArrowLeft' || key === 'ArrowRight') {
+    const width = rows[place.row] ?? 0
+    if (width <= 0) return { kind: 'stay' }
+    const dir = key === 'ArrowRight' ? 1 : -1
+    for (let step = 1; step <= width; step++) {
+      const col = mod(place.col + dir * step, width)
+      const next = indexOfCell(rows, place.row, col)
+      if (!items[next]?.disabled) return { kind: 'move', index: next }
+    }
+    return { kind: 'stay' }
+  }
+  const dir = key === 'ArrowDown' ? 1 : -1
+  for (let step = 1; step <= rows.length; step++) {
+    const row = mod(place.row + dir * step, rows.length)
+    const width = rows[row] ?? 0
+    if (width <= 0) continue
+    const col = Math.min(place.col, width - 1)
+    for (let scan = 0; scan < width; scan++) {
+      const next = indexOfCell(rows, row, mod(col + scan, width))
+      if (!items[next]?.disabled) return { kind: 'move', index: next }
+    }
+  }
+  return { kind: 'stay' }
+}
+
+function cellOf(rows: readonly number[], index: number): { row: number, col: number } | null {
+  if (index < 0) return null
+  let start = 0
+  for (let row = 0; row < rows.length; row++) {
+    const width = rows[row] ?? 0
+    if (index < start + width) return { row, col: index - start }
+    start += width
+  }
+  return null
+}
+
+function indexOfCell(rows: readonly number[], row: number, col: number): number {
+  let start = 0
+  for (let i = 0; i < row; i++) start += rows[i] ?? 0
+  return start + col
+}
+
 export interface FileMenuCommand {
   readonly label: string
   readonly icon: IconName
