@@ -48,24 +48,35 @@
 
 ## 环境准备
 
-需要：
+需要 Node 24 或更新版本（测试靠 Node 的类型剥离直接运行 TypeScript）和 `acde` 命令行工具，`npm run dev`、
+`npm run build` 和端到端检查都要用。
 
-- Node 24 或更新版本。测试靠 Node 的类型剥离直接运行 TypeScript。
-- `acde` 命令行工具，`npm run dev`、`npm run build` 和端到端检查都要用。
-- 能编译 rdocx 的 Rust 工具链（rdocx 固定在 1.97.1），带 `wasm32-unknown-unknown` 目标，以及 `wasm-bindgen` 命令行
-  0.2.128，版本要和引擎锁文件里固定的完全一致。
-- 一份 rdocx 检出，放在本仓库旁边的 `../rdocx-editing-kit`。`engine/Cargo.toml` 指向这个路径。
+引擎不在版本库里，有两种方式得到它。
 
-引擎依赖的一些 rdocx 改动还没有进上游，目前在本地分支 `work/editing-kit-grok` 上。所以现在只克隆 rdocx 的 `main` 是编不出引擎的。
+**下载预编译的引擎。** 不需要 Rust：
 
 ```sh
 npm ci
-npm run engine      # 把 engine/ 编译到 public/engine.wasm 和 src/engine/pkg/
-npm run dev         # 在 acde dev 会话里启动应用
+npm run engine:fetch   # 从 Release 下载 public/engine.wasm 和 src/engine/pkg/
+npm run dev            # 在 acde dev 会话里启动应用
 ```
 
-`public/engine.wasm` 和 `src/engine/pkg/` 不在版本库里。刚克隆之后，以及改动了 `engine/` 或 rdocx 检出之后，都要运行
-`npm run engine`。
+**从源码编译。** 需要 `rustup`，以及版本正好是 0.2.128 的 `wasm-bindgen` 命令行
+（`cargo install wasm-bindgen-cli --version 0.2.128`）。`engine/rust-toolchain.toml` 固定了 Rust 1.97.1 和
+`wasm32-unknown-unknown` 目标，第一次编译时 rustup 会自动安装。
+
+```sh
+npm ci
+npm run engine         # 把 engine/ 编译到 public/engine.wasm 和 src/engine/pkg/
+npm run dev
+```
+
+引擎依赖的一些 rdocx 改动还没有进上游。它们公开在 [0x00-Community/rdocx](https://github.com/0x00-Community/rdocx)
+的 `folio` 分支上，`engine/Cargo.toml` 固定了具体的提交，cargo 会自己拉取。要同时改 rdocx 和引擎，可以在
+`engine/.cargo/config.toml` 里用 `[patch]` 把 cargo 指向本地检出。
+
+改动了 `engine/` 之后要重新运行 `npm run engine`。预编译的引擎和它所属的 Release 对应；拉取了 `engine/` 的改动之后，
+重新下载或者自己编译。
 
 发布构建不带函数名，能省 4 MB。要在性能分析里看到 Rust 函数名，用 `WORD_ENGINE_NAMES=1 npm run engine` 构建。
 
@@ -89,7 +100,7 @@ npm run dev         # 在 acde dev 会话里启动应用
 | 变量 | 用途 |
 | --- | --- |
 | `WORD_TEST_DOC`、`WORD_TEST_REF_PDF` | 你自己的一份文档，以及 Word 用它导出的 PDF，供打印检查和基准测试使用。不设置就没有任何东西读取它们。 |
-| `WORD_TEST_FONTS` | 字体测试读取的目录。默认是 rdocx 检出里的字体。 |
+| `WORD_TEST_FONTS` | 字体测试读取的目录。默认是 `../rdocx-editing-kit/crates/oxml-layout/fonts`，即本仓库旁边的一份 rdocx 检出。两者都没有时，这些测试会跳过。 |
 
 测量工具：
 

@@ -5,6 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-rdocx = { path = "../../../rdocx-editing-kit/crates/rdocx" }
+rdocx = { git = "https://github.com/0x00-Community/rdocx", rev = "32b728c57e5902ab4a4e943c17656e9f6b4fa181" }
 
 [workspace]

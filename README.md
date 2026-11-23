@@ -56,25 +56,36 @@ on save and for the print preview. The reason, with the measurements behind it, 
 
 ## Setup
 
-You need:
+You need Node 24 or newer (the tests run TypeScript directly through Node's type stripping) and the `acde` CLI,
+for `npm run dev`, `npm run build` and the end-to-end checks.
 
-- Node 24 or newer. The tests run TypeScript directly through Node's type stripping.
-- The `acde` CLI, for `npm run dev`, `npm run build` and the end-to-end checks.
-- A Rust toolchain that can build rdocx (it pins 1.97.1) with the `wasm32-unknown-unknown` target, and
-  `wasm-bindgen` CLI 0.2.128, the exact version the engine's lockfile pins.
-- A checkout of rdocx next to this repository, at `../rdocx-editing-kit`. `engine/Cargo.toml` points at that path.
+The engine is not tracked in the repository. Get it one of two ways.
 
-The engine needs rdocx changes that are not upstream yet. They live on a local branch, `work/editing-kit-grok`, so
-a plain clone of rdocx `main` will not build the engine today.
+**Download the prebuilt engine.** No Rust needed:
 
 ```sh
 npm ci
-npm run engine      # builds engine/ to public/engine.wasm and src/engine/pkg/
-npm run dev         # starts the app in an acde dev session
+npm run engine:fetch   # downloads public/engine.wasm and src/engine/pkg/ from the release
+npm run dev            # starts the app in an acde dev session
 ```
 
-`public/engine.wasm` and `src/engine/pkg/` are not tracked. Run `npm run engine` after a fresh clone and after any
-change under `engine/` or in the rdocx checkout.
+**Build it from source.** You need `rustup` and the `wasm-bindgen` CLI at exactly 0.2.128
+(`cargo install wasm-bindgen-cli --version 0.2.128`). `engine/rust-toolchain.toml` pins Rust 1.97.1 with the
+`wasm32-unknown-unknown` target, and rustup installs it on the first build.
+
+```sh
+npm ci
+npm run engine         # builds engine/ to public/engine.wasm and src/engine/pkg/
+npm run dev
+```
+
+The engine depends on rdocx changes that are not upstream yet. They are public on the `folio` branch of
+[0x00-Community/rdocx](https://github.com/0x00-Community/rdocx), and `engine/Cargo.toml` pins the exact commit,
+so cargo fetches it on its own. To work on rdocx and the engine together, point cargo at a local checkout with a
+`[patch]` section in `engine/.cargo/config.toml`.
+
+Run `npm run engine` again after any change under `engine/`. The prebuilt engine matches the release it came
+from. After pulling changes to `engine/`, fetch again or build.
 
 A release build leaves out the function names, which saves 4 MB. To profile the engine with Rust function names,
 build with `WORD_ENGINE_NAMES=1 npm run engine`.
@@ -100,7 +111,7 @@ Optional environment variables:
 | Variable | Use |
 | --- | --- |
 | `WORD_TEST_DOC`, `WORD_TEST_REF_PDF` | A document of your own, and the PDF Word made from it, for the print checks and benchmarks. Nothing reads them unless they are set. |
-| `WORD_TEST_FONTS` | The folder the font tests read. The default is the fonts in the rdocx checkout. |
+| `WORD_TEST_FONTS` | The folder the font tests read. The default is `../rdocx-editing-kit/crates/oxml-layout/fonts`, an rdocx checkout beside this repository. Without either, those tests are skipped. |
 
 Measuring tools:
 

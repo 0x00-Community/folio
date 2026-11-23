@@ -6,7 +6,7 @@ import { aliasChain } from '../src/fonts.ts'
 import server from '../server.ts'
 import { extractFace, readFaceMetrics, readFaces, resolveFont, scanFonts } from './fonts.ts'
 
-// engine/Cargo.toml requires this kit, one directory above the repository.
+// The fonts of an rdocx checkout beside this repository. Without one, set WORD_TEST_FONTS or these tests are skipped.
 const directory =
   process.env.WORD_TEST_FONTS ||
   fileURLToPath(new URL('../../rdocx-editing-kit/crates/oxml-layout/fonts', import.meta.url))

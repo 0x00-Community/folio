@@ -640,6 +640,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "oxml-chart"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -651,6 +652,7 @@ dependencies = [
 [[package]]
 name = "oxml-core"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -659,6 +661,7 @@ dependencies = [
 [[package]]
 name = "oxml-drawing"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "oxml-core",
  "quick-xml",
@@ -667,6 +670,7 @@ dependencies = [
 [[package]]
 name = "oxml-layout"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "fontdb",
  "harfrust",
@@ -681,10 +685,12 @@ dependencies = [
 [[package]]
 name = "oxml-media"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 
 [[package]]
 name = "oxml-opc"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -694,6 +700,7 @@ dependencies = [
 [[package]]
 name = "oxml-pdf"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "jpeg-encoder",
  "miniz_oxide 0.9.1",
@@ -711,6 +718,7 @@ dependencies = [
 [[package]]
 name = "oxml-sml"
 version = "0.14.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "oxml-opc",
  "quick-xml",
@@ -904,6 +912,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "rdocx"
 version = "0.16.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -932,6 +941,7 @@ dependencies = [
 [[package]]
 name = "rdocx-html"
 version = "0.16.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "rdocx-oxml",
 ]
@@ -939,6 +949,7 @@ dependencies = [
 [[package]]
 name = "rdocx-layout"
 version = "0.16.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
@@ -950,6 +961,7 @@ dependencies = [
 [[package]]
 name = "rdocx-oxml"
 version = "0.16.2"
+source = "git+https://github.com/0x00-Community/rdocx?rev=32b728c57e5902ab4a4e943c17656e9f6b4fa181#32b728c57e5902ab4a4e943c17656e9f6b4fa181"
 dependencies = [
  "itoa",
  "oxml-core",

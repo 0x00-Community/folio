@@ -10,16 +10,16 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rdocx = { path = "../../rdocx-editing-kit/crates/rdocx", default-features = false }
-oxml-layout = { path = "../../rdocx-editing-kit/crates/oxml-layout", default-features = false }
-oxml-pdf = { path = "../../rdocx-editing-kit/crates/oxml-pdf" }
+rdocx = { git = "https://github.com/0x00-Community/rdocx", rev = "32b728c57e5902ab4a4e943c17656e9f6b4fa181", default-features = false }
+oxml-layout = { git = "https://github.com/0x00-Community/rdocx", rev = "32b728c57e5902ab4a4e943c17656e9f6b4fa181", default-features = false }
+oxml-pdf = { git = "https://github.com/0x00-Community/rdocx", rev = "32b728c57e5902ab4a4e943c17656e9f6b4fa181" }
 wasm-bindgen = "=0.2.128"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-rdocx = { path = "../../rdocx-editing-kit/crates/rdocx", default-features = false }
-oxml-pdf = { path = "../../rdocx-editing-kit/crates/oxml-pdf" }
+rdocx = { git = "https://github.com/0x00-Community/rdocx", rev = "32b728c57e5902ab4a4e943c17656e9f6b4fa181", default-features = false }
+oxml-pdf = { git = "https://github.com/0x00-Community/rdocx", rev = "32b728c57e5902ab4a4e943c17656e9f6b4fa181" }
 png = "=0.18.1"
 
 [profile.release]

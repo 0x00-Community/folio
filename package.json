@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\" \"server/**/*.test.ts\"",
     "e2e": "node scripts/e2e/all.mjs",
-    "engine": "sh scripts/build-engine.sh"
+    "engine": "sh scripts/build-engine.sh",
+    "engine:fetch": "node scripts/fetch-engine.mjs"
   },
   "devDependencies": {
     "@dopame/acde-api": "https://pkgs.dopame.ai/acde/0.0.10/acde-api-0.0.10.tar.gz",
