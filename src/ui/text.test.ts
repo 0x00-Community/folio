@@ -11,7 +11,10 @@ import {
   isDirty,
   sizeOptions,
   statusText,
+  stepZoom,
   styleOptions,
+  zoomAtEnd,
+  ZOOM_PERCENTS,
 } from './text.ts'
 import type { Translate } from './text.ts'
 
@@ -19,7 +22,6 @@ const translate: Translate = (key, values = {}) => {
   const templates: Record<string, string> = {
     'status.page': 'Page {page} of {pages}',
     'status.words': '{words} words',
-    'status.zoom': '{zoom}%',
   }
   const text = templates[key] ?? key
   return text.replace(/\{(\w+)\}/g, (all, name: string) => {
@@ -52,13 +54,28 @@ test('formatTitle puts the dirty mark before the file name', () => {
   assert.equal(formatTitle('未命名.docx', false, 'Word'), '未命名.docx - Word')
 })
 
-test('statusText shows the page, the word count and the zoom percent', () => {
-  const final = statusText({ page: 1, pages: 3, pagesFinal: true, words: 12 }, 1, translate)
-  assert.equal(final, 'Page 1 of 3 · 12 words · 100%')
-  const partial = statusText({ page: 2, pages: 4, pagesFinal: false, words: 0 }, 1.5, translate)
-  assert.equal(partial, 'Page 2 of ≥4 · 0 words · 150%')
-  const half = statusText({ page: 1, pages: 1, pagesFinal: true, words: 1 }, 0.5, translate)
-  assert.equal(half, 'Page 1 of 1 · 1 words · 50%')
+test('statusText shows the page and the word count', () => {
+  const final = statusText({ page: 1, pages: 3, pagesFinal: true, words: 12 }, translate)
+  assert.equal(final, 'Page 1 of 3 · 12 words')
+  const partial = statusText({ page: 2, pages: 4, pagesFinal: false, words: 0 }, translate)
+  assert.equal(partial, 'Page 2 of ≥4 · 0 words')
+  const half = statusText({ page: 1, pages: 1, pagesFinal: true, words: 1 }, translate)
+  assert.equal(half, 'Page 1 of 1 · 1 words')
+})
+
+test('stepZoom walks the zoom list and stays put at either end', () => {
+  assert.deepEqual(ZOOM_PERCENTS, [50, 75, 100, 125, 150, 200])
+  assert.equal(stepZoom(100, 1), 125)
+  assert.equal(stepZoom(100, -1), 75)
+  assert.equal(stepZoom(50, -1), 50)
+  assert.equal(stepZoom(50, 1), 75)
+  assert.equal(stepZoom(200, 1), 200)
+  assert.equal(stepZoom(200, -1), 150)
+  assert.equal(stepZoom(60, -1), 50)
+  assert.equal(stepZoom(60, 1), 75)
+  assert.deepEqual(zoomAtEnd(50), { out: true, in: false })
+  assert.deepEqual(zoomAtEnd(75), { out: false, in: false })
+  assert.deepEqual(zoomAtEnd(200), { out: false, in: true })
 })
 
 test('formatChord spells the platform modifier', () => {

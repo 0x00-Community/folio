@@ -40,17 +40,43 @@ export function formatTitle(name: string, dirty: boolean, appName: string): stri
 }
 
 /**
- * Page, word count and zoom, in that order. While pagination is still running, the page count is prefixed with ≥
- * so a partial count is not shown as final.
+ * Page and word count. While pagination is still running, the page count is prefixed with ≥
+ * so a partial count is not shown as final. Zoom is a control on the status bar, not part of this line.
  */
-export function statusText(status: StatusCounts, zoom: number, translate: Translate): string {
+export function statusText(status: StatusCounts, translate: Translate): string {
   const pages = status.pagesFinal ? String(status.pages) : `≥${status.pages}`
-  const percent = Math.round(zoom * 100)
   return [
     translate('status.page', { page: status.page, pages }),
     translate('status.words', { words: status.words }),
-    translate('status.zoom', { zoom: percent }),
   ].join(' · ')
+}
+
+export const ZOOM_PERCENTS = [50, 75, 100, 125, 150, 200] as const
+
+/** The next zoom percent in `direction`, staying on the last step at either end. */
+export function stepZoom(percent: number, direction: -1 | 1): number {
+  const first = ZOOM_PERCENTS[0]
+  const last = ZOOM_PERCENTS[ZOOM_PERCENTS.length - 1]
+  if (first === undefined || last === undefined) return percent
+  if (direction < 0) {
+    let chosen: number = first
+    for (const level of ZOOM_PERCENTS) {
+      if (level < percent) chosen = level
+      else break
+    }
+    return chosen
+  }
+  for (const level of ZOOM_PERCENTS) {
+    if (level > percent) return level
+  }
+  return last
+}
+
+/** True at the ends of the zoom list, where the step buttons are disabled. */
+export function zoomAtEnd(percent: number): { readonly out: boolean; readonly in: boolean } {
+  const first = ZOOM_PERCENTS[0] ?? percent
+  const last = ZOOM_PERCENTS[ZOOM_PERCENTS.length - 1] ?? percent
+  return { out: percent <= first, in: percent >= last }
 }
 
 /** "mod+shift+z" as a person would read it: ⌘⇧Z on macOS, Ctrl+Shift+Z elsewhere. */

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, freshPage, namedRef, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, fileMenuItem, freshPage, namedRef, summary, until } from './acde.mjs'
 
 // acde eval puts the expression on the command line. A long fixture is staged on the page instead.
 const ARG_LIMIT = 100 * 1024
@@ -522,7 +522,7 @@ await check('a point on a tall paragraph hits the line under the pointer', async
   let opened = false
   for (const name of ['New', '新建']) {
     try {
-      act(namedRef(name), 'click')
+      act(fileMenuItem(name), 'click')
       opened = true
       break
     } catch (error) {

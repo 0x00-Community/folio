@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { act, actClosing, assert, check, consoleErrors, ensureDev, evaluate, namedRef, root, summary, until } from './acde.mjs'
+import { act, actClosing, assert, check, closeFileMenu, consoleErrors, ensureDev, evaluate, fileMenuItem, namedRef, root, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: {
@@ -284,6 +284,7 @@ await check('Save and Save As sit after Open and show their chords', async () =>
   await openDocument(basic, 'basic.docx')
   const opened = evaluate(`window.__wordError || ''`)
   assert(!opened, opened)
+  fileMenuItem(ui.saveAs)
   const save = labeled(ui.save)
   const saveAs = labeled(ui.saveAs)
   assert(save && save.tag === 'BUTTON', 'Save button')
@@ -292,6 +293,7 @@ await check('Save and Save As sit after Open and show their chords', async () =>
   assert(save.title && (save.title.includes('Ctrl+S') || save.title.includes('⌘S')), `save title ${save.title}`)
   assert(save.title && !save.title.includes('Shift') && !save.title.includes('⇧'), `save title ${save.title}`)
   assert(saveAs.title && (saveAs.title.includes('Ctrl+Shift+S') || saveAs.title.includes('⌘⇧S')), `save as title ${saveAs.title}`)
+  closeFileMenu()
 })
 
 await check('edits save through Save As, and undo past that point is dirty again', async () => {
@@ -322,7 +324,7 @@ await check('edits save through Save As, and undo past that point is dirty again
   assert(before.body.some((block) => block.list && block.list.startsWith('bullet:')), 'list format')
   assert(before.body.some((block) => block.style === 'Heading1'), 'style')
   chooseSave(pathA)
-  act(buttonRef(ui.saveAs, false), 'click')
+  act(fileMenuItem(ui.saveAs), 'click')
   await until(`!document.title.startsWith('• ') && document.title.includes('basic.docx')`, { label: 'clean after Save As' })
   assert(labeled(ui.save).disabled === true, 'a clean document with a handle disables Save')
   copyFileSync(pathA, savedA)
@@ -382,7 +384,7 @@ await check('beforeclose on a dirty document keeps the window and the three butt
   await until(`document.querySelector('.unsaved').hidden === true`, { label: 'cancel' })
   assert(pageAlive() && dirty() === true, 'Cancel left the dirty document open')
   const text = evaluate(`window.__project().body.map((block) => block.text || '').join('\\n')`)
-  act(buttonRef(ui.new, false), 'click')
+  act(fileMenuItem(ui.new), 'click')
   assert(dialogInfo() && dialogInfo().hidden === false, 'New on a dirty document asks')
   act(buttonRef(ui.cancel, true), 'click')
   await until(`document.querySelector('.unsaved').hidden === true`, { label: 'new cancel' })
@@ -390,14 +392,14 @@ await check('beforeclose on a dirty document keeps the window and the three butt
   assert(still === text, 'Cancel kept the document')
   const snap = project()
   chooseSave(pathDialog)
-  act(buttonRef(ui.new, false), 'click')
+  act(fileMenuItem(ui.new), 'click')
   act(buttonRef(ui.save, true), 'click')
   await until(`!document.title.startsWith('• ') && document.title.includes(${JSON.stringify(ui.untitled)})`, { timeout: 20000, label: 'saved then new' })
   await openDocument(readFileSync(pathDialog).toString('base64'), 'dialog.docx')
   same(project(), snap, 'the dialog Save button wrote the document')
   act(sink(), 'focus')
   act(sink(), 'type', 'Q')
-  act(buttonRef(ui.new, false), 'click')
+  act(fileMenuItem(ui.new), 'click')
   act(buttonRef(ui.discard, true), 'click')
   await until(`!document.title.startsWith('• ') && document.title.includes(${JSON.stringify(ui.untitled)})`, { label: 'discard then new' })
   const fresh = evaluate(`window.__project().body.map((block) => block.text || '').join('')`)
@@ -438,7 +440,7 @@ await check('Save As keeps a title split into Hello 你好 and Quarterly report'
   act(sink(), 'type', 'Hello 你好')
   act(sink(), 'key', 'enter')
   chooseSave(pathTitle)
-  act(buttonRef(ui.saveAs, false), 'click')
+  act(fileMenuItem(ui.saveAs), 'click')
   await until(`!document.title.startsWith('• ')`, { timeout: 20000, label: 'clean after the title split' })
   await openDocument(readFileSync(pathTitle).toString('base64'), 'title.docx')
   const again = evaluate(`window.__wordError || ''`)

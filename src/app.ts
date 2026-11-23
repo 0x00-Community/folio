@@ -227,11 +227,10 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     onDeleteTable() {
       edit(() => { current().run(deleteEnclosingTable()) })
     },
-    onZoom(zoom) {
-      edit(() => { current().setZoom(zoom) })
-    },
+  }, host)
+  const status = createStatus(statusRoot, (zoom) => {
+    edit(() => { current().setZoom(zoom) })
   })
-  const status = createStatus(statusRoot)
   const dialog = createUnsavedDialog((choice) => { void answer(choice) })
   const pages = host
   const machine = new PreviewMachine<PrintLayout>()
@@ -298,7 +297,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       currentEditor.source.fontsUsed(currentEditor.state.doc),
       canSave(currentEditor.state.doc, file),
     )
-    status.render(currentEditor.status(), toolbar.zoom())
+    status.render(currentEditor.status())
   }
 
   function edit(run: () => void): void {
@@ -551,13 +550,13 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   appWindow.on('beforeclose', () => requestClose())
 
   function concealEditing(): void {
-    toolbarRoot.hidden = true
+    toolbar.setCovered(true)
     pages.hidden = true
   }
 
   function revealEditing(scroll: { top: number; left: number }): void {
     preview.hide()
-    toolbarRoot.hidden = false
+    toolbar.setCovered(false)
     pages.hidden = false
     const restore = (): void => {
       const phase = machine.phase

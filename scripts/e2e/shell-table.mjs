@@ -273,6 +273,20 @@ function sameJson(actual, expected, label) {
   assert(got === want, `${label}\n${got}\n${want}`)
 }
 
+function blockBox(label) {
+  return evaluate(`(() => {
+    const want = ${JSON.stringify(label)}
+    const el = [...document.querySelectorAll('.blk')].find((node) => node.getAttribute('aria-label') === want && node.getAttribute('aria-hidden') !== 'true')
+    const strip = document.querySelector('#tablebar')
+    if (!el || !strip) return null
+    return {
+      top: el.getBoundingClientRect().top,
+      stripHidden: strip.hidden === true,
+      stripHeight: strip.getBoundingClientRect().height,
+    }
+  })()`)
+}
+
 function scrollTo(label) {
   evaluate(`(() => {
     const want = ${JSON.stringify(label)}
@@ -309,6 +323,21 @@ await check('an out-of-range size disables confirm and Escape leaves the documen
   assert(row && row.disabled === true, `row tool ${JSON.stringify(row)}`)
   assert(column && column.disabled === true, `column tool ${JSON.stringify(column)}`)
   assert(remove && remove.disabled === true, `delete table ${JSON.stringify(remove)}`)
+  const strip = evaluate(`(() => {
+    const el = document.querySelector('#tablebar')
+    const button = el && el.querySelector('button')
+    if (!el || !button) return null
+    return {
+      hidden: el.hidden === true,
+      display: getComputedStyle(el).display,
+      height: el.getBoundingClientRect().height,
+      parked: button.offsetParent === null,
+    }
+  })()`)
+  assert(
+    strip && strip.hidden === true && strip.display === 'none' && strip.height === 0 && strip.parked === true,
+    `table bar outside a cell ${JSON.stringify(strip)}`,
+  )
   await openInsertDialog()
   replaceField(ui.rows, '21')
   replaceField(ui.columns, '11')
@@ -326,7 +355,17 @@ await check('an out-of-range size disables confirm and Escape leaves the documen
 
 await check('the table basic.docx already has round-trips a row insert', async () => {
   scrollTo('Apples')
+  const before = blockBox('Apples')
+  assert(before && before.stripHidden === true, `strip before the cell ${JSON.stringify(before)}`)
   act(namedRef('Apples'), 'click')
+  await until(`(() => {
+    const strip = document.querySelector('#tablebar')
+    return !!(strip && strip.hidden === false)
+  })()`, { label: 'table bar shown' })
+  const after = blockBox('Apples')
+  assert(after && after.stripHidden === false, `strip in a cell ${JSON.stringify(after)}`)
+  assert(Math.abs(after.top - before.top) <= 1, `block top ${before.top} -> ${after.top}`)
+  assert(Math.abs(after.stripHeight - 34) <= 1, `strip height ${after.stripHeight}`)
   const inside = controlState(ui.insert)
   const row = controlState(ui.rowBelow)
   const column = controlState(ui.columnRight)

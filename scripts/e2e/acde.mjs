@@ -138,7 +138,7 @@ export function act(target, action, arg) {
 
 // A button whose accessible name is exactly `name`. The dialog's own name contains its button labels,
 // so the first inspect hit is not always the button.
-export function buttonNamed(name) {
+export function buttonNamed(name, role = 'button') {
   let out = ''
   try {
     out = execFileSync('acde', ['inspect', '--find', name], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -148,13 +148,31 @@ export function buttonNamed(name) {
     out = `${stdout}\n${stderr}`
   }
   const line = out.split('\n').find((item) => {
-    const quoted = item.match(/button "([^"]*)"/)
-    return !!(quoted && quoted[1] === name)
+    const quoted = item.match(/(\w+) "([^"]*)"/)
+    return !!(quoted && quoted[1] === role && quoted[2] === name)
   })
-  if (!line) throw new Error(`no button ${JSON.stringify(name)}: ${out.trim()}`)
+  if (!line) throw new Error(`no ${role} ${JSON.stringify(name)}: ${out.trim()}`)
   const match = line.match(/\[(w\d+\.[\w.]+)\]/)
   if (!match) throw new Error(line)
   return match[1]
+}
+
+function menuOpen() {
+  return evaluate(`(() => {
+    const button = document.querySelector('button[aria-haspopup="menu"]')
+    return !!(button && button.getAttribute('aria-expanded') === 'true')
+  })()`) === true
+}
+
+// New, Open, Save As and Page setup live in the File menu. Open it, then take the item by its
+// accessible name, the same name the old toolbar button had.
+export function fileMenuItem(name) {
+  if (!menuOpen()) act(ref('button[aria-haspopup="menu"]'), 'click')
+  return buttonNamed(name, 'menuitem')
+}
+
+export function closeFileMenu() {
+  if (menuOpen()) act(ref('button[aria-haspopup="menu"]'), 'click')
 }
 
 // The click may close the window and drop the connection. That is the expected end: wait until

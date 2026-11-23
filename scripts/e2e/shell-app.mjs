@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, namedRef, root, shot, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, closeFileMenu, consoleErrors, ensureDev, evaluate, evidencePath, fileMenuItem, namedRef, ref, root, shot, summary, until } from './acde.mjs'
 
 // Strings mirror src/locales. The page's lang, set from ?lang= or the system language, picks the table.
 const STRINGS = {
@@ -26,12 +26,13 @@ const STRINGS = {
     bullet: 'Bulleted list',
     number: 'Numbered list',
     zoom: 'Zoom',
+    zoomOut: 'Zoom out',
+    zoomIn: 'Zoom in',
     untitled: 'Untitled.docx',
     discard: "Don't save",
     ask: 'Save changes to {name}?',
     statusPage: 'Page {page} of {pages}',
     statusWords: '{words} words',
-    statusZoom: '{zoom}%',
   },
   zh: {
     new: '新建',
@@ -55,12 +56,13 @@ const STRINGS = {
     bullet: '项目符号',
     number: '编号',
     zoom: '缩放',
+    zoomOut: '缩小',
+    zoomIn: '放大',
     untitled: '未命名.docx',
     discard: '不保存',
     ask: '是否保存对 {name} 的更改？',
     statusPage: '第 {page} 页，共 {pages} 页',
     statusWords: '{words} 个字',
-    statusZoom: '{zoom}%',
   },
 }
 
@@ -267,9 +269,24 @@ await check('basic.docx opens with a clean title', async () => {
   evaluate(`(() => { const view = document.querySelector('.page-view'); if (view) view.scrollTop = 0; return 1 })()`)
 })
 
+await check('the toolbar is one row at the default width', async () => {
+  const tops = evaluate(`(() => {
+    const groups = [...document.querySelectorAll('#toolbar > .group')]
+    return groups.map((el) => el.getBoundingClientRect().top)
+  })()`)
+  assert(Array.isArray(tops) && tops.length >= 8, `groups ${JSON.stringify(tops)}`)
+  const first = tops[0]
+  for (const top of tops) assert(Math.abs(top - first) <= 1, `group tops ${JSON.stringify(tops)}`)
+})
+
 await check('every toolbar control is found by its accessible name', async () => {
+  fileMenuItem(ui.new)
+  requireControl(ui.new, 'BUTTON')
+  requireControl(ui.open, 'BUTTON')
+  assert(labeled(ui.new).title === null, 'new has no keymap chord')
+  closeFileMenu()
   const buttons = [
-    'new', 'open', 'undo', 'redo', 'bold', 'italic', 'underline', 'strike',
+    'undo', 'redo', 'bold', 'italic', 'underline', 'strike',
     'alignLeft', 'alignCenter', 'alignRight', 'alignJustify', 'bullet', 'number',
   ]
   for (const key of buttons) requireControl(ui[key], 'BUTTON')
@@ -288,7 +305,6 @@ await check('every toolbar control is found by its accessible name', async () =>
   assert(undo.title && (undo.title.includes('Ctrl+Z') || undo.title.includes('⌘Z')), `undo title ${undo.title}`)
   assert(redo.title && (redo.title.includes('Ctrl+Y') || redo.title.includes('⌘Y')), `redo title ${redo.title}`)
   assert(labeled(ui.strike).title === ui.strike, 'strike has no keymap chord')
-  assert(labeled(ui.new).title === null, 'new has no keymap chord')
 })
 
 await check('bold, italic, underline and strike toggle on a selected word', async () => {
@@ -359,13 +375,10 @@ await check('undo reverts the last change and enables redo', async () => {
 await check('the status bar shows the page count and the word count', async () => {
   const reported = evaluate(`window.__word.editor.status()`)
   const text = evaluate(`document.querySelector('[role="status"]').textContent`)
-  const zoom = labeled(ui.zoom)
   const pages = reported.pagesFinal ? String(reported.pages) : `≥${reported.pages}`
+  const line = `${fill(ui.statusPage, { page: reported.page, pages })} · ${fill(ui.statusWords, { words: reported.words })}`
   console.log(`  status ${JSON.stringify(text)} reported ${JSON.stringify(reported)}`)
-  assert(typeof text === 'string' && text.length > 0, 'empty status')
-  assert(text.includes(fill(ui.statusPage, { page: reported.page, pages })), `page phrase missing in ${text}`)
-  assert(text.includes(fill(ui.statusWords, { words: reported.words })), `word phrase missing in ${text}`)
-  assert(text.includes(fill(ui.statusZoom, { zoom: zoom.value })), `zoom phrase missing in ${text}`)
+  assert(text === line, `status ${JSON.stringify(text)} expected ${JSON.stringify(line)}`)
 })
 
 await check('the window title carries the dirty mark after an edit', async () => {
@@ -376,7 +389,7 @@ await check('the window title carries the dirty mark after an edit', async () =>
 })
 
 await check('new document clears the file and the dirty mark', async () => {
-  act(namedRef(ui.new), 'click')
+  act(fileMenuItem(ui.new), 'click')
   const asked = dialogInfo()
   assert(asked && asked.hidden === false, 'New on a dirty document asks')
   assert(asked.name === fill(ui.ask, { name: 'basic.docx' }), `dialog name ${asked.name}`)
@@ -391,7 +404,7 @@ await check('new document clears the file and the dirty mark', async () => {
 
 await check('open by picker loads the chosen document', async () => {
   chooseOpen(`${root}fixtures/basic.docx`)
-  act(namedRef(ui.open), 'click')
+  act(fileMenuItem(ui.open), 'click')
   await until(`(() => {
     const body = window.__word && window.__word.editor && window.__word.editor.state.doc.body
     if (!body) return false
@@ -610,6 +623,31 @@ await check('undo twice restores the original font and size', async () => {
   assert(bar.sizePt === shapedPoint, `toolbar size ${bar.sizePt} expected ${shapedPoint}`)
   assert(font.value === shapedFont, `font select ${font.value}`)
   assert(size.value === String(shapedPoint), `size select ${size.value}`)
+})
+
+await check('zoom steps live in the status bar and stop at the ends', async () => {
+  const place = evaluate(`(() => {
+    const select = [...document.querySelectorAll('select')].find((node) => node.getAttribute('aria-label') === ${JSON.stringify(ui.zoom)})
+    if (!select) return null
+    return { inStatus: !!select.closest('#status'), inToolbar: !!select.closest('#toolbar') }
+  })()`)
+  assert(place && place.inStatus === true && place.inToolbar === false, `zoom place ${JSON.stringify(place)}`)
+  assert(labeled(ui.zoomOut).disabled === false, 'zoom out disabled at 100')
+  assert(labeled(ui.zoomIn).disabled === false, 'zoom in disabled at 100')
+  act(ref('#status select.zoom'), 'select', '50')
+  assert(labeled(ui.zoom).value === '50', `zoom ${labeled(ui.zoom).value}`)
+  assert(labeled(ui.zoomOut).disabled === true, 'zoom out stays enabled at 50')
+  assert(labeled(ui.zoomIn).disabled === false, 'zoom in disabled at 50')
+  act(namedRef(ui.zoomIn), 'click')
+  assert(labeled(ui.zoom).value === '75', `zoom after step in ${labeled(ui.zoom).value}`)
+  assert(labeled(ui.zoomOut).disabled === false, 'zoom out disabled at 75')
+  act(ref('#status select.zoom'), 'select', '200')
+  assert(labeled(ui.zoomIn).disabled === true, 'zoom in stays enabled at 200')
+  assert(labeled(ui.zoomOut).disabled === false, 'zoom out disabled at 200')
+  act(namedRef(ui.zoomOut), 'click')
+  assert(labeled(ui.zoom).value === '150', `zoom after step out ${labeled(ui.zoom).value}`)
+  act(ref('#status select.zoom'), 'select', '100')
+  assert(labeled(ui.zoom).value === '100', `zoom restored ${labeled(ui.zoom).value}`)
 })
 
 await check('console has no errors', async () => {

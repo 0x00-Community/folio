@@ -7,6 +7,8 @@ import { t } from '../i18n.ts'
 import type { Doc } from '../model.ts'
 import { icon } from './icons.ts'
 import type { IconName } from './icons.ts'
+import { createFileMenu } from './menu.ts'
+import type { FileMenuCommand, FileMenuId } from './menu.ts'
 import { commandTitle, fontOptions, sizeOptions, styleOptions } from './text.ts'
 import type { StyleOption } from './text.ts'
 
@@ -35,21 +37,26 @@ export interface ToolbarHandlers {
   onTableColumn(where: 'left' | 'right'): void
   onDeleteColumns(): void
   onDeleteTable(): void
-  onZoom(zoom: number): void
 }
 
 export interface ToolbarView {
   render(state: ToolbarState, doc: Doc, usedFonts: readonly string[], canSave: boolean): void
-  zoom(): number
+  /** Preview covers the editing chrome. The table strip hides without moving the document. */
+  setCovered(covered: boolean): void
 }
 
 const ALIGNS: readonly Align[] = ['left', 'center', 'right', 'justify']
-const ZOOMS = [50, 75, 100, 125, 150, 200] as const
 
-export function createToolbar(root: HTMLElement, platform: Platform, handlers: ToolbarHandlers): ToolbarView {
+export function createToolbar(
+  root: HTMLElement,
+  platform: Platform,
+  handlers: ToolbarHandlers,
+  scroller: HTMLElement,
+): ToolbarView {
   root.setAttribute('aria-label', t('toolbar'))
   let painting = false
-  let zoom = 1
+  let covered = false
+  let tableOpen = false
   let styleKey = ''
   let fontKey = ''
   let sizeKey = ''
@@ -64,27 +71,15 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   const fontGuard = { n: 0, ignore: false }
   const sizeGuard = { n: 0, ignore: false }
 
-  const file = group(root)
+  const fileMenu = createFileMenu(root, platform, fileCommands(handlers))
   const saveButton = iconButton(t('save'), 'save', platform, () => handlers.onSave(), 'save')
-  file.append(
-    textButton(t('new'), platform, () => handlers.onNew(), 'doc'),
-    textButton(t('open'), platform, () => handlers.onOpen(), 'folder'),
-    saveButton,
-    textButton(t('saveAs'), platform, () => handlers.onSaveAs(), 'save-as', 'saveAs'),
-  )
+  group(root).append(fileMenu.button, saveButton)
+
   const undo = iconButton(t('undo'), 'undo', platform, () => handlers.onUndo(), 'undo')
   const redo = iconButton(t('redo'), 'redo', platform, () => handlers.onRedo(), 'redo')
   undo.disabled = true
   redo.disabled = true
   group(root).append(undo, redo)
-
-  const marks = {
-    bold: toggleButton(t('bold'), 'bold', platform, () => handlers.onMark('bold'), 'bold'),
-    italic: toggleButton(t('italic'), 'italic', platform, () => handlers.onMark('italic'), 'italic'),
-    underline: toggleButton(t('underline'), 'underline', platform, () => handlers.onMark('underline'), 'underline'),
-    strike: toggleButton(t('strike'), null, platform, () => handlers.onMark('strike'), 'strike'),
-  }
-  group(root).append(marks.bold, marks.italic, marks.underline, marks.strike)
 
   const fontSelect = labeledSelect(t('font'), 'font')
   watchSelect(fontSelect, () => {
@@ -101,6 +96,28 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
     handlers.onSize(value)
   })
   group(root).append(fontSelect, sizeSelect)
+
+  const marks = {
+    bold: toggleButton(t('bold'), 'bold', platform, () => handlers.onMark('bold'), 'bold'),
+    italic: toggleButton(t('italic'), 'italic', platform, () => handlers.onMark('italic'), 'italic'),
+    underline: toggleButton(t('underline'), 'underline', platform, () => handlers.onMark('underline'), 'underline'),
+    strike: toggleButton(t('strike'), null, platform, () => handlers.onMark('strike'), 'strike'),
+  }
+  group(root).append(marks.bold, marks.italic, marks.underline, marks.strike)
+
+  const bullet = toggleButton(t('list.bullet'), null, platform, () => handlers.onList('bullet'), 'list-bullet')
+  const numbered = toggleButton(t('list.number'), null, platform, () => handlers.onList('decimal'), 'list-number')
+  const decrease = iconButton(t('list.decrease'), null, platform, () => handlers.onIndent(-1), 'indent-decrease')
+  const increase = iconButton(t('list.increase'), null, platform, () => handlers.onIndent(1), 'indent-increase')
+  group(root).append(bullet, numbered, decrease, increase)
+
+  const alignButtons = {
+    left: toggleButton(t('align.left'), null, platform, () => handlers.onAlign('left'), 'align-left'),
+    center: toggleButton(t('align.center'), null, platform, () => handlers.onAlign('center'), 'align-center'),
+    right: toggleButton(t('align.right'), null, platform, () => handlers.onAlign('right'), 'align-right'),
+    justify: toggleButton(t('align.justify'), null, platform, () => handlers.onAlign('justify'), 'align-justify'),
+  }
+  group(root).append(alignButtons.left, alignButtons.center, alignButtons.right, alignButtons.justify)
 
   const styleSelect = labeledSelect(t('style'), 'style')
   watchSelect(styleSelect, () => {
@@ -131,57 +148,36 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
     refreshInstalled()
   })
 
-  const alignButtons = {
-    left: toggleButton(t('align.left'), null, platform, () => handlers.onAlign('left'), 'align-left'),
-    center: toggleButton(t('align.center'), null, platform, () => handlers.onAlign('center'), 'align-center'),
-    right: toggleButton(t('align.right'), null, platform, () => handlers.onAlign('right'), 'align-right'),
-    justify: toggleButton(t('align.justify'), null, platform, () => handlers.onAlign('justify'), 'align-justify'),
-  }
-  group(root).append(alignButtons.left, alignButtons.center, alignButtons.right, alignButtons.justify)
-
-  const bullet = toggleButton(t('list.bullet'), null, platform, () => handlers.onList('bullet'), 'list-bullet')
-  const numbered = toggleButton(t('list.number'), null, platform, () => handlers.onList('decimal'), 'list-number')
-  const decrease = iconButton(t('list.decrease'), null, platform, () => handlers.onIndent(-1), 'indent-decrease')
-  const increase = iconButton(t('list.increase'), null, platform, () => handlers.onIndent(1), 'indent-increase')
-  group(root).append(bullet, numbered, decrease, increase)
-  group(root).append(
-    iconButton(t('pageSetup'), null, platform, () => handlers.onPageSetup(), 'page-setup'),
-    textButton(t('print.preview'), platform, () => handlers.onPrint(), 'print'),
-  )
-
   const insertTable = iconButton(t('table.insert'), null, platform, () => handlers.onInsertTable(), 'table')
   const insertPicture = iconButton(t('image.insert'), null, platform, () => handlers.onInsertImage(), 'image')
   group(root).append(insertTable, insertPicture)
-  const rowAbove = iconButton(t('table.rowAbove'), null, platform, () => handlers.onTableRow('above'), 'table-row-above')
-  const rowBelow = iconButton(t('table.rowBelow'), null, platform, () => handlers.onTableRow('below'), 'table-row-below')
-  const deleteRow = iconButton(t('table.deleteRow'), null, platform, () => handlers.onDeleteRows(), 'table-row-delete')
-  const columnLeft = iconButton(t('table.columnLeft'), null, platform, () => handlers.onTableColumn('left'), 'table-col-left')
-  const columnRight = iconButton(t('table.columnRight'), null, platform, () => handlers.onTableColumn('right'), 'table-col-right')
-  const deleteColumn = iconButton(t('table.deleteColumn'), null, platform, () => handlers.onDeleteColumns(), 'table-col-delete')
-  const deleteTableButton = iconButton(t('table.delete'), null, platform, () => handlers.onDeleteTable(), 'table-delete')
+  group(root, true).append(iconButton(t('print.preview'), null, platform, () => handlers.onPrint(), 'print'))
+
+  const strip = document.createElement('div')
+  strip.id = 'tablebar'
+  strip.className = 'tablebar'
+  strip.hidden = true
+  strip.setAttribute('role', 'toolbar')
+  strip.setAttribute('aria-label', t('table.bar'))
+  const caption = document.createElement('span')
+  caption.className = 'caption'
+  caption.setAttribute('aria-hidden', 'true')
+  caption.textContent = t('table.bar')
+  strip.append(caption)
+  const rowAbove = toolButton(t('table.rowAbove'), platform, () => handlers.onTableRow('above'), 'table-row-above')
+  const rowBelow = toolButton(t('table.rowBelow'), platform, () => handlers.onTableRow('below'), 'table-row-below')
+  const deleteRow = toolButton(t('table.deleteRow'), platform, () => handlers.onDeleteRows(), 'table-row-delete')
+  const columnLeft = toolButton(t('table.columnLeft'), platform, () => handlers.onTableColumn('left'), 'table-col-left')
+  const columnRight = toolButton(t('table.columnRight'), platform, () => handlers.onTableColumn('right'), 'table-col-right')
+  const deleteColumn = toolButton(t('table.deleteColumn'), platform, () => handlers.onDeleteColumns(), 'table-col-delete')
+  const deleteTableButton = toolButton(t('table.delete'), platform, () => handlers.onDeleteTable(), 'table-delete')
+  cluster(strip, false).append(rowAbove, rowBelow, deleteRow)
+  cluster(strip, true).append(columnLeft, columnRight, deleteColumn)
+  cluster(strip, true).append(deleteTableButton)
   for (const button of [rowAbove, rowBelow, deleteRow, columnLeft, columnRight, deleteColumn, deleteTableButton]) {
     button.disabled = true
   }
-  group(root).append(rowAbove, rowBelow, deleteRow, columnLeft, columnRight, deleteColumn, deleteTableButton)
-
-  const zoomSelect = labeledSelect(t('zoom'), 'zoom')
-  for (const percent of ZOOMS) {
-    const option = document.createElement('option')
-    option.value = String(percent)
-    option.textContent = `${percent}%`
-    zoomSelect.append(option)
-  }
-  zoomSelect.value = '100'
-  watchSelect(zoomSelect, () => {
-    if (painting) return
-    const percent = Number(zoomSelect.value)
-    if (!Number.isFinite(percent) || percent <= 0) return
-    const next = percent / 100
-    if (next === zoom) return
-    zoom = next
-    handlers.onZoom(zoom)
-  })
-  group(root, true).append(zoomSelect)
+  root.insertAdjacentElement('afterend', strip)
 
   function optionsFor(doc: Doc): readonly StyleOption[] {
     const styles = doc.styles.paragraph
@@ -235,12 +231,44 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
     if (sizeSelect.value !== value) sizeSelect.value = value
   }
 
+  // The strip pushes #pages down. Match scrollTop to that shift in the same turn, or the
+  // text moves under the pointer. PageView watches scrollTop to mount pages; it does not
+  // write scrollTop back. overflow-anchor is off only for the write so it cannot add a second shift.
+  function syncStrip(inTable: boolean, shift: boolean): void {
+    const show = inTable && !covered
+    const showing = !strip.hidden
+    tableOpen = inTable
+    if (show === showing) {
+      root.classList.toggle('with-table', show)
+      return
+    }
+    const previous = scroller.style.overflowAnchor
+    if (shift) scroller.style.overflowAnchor = 'none'
+    try {
+      const before = shift ? scroller.getBoundingClientRect().top : 0
+      strip.hidden = !show
+      root.classList.toggle('with-table', show)
+      if (!shift) return
+      const delta = scroller.getBoundingClientRect().top - before
+      if (Math.abs(delta) >= 0.5) scroller.scrollTop += delta
+    } finally {
+      if (shift) scroller.style.overflowAnchor = previous
+    }
+  }
+
   return {
-    zoom: () => zoom,
+    setCovered(next) {
+      if (covered === next) return
+      covered = next
+      root.hidden = next
+      fileMenu.close(false)
+      syncStrip(tableOpen, false)
+    },
     render(state, doc, used, canSave) {
       painting = true
       fontReady = true
       try {
+        fileMenu.setDisabled('save', !canSave)
         if (saveButton.disabled !== !canSave) saveButton.disabled = !canSave
         if (undo.disabled !== !state.canUndo) undo.disabled = !state.canUndo
         if (redo.disabled !== !state.canRedo) redo.disabled = !state.canRedo
@@ -266,8 +294,7 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
         paintStyles(doc, state.style)
         paintFont(used, state.font)
         paintSize(state.sizePt)
-        const percent = String(Math.round(zoom * 100))
-        if (zoomSelect.value !== percent) zoomSelect.value = percent
+        syncStrip(state.inTable, !covered)
       } finally {
         painting = false
       }
@@ -275,12 +302,32 @@ export function createToolbar(root: HTMLElement, platform: Platform, handlers: T
   }
 }
 
-function group(root: HTMLElement, atEnd = false): HTMLElement {
+function fileCommands(handlers: ToolbarHandlers): Readonly<Record<FileMenuId, FileMenuCommand>> {
+  // Open has no keymap chord, so the menu shows none. shortcutChord is the only source.
+  return {
+    new: { label: t('new'), icon: 'doc', shortcut: null, showTitle: false, run: () => handlers.onNew() },
+    open: { label: t('open'), icon: 'folder', shortcut: null, showTitle: false, run: () => handlers.onOpen() },
+    save: { label: t('save'), icon: 'save', shortcut: 'save', showTitle: true, run: () => handlers.onSave() },
+    saveAs: { label: t('saveAs'), icon: 'save-as', shortcut: 'saveAs', showTitle: true, run: () => handlers.onSaveAs() },
+    pageSetup: { label: t('pageSetup'), icon: 'page-setup', shortcut: null, showTitle: true, run: () => handlers.onPageSetup() },
+    print: { label: t('print.preview'), icon: 'print', shortcut: null, showTitle: false, run: () => handlers.onPrint() },
+  }
+}
+
+function group(root: HTMLElement, end = false): HTMLElement {
   const el = document.createElement('div')
-  el.className = atEnd ? 'group zoom' : 'group'
-  const leading = root.childElementCount > 0
+  el.className = end ? 'group end' : 'group'
+  const divided = !end && root.querySelector('.group') !== null
   root.append(el)
-  if (leading) el.append(divider())
+  if (divided) el.append(divider())
+  return el
+}
+
+function cluster(parent: HTMLElement, divided: boolean): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'group'
+  if (divided) el.append(divider())
+  parent.append(el)
   return el
 }
 
@@ -289,16 +336,6 @@ function divider(): HTMLElement {
   el.className = 'divider'
   el.setAttribute('aria-hidden', 'true')
   return el
-}
-
-function textButton(
-  label: string,
-  platform: Platform,
-  onClick: () => void,
-  graphic: IconName,
-  shortcut: ShortcutName | null = null,
-): HTMLButtonElement {
-  return commandButton(label, shortcut, platform, onClick, graphic, true)
 }
 
 function iconButton(
@@ -311,6 +348,15 @@ function iconButton(
   return commandButton(label, shortcut, platform, onClick, graphic, false)
 }
 
+function toolButton(
+  label: string,
+  platform: Platform,
+  onClick: () => void,
+  graphic: IconName,
+): HTMLButtonElement {
+  return commandButton(label, null, platform, onClick, graphic, true)
+}
+
 function commandButton(
   label: string,
   shortcut: ShortcutName | null,
@@ -321,12 +367,15 @@ function commandButton(
 ): HTMLButtonElement {
   const el = document.createElement('button')
   el.type = 'button'
-  if (withLabel) el.className = 'labeled'
   el.setAttribute('aria-label', label)
   el.append(icon(graphic))
-  if (withLabel) el.append(label)
+  if (withLabel) {
+    const text = document.createElement('span')
+    text.textContent = label
+    el.append(text)
+  }
   const chord = shortcut === null ? null : shortcutChord(platform, shortcut)
-  if (!withLabel || chord) el.title = commandTitle(label, chord, platform)
+  el.title = commandTitle(label, chord, platform)
   el.addEventListener('click', onClick)
   return el
 }

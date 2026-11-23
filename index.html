@@ -6,15 +6,17 @@
     <title>Word</title>
     <style>
       :root {
-        --chrome-bg: #f7f7f8;
-        --chrome-border: #dcdde1;
-        --canvas-bg: #e9eaed;
+        --chrome-bg: #ffffff;
+        --status-bg: #f3f4f6;
+        --chrome-border: #e1e3e8;
+        --canvas-bg: #eceef2;
         --text: #1f2328;
-        --text-muted: #6b7280;
-        --control-hover: rgba(0,0,0,.06);
-        --control-active: rgba(0,0,0,.10);
-        --accent: #2b6cdf;
-        --accent-soft: rgba(43,108,223,.14);
+        --text-muted: #676e7a;
+        --control-hover: rgba(15,23,42,.07);
+        --control-active: rgba(15,23,42,.12);
+        --accent: #185abd;
+        --accent-soft: rgba(24,90,189,.13);
+        --chrome-shadow: 0 1px 2px rgba(15,23,42,.06), 0 2px 8px rgba(15,23,42,.05);
         --field-bg: #ffffff;
         --error-bg: #fde8e8;
         --error-text: #6b1d1d;
@@ -22,15 +24,17 @@
       }
       @media (prefers-color-scheme: dark) {
         :root {
-          --chrome-bg: #26272b;
-          --chrome-border: #3a3b40;
-          --canvas-bg: #1b1c1f;
+          --chrome-bg: #2b2c30;
+          --status-bg: #232427;
+          --chrome-border: #3d3e44;
+          --canvas-bg: #1a1b1e;
           --text: #e6e7ea;
           --text-muted: #9aa0aa;
-          --control-hover: rgba(255,255,255,.08);
-          --control-active: rgba(255,255,255,.14);
-          --accent: #6ea0ff;
-          --accent-soft: rgba(110,160,255,.22);
+          --control-hover: rgba(255,255,255,.09);
+          --control-active: rgba(255,255,255,.15);
+          --accent: #7aa7ff;
+          --accent-soft: rgba(122,167,255,.24);
+          --chrome-shadow: 0 1px 2px rgba(0,0,0,.4);
           --field-bg: #1f2023;
           --error-bg: #3a2224;
           --error-text: #ffb4b4;
@@ -51,37 +55,44 @@
         min-height: 0;
         height: auto;
       }
-      .toolbar, .status, .open-error {
+      .toolbar, .tablebar, .status, .open-error {
         flex: none;
         font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
       }
       .toolbar {
         /* acdert hit testing ignores the scroller clip, so content scrolled above the box covers this bar. */
         position: relative;
-        z-index: 1;
+        z-index: 2;
         box-sizing: border-box;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        min-height: 44px;
-        padding: 0 8px;
+        min-height: 42px;
+        padding: 0 10px;
         row-gap: 4px;
         color: var(--text);
         background: var(--chrome-bg);
         border-bottom: 1px solid var(--chrome-border);
+        box-shadow: var(--chrome-shadow);
+      }
+      .toolbar.with-table {
+        border-bottom: 0;
+        box-shadow: none;
       }
       .toolbar .group {
         display: flex;
         flex: none;
         align-items: center;
+        height: 28px;
       }
-      .toolbar .group.zoom { margin-left: auto }
-      .toolbar .group > :not(.divider) + :not(.divider) { margin-left: 4px }
-      .toolbar .divider {
+      .toolbar .group.end { margin-left: auto }
+      .toolbar .group > :not(.divider) + :not(.divider) { margin-left: 2px }
+      .toolbar .divider,
+      .tablebar .divider {
         flex: none;
         width: 1px;
-        height: 20px;
-        margin: 0 8px;
+        height: 18px;
+        margin: 0 6px;
         background: var(--chrome-border);
       }
       .toolbar button {
@@ -90,12 +101,12 @@
         flex: none;
         align-items: center;
         justify-content: center;
-        width: 30px;
-        height: 30px;
+        width: 28px;
+        height: 28px;
         margin: 0;
         padding: 0;
         border: 0;
-        border-radius: 6px;
+        border-radius: 5px;
         appearance: none;
         background: transparent;
         color: var(--text);
@@ -104,39 +115,48 @@
         white-space: nowrap;
         user-select: none;
       }
-      .toolbar button.labeled {
+      .toolbar button.file {
         width: auto;
-        padding: 0 8px 0 6px;
-        gap: 6px;
+        padding: 0 8px;
+        gap: 2px;
+        font-weight: 600;
+      }
+      .toolbar button.file[aria-expanded="true"] {
+        background: var(--control-active);
       }
       .toolbar button svg,
-      .toolbar button .glyph {
+      .toolbar button .glyph,
+      .tablebar button svg,
+      .file-menu button svg {
         display: block;
         width: 18px;
         height: 18px;
         flex: none;
       }
-      .toolbar button svg { overflow: visible }
+      .toolbar button svg,
+      .tablebar button svg,
+      .file-menu button svg { overflow: visible }
       .toolbar button .glyph {
         position: relative;
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: 16px;
+        font-family: system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+        font-size: 14px;
+        font-weight: 700;
         line-height: 18px;
         text-align: center;
       }
-      .toolbar button .glyph.bold { font-weight: 700 }
       .toolbar button .glyph.italic { font-style: italic }
       .toolbar button .glyph.underline::after,
       .toolbar button .glyph.strike::after {
         content: "";
         position: absolute;
-        height: 1.6px;
+        height: 1.5px;
         border-radius: 1px;
         background: currentColor;
       }
       .toolbar button .glyph.underline::after { left: 3px; right: 3px; bottom: 1px }
-      .toolbar button .glyph.strike::after { left: 2px; right: 2px; top: 7.4px }
-      .toolbar button:hover {
+      .toolbar button .glyph.strike::after { left: 2px; right: 2px; top: 8px }
+      .toolbar button:hover,
+      .tablebar button:hover {
         background: var(--control-hover);
       }
       .toolbar button[aria-pressed="mixed"] {
@@ -145,60 +165,234 @@
       .toolbar button[aria-pressed="true"] {
         background: var(--accent-soft);
         color: var(--accent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
       }
-      .toolbar button:active {
+      .toolbar button:active,
+      .tablebar button:active {
         background: var(--control-active);
       }
-      .toolbar button:disabled {
-        opacity: 0.4;
+      .toolbar button:disabled,
+      .tablebar button:disabled {
+        opacity: 0.38;
       }
       .toolbar button:disabled:hover,
-      .toolbar button:disabled:active {
+      .toolbar button:disabled:active,
+      .tablebar button:disabled:hover,
+      .tablebar button:disabled:active {
         background: transparent;
+        box-shadow: none;
       }
       .toolbar button:focus,
-      .toolbar select:focus {
+      .toolbar select:focus,
+      .tablebar button:focus,
+      .status button:focus,
+      .status select:focus,
+      .file-menu button:focus {
         outline: none;
       }
       .toolbar button:focus-visible,
-      .toolbar select:focus-visible {
+      .toolbar select:focus-visible,
+      .tablebar button:focus-visible,
+      .status button:focus-visible,
+      .status select:focus-visible,
+      .file-menu button:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 1px;
       }
       .toolbar select {
         box-sizing: border-box;
         flex: none;
-        height: 28px;
+        height: 26px;
         margin: 0;
         /* acdert draws its own chevron inside the content box even with appearance: none, so the page adds none. */
         padding: 0 4px 0 8px;
         border: 1px solid var(--chrome-border);
-        border-radius: 6px;
+        border-radius: 5px;
         appearance: none;
         background-color: var(--field-bg);
         color: var(--text);
         font: inherit;
-        line-height: 26px;
+        line-height: 24px;
       }
       .toolbar select:hover {
         border-color: var(--text-muted);
       }
-      .toolbar select.font { width: 12em }
-      .toolbar select.size { width: 5em }
-      .toolbar select.style { width: 9em }
-      .toolbar select.zoom { width: 6em }
-      .status {
+      .toolbar select.font { width: 11em }
+      .toolbar select.size { width: 4.5em }
+      .toolbar select.style { width: 8.5em }
+      .file-menu {
+        /* Its own stacking position, above #pages. The bar's overflow would lose the hit to the scroller. */
+        position: fixed;
+        z-index: 2;
         box-sizing: border-box;
-        height: 26px;
-        padding: 0 10px;
-        overflow: hidden;
-        font-size: 12px;
-        line-height: 25px;
+        display: flex;
+        flex-direction: column;
+        min-width: 220px;
+        margin: 0;
+        padding: 4px;
+        color: var(--text);
+        background: var(--chrome-bg);
+        border: 1px solid var(--chrome-border);
+        border-radius: 8px;
+        box-shadow: var(--chrome-shadow);
+        font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+      }
+      .file-menu button {
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        width: 100%;
+        height: 28px;
+        margin: 0;
+        padding: 0 8px;
+        gap: 8px;
+        border: 0;
+        border-radius: 5px;
+        appearance: none;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-weight: 400;
+        line-height: 1;
+        text-align: left;
         white-space: nowrap;
-        text-overflow: ellipsis;
+        user-select: none;
+      }
+      .file-menu button:hover { background: var(--control-hover) }
+      .file-menu button:active { background: var(--control-active) }
+      .file-menu button:disabled { opacity: 0.38 }
+      .file-menu button:disabled:hover,
+      .file-menu button:disabled:active { background: transparent }
+      .file-menu .name { min-width: 0 }
+      .file-menu .chord {
+        margin-left: auto;
+        padding-left: 16px;
         color: var(--text-muted);
+        font-size: 12px;
+      }
+      .file-menu .sep {
+        height: 1px;
+        margin: 4px 8px;
+        background: var(--chrome-border);
+      }
+      .tablebar {
+        position: relative;
+        z-index: 2;
+        box-sizing: border-box;
+        display: flex;
+        flex: none;
+        align-items: center;
+        height: 34px;
+        padding: 0 10px;
+        color: var(--text);
         background: var(--chrome-bg);
         border-top: 1px solid var(--chrome-border);
+        box-shadow: var(--chrome-shadow);
+        white-space: nowrap;
+      }
+      .tablebar .caption {
+        flex: none;
+        margin-right: 8px;
+        color: var(--text-muted);
+      }
+      .tablebar .group {
+        display: flex;
+        flex: none;
+        align-items: center;
+      }
+      .tablebar .group > :not(.divider) + :not(.divider) { margin-left: 2px }
+      .tablebar button {
+        box-sizing: border-box;
+        display: inline-flex;
+        flex: none;
+        align-items: center;
+        height: 26px;
+        margin: 0;
+        padding: 0 8px;
+        gap: 6px;
+        border: 0;
+        border-radius: 5px;
+        appearance: none;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        line-height: 1;
+        white-space: nowrap;
+        user-select: none;
+      }
+      .status {
+        /* The zoom controls take clicks, and acdert hit testing ignores the scroller clip, as for the toolbar. */
+        position: relative;
+        z-index: 1;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        height: 28px;
+        padding: 0 10px;
+        font-size: 12px;
+        line-height: 22px;
+        color: var(--text-muted);
+        background: var(--status-bg);
+        border-top: 1px solid var(--chrome-border);
+      }
+      .status-text {
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .status-zoom {
+        display: flex;
+        flex: none;
+        align-items: center;
+        gap: 2px;
+      }
+      .status button {
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 5px;
+        appearance: none;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+      }
+      .status button svg {
+        display: block;
+        width: 18px;
+        height: 18px;
+      }
+      .status button:hover { background: var(--control-hover) }
+      .status button:active { background: var(--control-active) }
+      .status button:disabled { opacity: 0.38 }
+      .status button:disabled:hover,
+      .status button:disabled:active { background: transparent }
+      .status select.zoom {
+        box-sizing: border-box;
+        height: 22px;
+        width: 5em;
+        margin: 0;
+        /* acdert draws its own chevron inside the content box even with appearance: none, so the page adds none. */
+        padding: 0 2px 0 6px;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        appearance: none;
+        background-color: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        line-height: 20px;
+      }
+      .status select.zoom:hover {
+        border-color: var(--chrome-border);
+        background-color: var(--field-bg);
       }
       .open-error {
         /* This band sits above the scroller, so the same clip-blind hit testing would cover it. */
@@ -232,6 +426,7 @@
       }
       /* Author `display` beats the user-agent `[hidden]` rule, so a hidden bar would stay on screen and in inspect. */
       .toolbar[hidden],
+      .tablebar[hidden],
       #pages[hidden],
       .preview[hidden],
       .preview-bar button[hidden] {
@@ -422,7 +617,7 @@
     <div id="toolbar" class="toolbar" role="toolbar"></div>
     <p id="open-error" class="open-error" role="alert" hidden></p>
     <div id="pages"></div>
-    <div id="status" class="status" role="status"></div>
+    <div id="status" class="status"></div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

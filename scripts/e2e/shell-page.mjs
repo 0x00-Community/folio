@@ -3,7 +3,7 @@
 // Run by the reviewer. This dispatch only syntax-checks the file.
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { act, assert, check, consoleErrors, ensureDev, evaluate, freshPage, namedRef, ref, root, summary, until } from './acde.mjs'
+import { act, assert, check, consoleErrors, ensureDev, evaluate, fileMenuItem, freshPage, namedRef, ref, root, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: {
@@ -129,7 +129,7 @@ function samePage(actual, expected, label) {
 }
 
 function statusText() {
-  return String(evaluate(`document.querySelector('#status') ? document.querySelector('#status').textContent : ''`))
+  return String(evaluate(`document.querySelector('[role="status"]') ? document.querySelector('[role="status"]').textContent : ''`))
 }
 
 function pageCount() {
@@ -154,7 +154,7 @@ function dialogOpen() {
 }
 
 async function openPageDialog() {
-  act(buttonRef(ui.pageSetup, false), 'click')
+  act(fileMenuItem(ui.pageSetup), 'click')
   await until(`(() => {
     const dialog = document.querySelector('[role="dialog"]')
     if (!dialog) return false
@@ -214,7 +214,7 @@ await check('margins of 144 pt raise the page count', async () => {
   }
   act(buttonRef(ui.ok, true), 'click')
   await until(`(() => {
-    const text = document.querySelector('#status') ? document.querySelector('#status').textContent : ''
+    const text = document.querySelector('[role="status"]') ? document.querySelector('[role="status"]').textContent : ''
     if (String(text).includes('≥')) return false
     const match = String(text).match(/(?:of |共 )(\\d+)/)
     return match && Number(match[1]) > ${before}
