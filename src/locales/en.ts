@@ -97,6 +97,15 @@ const messages: Record<string, string> = {
   'print.error.render': 'Could not render this preview. {detail}',
   'print.error.write': 'Could not write the PDF. {detail}',
   'file.pdf': 'PDF',
+  'image.handle.nw': 'Resize: top left',
+  'image.handle.n': 'Resize: top',
+  'image.handle.ne': 'Resize: top right',
+  'image.handle.e': 'Resize: right',
+  'image.handle.se': 'Resize: bottom right',
+  'image.handle.s': 'Resize: bottom',
+  'image.handle.sw': 'Resize: bottom left',
+  'image.handle.w': 'Resize: left',
+  'image.move.kept': 'A picture from the file cannot be moved.',
 }
 
 export default messages

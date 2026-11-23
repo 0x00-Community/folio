@@ -84,6 +84,8 @@ type EditRequest = { at?: Place } & (
   | { op: 'insertColumn'; where: 'left' | 'right' } | { op: 'deleteColumns' }
   | { op: 'deleteTable'; table?: string }               // no id: the table holding the selection
   | { op: 'insertImage'; base64: string; contentType: string }
+  | { op: 'resizeImage'; at: Address; widthPt: number; heightPt: number }
+  | { op: 'moveImage'; at: Address; to: Address }
   | { op: 'setPageSetup'; section: number; page: PageSetupView }
   | { op: 'undo' } | { op: 'redo' }
 )
@@ -109,7 +111,9 @@ Read responses, each with `ok: true` and `rev`:
   `ParagraphText = { kind: 'paragraph', id, text, runs, style, align, list, locked }`. `text` is the flat text with
   U+FFFC for each atom. `runs` covers `text` exactly and in order: `{ start, end, marks }` for text (the direct
   marks of `Marks`, without `link`, plus `link: true` when the text is in a hyperlink) and
-  `{ start, end, atom: 'image' | 'field' | 'pageBreak' | 'columnBreak' | 'opaque', display? }` for an atom.
+  `{ start, end, atom: 'field' | 'pageBreak' | 'columnBreak' | 'opaque', display? }` for an atom, and
+  `{ start, end, atom: 'image', widthPt, heightPt }` for a picture. The `blocks` op lists block metadata and does not
+  repeat those inlines.
   `list` is `{ level, marker } | null` with the marker text of `listMarkers`. `locked` is the lock reason or `null`.
   `TableText = { kind: 'table', id, rows: [{ cells: [{ span, vMerge, blocks: TextBlock[] }] }] }`.
   `OpaqueText = { kind: 'opaque', id, label, preview: string[] }`.

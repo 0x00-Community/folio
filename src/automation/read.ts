@@ -377,7 +377,7 @@ function atomRun(inline: Atom, start: number, end: number): TextRunView {
   const atom = inline.atom
   if (atom.type === 'field') return { start, end, atom: 'field', display: atom.display }
   if (atom.type === 'opaque') return { start, end, atom: 'opaque', display: atom.display }
-  if (atom.type === 'image') return { start, end, atom: 'image' }
+  if (atom.type === 'image') return { start, end, atom: 'image', widthPt: atom.widthPt, heightPt: atom.heightPt }
   if (atom.type === 'pageBreak') return { start, end, atom: 'pageBreak' }
   return { start, end, atom: 'columnBreak' }
 }

@@ -160,6 +160,74 @@ img.atom {
   vertical-align: text-bottom;
 }
 
+img.atom.dim {
+  opacity: 0.35;
+}
+
+.image-frame,
+.image-ghost {
+  position: absolute;
+  box-sizing: border-box;
+  border-style: solid;
+  border-color: var(--accent);
+  pointer-events: none;
+}
+
+.image-ghost {
+  border-style: dashed;
+}
+
+.image-handle {
+  position: absolute;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+}
+
+.image-handle[data-handle="nw"],
+.image-handle[data-handle="se"] {
+  cursor: nwse-resize;
+}
+
+.image-handle[data-handle="ne"],
+.image-handle[data-handle="sw"] {
+  cursor: nesw-resize;
+}
+
+.image-handle[data-handle="n"],
+.image-handle[data-handle="s"] {
+  cursor: ns-resize;
+}
+
+.image-handle[data-handle="e"],
+.image-handle[data-handle="w"] {
+  cursor: ew-resize;
+}
+
+.image-handle > span {
+  position: absolute;
+  box-sizing: border-box;
+  /* The paper is white in both themes, so the handles are too. */
+  background: #fff;
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.image-size {
+  position: absolute;
+  box-sizing: border-box;
+  font-family: system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--chrome-bg);
+  border: solid var(--chrome-border);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .blk.o {
   border: 1px dashed #9a9a9a;
   background: #fafafa;

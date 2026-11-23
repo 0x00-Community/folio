@@ -247,7 +247,7 @@ test('read views match the fixture json', () => {
       text: marksText,
       runs: [
         { start: 0, end: 4, marks: { bold: true, underline: false } },
-        { start: 4, end: 5, atom: 'image' },
+        { start: 4, end: 5, atom: 'image', widthPt: 72, heightPt: 72 },
         { start: 5, end: 8, marks: { italic: true, link: true } },
         { start: 8, end: 9, atom: 'field', display: '3' },
         { start: 9, end: 10, atom: 'pageBreak' },

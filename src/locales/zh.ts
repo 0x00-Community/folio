@@ -97,6 +97,15 @@ const messages: Record<string, string> = {
   'print.error.render': '无法渲染此预览。{detail}',
   'print.error.write': '无法写入 PDF。{detail}',
   'file.pdf': 'PDF',
+  'image.handle.nw': '调整大小：左上',
+  'image.handle.n': '调整大小：上',
+  'image.handle.ne': '调整大小：右上',
+  'image.handle.e': '调整大小：右',
+  'image.handle.se': '调整大小：右下',
+  'image.handle.s': '调整大小：下',
+  'image.handle.sw': '调整大小：左下',
+  'image.handle.w': '调整大小：左',
+  'image.move.kept': '文件里的图片不能移动。',
 }
 
 export default messages

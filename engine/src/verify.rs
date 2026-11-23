@@ -768,7 +768,8 @@ fn nodes_diff(
 /// A fresh image's model key is not the relationship id import reports.
 /// Compare it through the map `write` built, and compare the size after the
 /// EMU rounding the writer used. A key already in the file is absent from the
-/// map and stays an exact match.
+/// map: an untouched picture still matches exactly, and a resized one matches
+/// after that same EMU rounding.
 fn nodes_match(want: &Node, got: &Node, media: &BTreeMap<String, String>) -> bool {
     match (want, got) {
         (Node::Atom(want_atom), Node::Atom(got_atom)) => atoms_match(want_atom, got_atom, media),
@@ -795,7 +796,13 @@ fn atoms_match(want: &Atom, got: &Atom, media: &BTreeMap<String, String>) -> boo
                     && image_pt_close(*want_width, *got_width)
                     && image_pt_close(*want_height, *got_height)
             }
-            None => want == got,
+            None => {
+                want_key == got_key
+                    && ((want_width.to_bits() == got_width.to_bits()
+                        && want_height.to_bits() == got_height.to_bits())
+                        || (image_pt_close(*want_width, *got_width)
+                            && image_pt_close(*want_height, *got_height)))
+            }
         },
         _ => want == got,
     }

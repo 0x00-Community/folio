@@ -135,9 +135,21 @@ export type TextRunView =
     start: number
     /** Exclusive UTF-16 end. */
     end: number
+    /** This run is a picture. */
+    atom: 'image'
+    /** Width in points. */
+    widthPt: number
+    /** Height in points. */
+    heightPt: number
+  }
+  | {
+    /** Inclusive UTF-16 start. An atom occupies one unit. */
+    start: number
+    /** Exclusive UTF-16 end. */
+    end: number
     /** What the U+FFFC in `text` stands for. */
-    atom: 'image' | 'field' | 'pageBreak' | 'columnBreak' | 'opaque'
-    /** Field result or opaque label text. Omitted for images and breaks. */
+    atom: 'field' | 'pageBreak' | 'columnBreak' | 'opaque'
+    /** Field result or opaque label text. Omitted for breaks. */
     display?: string
   }
 
@@ -612,6 +624,24 @@ export type EditRequest = { at?: Place } & (
     base64: string
     /** Image MIME type. */
     contentType: string
+  }
+  | {
+    /** Replace the picture at `at` with a new size. One undo entry. */
+    op: 'resizeImage'
+    /** The picture's position. `offset` is the atom. */
+    at: Address
+    /** Width in points, at least 8 and at most the width a new picture may take there. */
+    widthPt: number
+    /** Height in points, at least 8 unless that side is left as it was. */
+    heightPt: number
+  }
+  | {
+    /** Remove the picture at `at` and insert it at `to`. One undo entry. */
+    op: 'moveImage'
+    /** The picture's position. */
+    at: Address
+    /** The caret position that receives the picture. */
+    to: Address
   }
   | {
     /** Replace one section's page setup. */

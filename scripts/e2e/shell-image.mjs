@@ -1,3 +1,4 @@
+import { deflateSync } from 'node:zlib'
 // Unit 5: insert a PNG and a JPEG, reject a file that is not one, and save twice.
 // Edits go through acde act. Save and reopen go through window.__word.
 // Run by the reviewer. This dispatch does not run the script.
@@ -5,18 +6,26 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, freshPage, namedRef, root, shot, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, freshPage, namedRef, ref, root, shot, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: {
     insert: 'Insert picture',
     error: 'This file is not a PNG or JPEG image.',
     input: 'Document text',
+    undo: 'Undo',
+    se: 'Resize: bottom right',
+    east: 'Resize: right',
+    kept: 'A picture from the file cannot be moved.',
   },
   zh: {
     insert: '插入图片',
     error: '这个文件不是 PNG 或 JPEG 图片。',
     input: '文档正文',
+    undo: '撤销',
+    se: '调整大小：右下',
+    east: '调整大小：右',
+    kept: '文件里的图片不能移动。',
   },
 }
 
@@ -269,6 +278,266 @@ await check('save and reopen keeps both images, and a later save still succeeds'
   act(inputRef(), 'type', 'Q')
   const second = evaluate('window.__word.save()')
   assert(second && typeof second.base64 === 'string' && second.base64.length > 0, 'second save returned no bytes')
+})
+
+function markImage(label) {
+  const found = evaluate(`(() => {
+    document.querySelectorAll('[data-e2e="target"]').forEach((node) => { delete node.dataset.e2e })
+    const want = ${JSON.stringify(label)}
+    const plain = (node) => (node.getAttribute('aria-label') || '').replaceAll('\\uFFFC', '')
+    const para = [...document.querySelectorAll('.blk.p')].find((node) => plain(node) === want && node.getAttribute('aria-hidden') !== 'true' && node.querySelector('img.atom'))
+    const img = para && [...para.querySelectorAll('img.atom')].at(-1)
+    if (!img) return false
+    img.dataset.e2e = 'target'
+    img.scrollIntoView({ block: 'center' })
+    return true
+  })()`)
+  assert(found === true, `no picture in ${label}`)
+  return ref('img.atom[data-e2e="target"]')
+}
+
+function pictureBox(label) {
+  return evaluate(`(() => {
+    const want = ${JSON.stringify(label)}
+    const plain = (node) => (node.getAttribute('aria-label') || '').replaceAll('\\uFFFC', '')
+    const para = [...document.querySelectorAll('.blk.p')].find((node) => plain(node) === want && node.getAttribute('aria-hidden') !== 'true' && node.querySelector('img.atom'))
+    const img = para && [...para.querySelectorAll('img.atom')].at(-1)
+    if (!img) return null
+    const rect = img.getBoundingClientRect()
+    return { width: rect.width, height: rect.height }
+  })()`)
+}
+
+function historyPast() {
+  return evaluate('window.__word.editor.state.history.past.length')
+}
+
+// `acde act` has click and drag-to-a-ref. A sized stroke is `acde input`: move, down, move, up.
+function pointer(events) {
+  execFileSync('acde', ['input', 'word', JSON.stringify(events)], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+}
+
+function centerOf(selector) {
+  const point = evaluate(`(() => {
+    const node = document.querySelector(${JSON.stringify(selector)})
+    if (!node) return null
+    const rect = node.getBoundingClientRect()
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+  })()`)
+  assert(point, `no ${selector}`)
+  return point
+}
+
+function stroke(selector, dx, dy, { release = true } = {}) {
+  const from = centerOf(selector)
+  const events = [
+    { type: 'move', x: from.x, y: from.y },
+    { type: 'down', x: from.x, y: from.y, button: 'left' },
+    { type: 'move', x: from.x + dx, y: from.y + dy },
+  ]
+  if (release) events.push({ type: 'up', x: from.x + dx, y: from.y + dy, button: 'left' })
+  pointer(events)
+  return { x: from.x + dx, y: from.y + dy }
+}
+
+function setZoom(percent) {
+  act(ref('#status select.zoom'), 'select', String(percent))
+}
+
+// An 80 by 80 px gray PNG (60 pt). The 2 px picture is smaller than one handle, so the pointer checks use this one.
+function grayPng(size) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    return c >>> 0
+  })
+  const crc = (bytes) => {
+    let c = 0xffffffff
+    for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8)
+    return (c ^ 0xffffffff) >>> 0
+  }
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
+    const out = Buffer.alloc(body.length + 8)
+    out.writeUInt32BE(data.length, 0)
+    body.copy(out, 4)
+    out.writeUInt32BE(crc(body), body.length + 4)
+    return out
+  }
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(size, 0)
+  header.writeUInt32BE(size, 4)
+  header.set([8, 0, 0, 0, 0], 8)
+  const rows = Buffer.alloc((size + 1) * size, 0x99)
+  for (let y = 0; y < size; y++) rows[y * (size + 1)] = 0
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header),
+    chunk('IDAT', deflateSync(rows)),
+    chunk('IEND', Buffer.alloc(0)),
+  ])
+}
+const bigPath = join(dir, 'big.png')
+writeFileSync(bigPath, grayPng(80))
+
+await check('a click selects a picture and the handles track zoom', async () => {
+  await openBasic()
+  scrollTo('Centered paragraph.')
+  act(namedRef('Centered paragraph.'), 'click')
+  focusSink()
+  chooseOpen(bigPath)
+  act(buttonNamed(ui.insert), 'click')
+  await until(`(() => [...document.querySelectorAll('img.atom')].some((img) => img.naturalWidth === 80))()`, { label: 'png for handles' })
+  const image = markImage('Centered paragraph.')
+  act(image, 'click')
+  const handles = evaluate(`document.querySelectorAll('.image-handle').length`)
+  assert(handles === 8, `handles ${handles}`)
+  namedRef(ui.se)
+  namedRef(ui.east)
+  for (const percent of [50, 100, 200]) {
+    setZoom(percent)
+    const hit = evaluate(`(() => {
+      const handle = document.querySelector('.image-handle[data-handle="se"]')
+      if (!handle) return null
+      const rect = handle.getBoundingClientRect()
+      return { width: rect.width, height: rect.height }
+    })()`)
+    assert(hit && Math.abs(hit.width - 14) <= 1.5 && Math.abs(hit.height - 14) <= 1.5, `zoom ${percent} hit ${JSON.stringify(hit)}`)
+  }
+  setZoom(100)
+  act(namedRef('Right aligned paragraph.'), 'click')
+  const gone = evaluate(`document.querySelectorAll('.image-handle').length`)
+  assert(gone === 0, `handles stayed ${gone}`)
+})
+
+await check('dragging a handle resizes, escape cancels, and undo restores', async () => {
+  const image = markImage('Centered paragraph.')
+  act(image, 'click')
+  const before = historyPast()
+  stroke('.image-handle[data-handle="se"]', 20, 20)
+  const box = pictureBox('Centered paragraph.')
+  assert(box && Math.abs(box.width - 100) <= 1 && Math.abs(box.height - 100) <= 1, `corner box ${JSON.stringify(box)}`)
+  const sized = images().find((item) => item.text === 'Centered paragraph.' && item.src === null)
+  assert(sized && Math.abs(sized.widthPt - 75) <= 0.75 && Math.abs(sized.heightPt - 75) <= 0.75, `corner model ${JSON.stringify(sized)}`)
+  assert(Math.abs(sized.widthPt - sized.heightPt) <= 0.05, 'the corner keeps the ratio')
+  assert(historyPast() === before + 1, `undo entries ${historyPast()} vs ${before}`)
+  act(namedRef(ui.undo), 'click')
+  const restored = images().find((item) => item.text === 'Centered paragraph.' && item.src === null)
+  assert(restored && near(restored.widthPt, 60) && near(restored.heightPt, 60), `undo ${JSON.stringify(restored)}`)
+
+  act(markImage('Centered paragraph.'), 'click')
+  stroke('.image-handle[data-handle="e"]', 16, 4)
+  const side = images().find((item) => item.text === 'Centered paragraph.' && item.src === null)
+  assert(side && Math.abs(side.widthPt - 72) <= 0.75 && near(side.heightPt, 60), `side ${JSON.stringify(side)}`)
+  act(namedRef(ui.undo), 'click')
+
+  const held = historyPast()
+  act(markImage('Centered paragraph.'), 'click')
+  const heldAt = stroke('.image-handle[data-handle="e"]', 12, 0, { release: false })
+  pointer([{ type: 'keydown', key: 'Escape' }, { type: 'keyup', key: 'Escape' }, { type: 'up', x: heldAt.x, y: heldAt.y, button: 'left' }])
+  const escaped = images().find((item) => item.text === 'Centered paragraph.' && item.src === null)
+  assert(escaped && near(escaped.widthPt, 60) && near(escaped.heightPt, 60), `escape ${JSON.stringify(escaped)}`)
+  assert(historyPast() === held, 'escape added an undo entry')
+})
+
+await check('dragging a picture moves it, and undo puts it back', async () => {
+  const image = markImage('Centered paragraph.')
+  act(image, 'click')
+  // Resize first, so the move carries a size that is not the natural one.
+  stroke('.image-handle[data-handle="se"]', 20, 20)
+  markImage('Centered paragraph.')
+  const delta = evaluate(`(() => {
+    const img = document.querySelector('img.atom[data-e2e="target"]')
+    const para = [...document.querySelectorAll('.blk.p')].find((node) => node.getAttribute('aria-label') === 'Right aligned paragraph.' && node.getAttribute('aria-hidden') !== 'true')
+    if (!img || !para) return null
+    const a = img.getBoundingClientRect()
+    const b = para.getBoundingClientRect()
+    return {
+      dx: Math.round(b.right - 8 - (a.left + a.width / 2)),
+      dy: Math.round(b.top + Math.min(12, b.height / 2) - (a.top + a.height / 2)),
+    }
+  })()`)
+  assert(delta && (Math.abs(delta.dx) > 4 || Math.abs(delta.dy) > 4), `delta ${JSON.stringify(delta)}`)
+  stroke('img.atom[data-e2e="target"]', delta.dx, delta.dy)
+  const moved = images().find((item) => item.text === 'Right aligned paragraph.' && item.src === null)
+  assert(moved && Math.abs(moved.widthPt - 75) <= 0.75, `moved ${JSON.stringify(images())}`)
+  assert(!images().some((item) => item.text === 'Centered paragraph.' && item.src === null), 'the picture also stayed behind')
+  act(namedRef(ui.undo), 'click')
+  const back = images().find((item) => item.text === 'Centered paragraph.' && item.src === null)
+  assert(back && Math.abs(back.widthPt - 75) <= 0.75, `undo move ${JSON.stringify(images())}`)
+  act(namedRef(ui.undo), 'click')
+  const original = images().find((item) => item.text === 'Centered paragraph.' && item.src === null)
+  assert(original && near(original.widthPt, 60), `size undo ${JSON.stringify(original)}`)
+})
+
+await check('an inserted picture keeps a resize and a move across save', async () => {
+  const image = markImage('Centered paragraph.')
+  act(image, 'click')
+  stroke('.image-handle[data-handle="se"]', 20, 20)
+  markImage('Centered paragraph.')
+  const delta = evaluate(`(() => {
+    const img = document.querySelector('img.atom[data-e2e="target"]')
+    const para = [...document.querySelectorAll('.blk.p')].find((node) => node.getAttribute('aria-label') === 'Right aligned paragraph.' && node.getAttribute('aria-hidden') !== 'true')
+    if (!img || !para) return null
+    const a = img.getBoundingClientRect()
+    const b = para.getBoundingClientRect()
+    return {
+      dx: Math.round(b.right - 8 - (a.left + a.width / 2)),
+      dy: Math.round(b.top + Math.min(12, b.height / 2) - (a.top + a.height / 2)),
+    }
+  })()`)
+  stroke('img.atom[data-e2e="target"]', delta.dx, delta.dy)
+  const saved = evaluate('window.__word.save()')
+  assert(saved && typeof saved.base64 === 'string' && saved.base64.length > 0, 'save returned no bytes')
+  await openDocument(saved.base64, 'moved-image.docx')
+  assert(!evaluate(`window.__wordError || ''`), evaluate(`window.__wordError || ''`))
+  await until(`window.__word.editor.status().pagesFinal === true`, { timeout: 60000, label: 'pagination finished' })
+  const found = images().find((item) => item.text === 'Right aligned paragraph.')
+  assert(found && Math.abs(found.widthPt - 75) <= 0.75 && Math.abs(found.heightPt - 75) <= 0.75 && found.src !== null, `reopened ${JSON.stringify(found)}`)
+})
+
+await check('the picture in basic.docx resizes across save and cannot be moved', async () => {
+  await openBasic()
+  const marked = evaluate(`(() => {
+    const img = document.querySelector('img.atom')
+    if (!img) return false
+    img.dataset.e2e = 'target'
+    img.scrollIntoView({ block: 'center' })
+    return true
+  })()`)
+  assert(marked === true, 'basic.docx has no picture')
+  const image = ref('img.atom[data-e2e="target"]')
+  act(image, 'click')
+  stroke('.image-handle[data-handle="se"]', 20, 20)
+  const sized = images().find((item) => near(item.widthPt, 162) || Math.abs(item.widthPt - 162) <= 0.75)
+  assert(sized && Math.abs(sized.widthPt - 162) <= 0.75 && Math.abs(sized.heightPt - 81) <= 0.75, `file resize ${JSON.stringify(images())}`)
+  const saved = evaluate('window.__word.save()')
+  assert(saved && typeof saved.base64 === 'string', 'save returned no bytes')
+  await openDocument(saved.base64, 'resized-basic.docx')
+  await until(`window.__word.editor.status().pagesFinal === true`, { timeout: 60000, label: 'pagination finished' })
+  const reopened = images().find((item) => Math.abs(item.widthPt - 162) <= 0.75)
+  assert(reopened && Math.abs(reopened.heightPt - 81) <= 0.75, `reopened file picture ${JSON.stringify(images())}`)
+  const again = evaluate(`(() => {
+    const img = document.querySelector('img.atom')
+    if (!img) return false
+    img.dataset.e2e = 'target'
+    img.scrollIntoView({ block: 'center' })
+    return true
+  })()`)
+  assert(again === true, 'the reopened picture is not painted')
+  const heldAt = stroke('img.atom[data-e2e="target"]', 40, 40, { release: false })
+  const status = await until(
+    `(document.querySelector('.status-text')?.textContent || '').includes(${JSON.stringify(ui.kept)})`,
+    { label: 'file picture cannot move' },
+  )
+  assert(status, 'the status line did not say the picture stays')
+  pointer([{ type: 'up', x: heldAt.x, y: heldAt.y, button: 'left' }])
+  const stayed = images()
+  assert(stayed.length === 1 && Math.abs(stayed[0].widthPt - 162) <= 0.75, `move changed the file picture ${JSON.stringify(stayed)}`)
 })
 
 await check('console has no errors', async () => {

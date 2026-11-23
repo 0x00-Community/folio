@@ -9,12 +9,16 @@ import {
   deleteSelection,
   deleteTable,
   insertColumn,
+  imageMoveIssue,
+  imageResizeIssue,
   insertImage,
   insertLineBreak,
   insertPageBreak,
   insertRow,
   insertTable,
   insertText,
+  moveAtom,
+  resizeImage,
   selectAll,
   setAlign,
   setIndent,
@@ -104,6 +108,8 @@ export const KEYS: ReadonlyMap<string, readonly string[]> = new Map([
   ['deleteColumns', ['op', 'v', 'at']],
   ['deleteTable', ['op', 'v', 'at', 'table']],
   ['insertImage', ['op', 'v', 'at', 'base64', 'contentType']],
+  ['resizeImage', ['op', 'v', 'at', 'widthPt', 'heightPt']],
+  ['moveImage', ['op', 'v', 'at', 'to']],
   ['setPageSetup', ['op', 'v', 'at', 'section', 'page']],
   ['undo', ['op', 'v', 'at']],
   ['redo', ['op', 'v', 'at']],
@@ -254,6 +260,10 @@ function route(
       return deleteTableOp(host, note, request)
     case 'insertImage':
       return insertImageOp(host, note, request)
+    case 'resizeImage':
+      return resizeImageOp(host, note, request)
+    case 'moveImage':
+      return moveImageOp(host, note, request)
     case 'setPageSetup':
       return setPageSetupOp(host, note, request)
     case 'undo':
@@ -606,6 +616,64 @@ function insertImageOp(host: Host, note: () => number, record: Record<string, un
     const again = guard(host, place, true)
     if (!again.ok) return again.refusal
     return commit(host, note, 'insertImage', again, insertImage(media))
+  })
+}
+
+function resizeImageOp(host: Host, note: () => number, record: Record<string, unknown>): Response | Deferred {
+  if (!('at' in record)) return bad('at')
+  const at = parseAddress(record.at, 'at')
+  if (isRefusal(at)) return at
+  const width = finite(record.widthPt, 'widthPt')
+  if (isRefusal(width)) return width
+  const height = finite(record.heightPt, 'heightPt')
+  if (isRefusal(height)) return height
+  return defer(() => {
+    const guarded = guard(host, at, true)
+    if (!guarded.ok) return guarded.refusal
+    if (guarded.selection.kind !== 'text') return bad('at')
+    const pos = guarded.selection.anchor
+    const issue = imageResizeIssue(guarded.preview.doc, pos, width, height)
+    if (issue === 'missing') {
+      return { ok: false, error: { code: 'out-of-range', message: `no picture at offset ${pos.o}`, para: pos.p } }
+    }
+    if (issue === 'range') {
+      return { ok: false, error: { code: 'out-of-range', message: `picture size ${width} by ${height} is outside the limits`, para: pos.p } }
+    }
+    return commit(host, note, 'resizeImage', guarded, resizeImage(pos, width, height))
+  })
+}
+
+function moveImageOp(host: Host, note: () => number, record: Record<string, unknown>): Response | Deferred {
+  if (!('at' in record)) return bad('at')
+  if (!('to' in record)) return bad('to')
+  const at = parseAddress(record.at, 'at')
+  if (isRefusal(at)) return at
+  const to = parseAddress(record.to, 'to')
+  if (isRefusal(to)) return to
+  return defer(() => {
+    const guarded = guard(host, at, true)
+    if (!guarded.ok) return guarded.refusal
+    if (guarded.selection.kind !== 'text') return bad('at')
+    const from = guarded.selection.anchor
+    const dest = resolveAddress(guarded.preview.doc, to)
+    if (!dest.ok) return fromAddress(dest.error)
+    const issue = imageMoveIssue(guarded.preview.doc, from, dest.pos)
+    if (issue === 'missing') {
+      return { ok: false, error: { code: 'out-of-range', message: `no picture at offset ${from.o}`, para: from.p } }
+    }
+    if (issue === 'file') return refused('moveImage')
+    if (issue === 'locked') return lockedRefusal(dest.pos.p)
+    if (issue === 'preview' || issue === 'story') {
+      return { ok: false, error: { code: 'read-only-story', message: `paragraph ${dest.pos.p} is in a read-only story`, para: dest.pos.p } }
+    }
+    if (issue === 'same') {
+      return applySelection(host, note, 'moveImage', {
+        kind: 'text',
+        anchor: from,
+        head: { p: from.p, o: from.o + 1 },
+      })
+    }
+    return commit(host, note, 'moveImage', guarded, moveAtom(from, dest.pos))
   })
 }
 

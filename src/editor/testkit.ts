@@ -14,6 +14,8 @@ import {
   insertTable,
   insertText,
   move,
+  moveAtom,
+  resizeImage,
   selectAll,
   selectAround,
   setAlign,
@@ -311,7 +313,7 @@ export function randomCommand(rng: () => number, state: { doc: Doc, sel: Selecti
   const head = { p: other.para.id, o: offset(rng, other.para) }
   const tables = tablesIn(state.doc.body)
   const table = tables[Math.floor(rng() * tables.length)]
-  const kind = Math.floor(rng() * 32)
+  const kind = Math.floor(rng() * 34)
   switch (kind) {
     case 0: return generated('insertText', insertText(sampleText(rng)))
     case 1: return generated('insertLineBreak', insertLineBreak)
@@ -352,6 +354,8 @@ export function randomCommand(rng: () => number, state: { doc: Doc, sel: Selecti
     case 27: return generated('selectAround', selectAround(anchor, rng() < 0.5 ? 'word' : 'paragraph'))
     case 28: return generated('setSelection', setSelection({ kind: 'text', anchor, head }))
     case 29: return generated('setCaret', setSelection({ kind: 'text', anchor, head: anchor }))
+    case 30: return generated('resizeImage', resizeImage(imagePos(loc.para, false) ?? anchor, rng() < 0.15 ? 2 : 16 + Math.floor(rng() * 40), rng() < 0.15 ? 2 : 16 + Math.floor(rng() * 40)))
+    case 31: return generated('moveAtom', moveAtom(imagePos(loc.para, true) ?? anchor, head))
     default: {
       if (!table || table.rows.length === 0) return generated('setSelection', setSelection({ kind: 'text', anchor, head }))
       const rowA = Math.floor(rng() * table.rows.length)
@@ -406,6 +410,20 @@ function pick<T>(rng: () => number, items: readonly T[]): T {
 
 function offset(rng: () => number, para: Paragraph): number {
   return Math.floor(rng() * (flatText(para).length + 1))
+}
+
+function imagePos(para: Paragraph, fresh: boolean): { p: ParaId, o: number } | null {
+  let cursor = 0
+  let any: { p: ParaId, o: number } | null = null
+  for (const inline of para.inlines) {
+    if (inline.kind === 'atom' && inline.atom.type === 'image') {
+      const pos = { p: para.id, o: cursor }
+      if (!fresh || inline.src === null) return pos
+      any = pos
+    }
+    cursor += inline.kind === 'text' ? inline.text.length : 1
+  }
+  return any
 }
 
 function bodyLocs(doc: Doc): ParaLoc[] {

@@ -2847,3 +2847,434 @@ fn two_keeps_of_one_src_are_refused() {
     patch.body.insert(index, PatchBlock::Keep { keep: src });
     assert_contract(&session, &before, &patch, "block 3 appears twice");
 }
+
+#[test]
+fn fresh_resized_picture_saves_and_reopens() {
+    let (session, before) = opened("basic.docx");
+    let mut para = body_para(&before, 3).clone();
+    para.inlines.push(image_inline("png", 40.2, 15.7));
+    let mut patch = patch_replacing(&before.imported, 3, vec![changed_para(para)]);
+    patch.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+    let written = save(&session, &patch);
+    let after = reopen(&written);
+    let found = images_near(&after.imported.body, 40.2);
+    assert_eq!(
+        found.len(),
+        1,
+        "the resized picture is in the reopened file"
+    );
+    assert!(size_near(found[0].height, 15.7), "{}", found[0].height);
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+    assert!(
+        inline_shape(para_by_src(&after.imported.body, 3)).contains('I'),
+        "the picture stays in its paragraph"
+    );
+}
+
+#[test]
+fn fresh_moved_picture_saves_in_the_target_paragraph() {
+    let (session, before) = opened("basic.docx");
+    let mut para = body_para(&before, 4).clone();
+    para.inlines.insert(0, image_inline("png", 36.41, 18.205));
+    let mut patch = patch_replacing(&before.imported, 4, vec![changed_para(para)]);
+    patch.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+    let written = save(&session, &patch);
+    let after = reopen(&written);
+    let host = para_by_src(&after.imported.body, 4);
+    assert!(
+        inline_shape(host).starts_with('I'),
+        "shape {}",
+        inline_shape(host)
+    );
+    let found = images_near(&after.imported.body, 36.41);
+    assert_eq!(found.len(), 1);
+    assert!(size_near(found[0].height, 18.205), "{}", found[0].height);
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+}
+
+#[test]
+fn file_picture_resize_changes_only_that_drawing_extent() {
+    let (session, before) = opened("basic.docx");
+    let media = part_bytes(&before, "rId1").to_vec();
+    let original = drawings(&document_xml(&fixture("basic.docx")));
+    let pictures = body_images(&before.imported.body);
+    assert_eq!(pictures.len(), 1, "basic.docx has one picture");
+    let picture = &pictures[0];
+    let para_src = picture.para.expect("paragraph");
+    let mut para = para_by_src(&before.imported.body, para_src).clone();
+    resize_run(
+        &mut para,
+        picture.run.expect("run"),
+        picture.width + 12.0,
+        picture.height + 6.0,
+    );
+    let patch = patch_replacing(&before.imported, para_src, vec![changed_para(para)]);
+    let written = save(&session, &patch);
+    let after = reopen(&written);
+    assert_eq!(after.ledger.counts, before.ledger.counts);
+    assert_eq!(part_bytes(&after, "rId1"), media.as_slice());
+    let saved = body_images(&after.imported.body);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].para, picture.para,
+        "the picture stays in its paragraph"
+    );
+    assert!(
+        size_near(saved[0].width, picture.width + 12.0),
+        "{}",
+        saved[0].width
+    );
+    assert!(
+        size_near(saved[0].height, picture.height + 6.0),
+        "{}",
+        saved[0].height
+    );
+    let saved_drawings = drawings(&document_xml(&written));
+    assert_eq!(saved_drawings.len(), original.len());
+    assert_eq!(original.len(), 1);
+    assert_ne!(saved_drawings[0], original[0], "the extent changed");
+    assert_eq!(
+        mask_drawing_sizes(&saved_drawings[0]),
+        mask_drawing_sizes(&original[0]),
+        "only the extent changed"
+    );
+}
+
+#[test]
+fn resizing_one_use_of_shared_media_keeps_the_other() {
+    let (session, before) = opened("basic.docx");
+    let mut para = body_para(&before, 3).clone();
+    para.inlines.push(image_inline("png", 40.0, 20.0));
+    para.inlines.push(image_inline("png", 30.0, 10.0));
+    let mut seed = patch_replacing(&before.imported, 3, vec![changed_para(para)]);
+    seed.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+    let written = save(&session, &seed);
+    let held = Session::from_bytes(&written).expect("reopen");
+    let imported = import::import(&Document::from_bytes(&written).expect("reopen"));
+    let before_drawings = drawings(&document_xml(&written));
+    let mut para = para_by_src(&imported.imported.body, 3).clone();
+    let images = images_of(&para);
+    let first = images
+        .iter()
+        .find(|image| (image.width - 40.0).abs() < 0.05)
+        .expect("40pt picture");
+    let second = images
+        .iter()
+        .find(|image| (image.width - 30.0).abs() < 0.05)
+        .expect("30pt picture");
+    assert_eq!(
+        first.media, second.media,
+        "the two pictures share one media part"
+    );
+    let media = part_bytes(&imported, &second.media).to_vec();
+    resize_run(&mut para, first.run.expect("run"), 50.0, 25.0);
+    let patch = patch_replacing(&imported.imported, 3, vec![changed_para(para)]);
+    let resized = save(&held, &patch);
+    let after = reopen(&resized);
+    assert_eq!(part_bytes(&after, &second.media), media.as_slice());
+    let again = images_of(para_by_src(&after.imported.body, 3));
+    let wide = again
+        .iter()
+        .find(|image| size_near(image.width, 50.0))
+        .expect("resized picture");
+    let kept = again
+        .iter()
+        .find(|image| size_near(image.width, 30.0))
+        .expect("the other use keeps its size");
+    assert!(size_near(wide.height, 25.0), "{}", wide.height);
+    assert!(size_near(kept.height, 10.0), "{}", kept.height);
+    let kept_cx = emu_of(30.0);
+    let kept_cy = emu_of(10.0);
+    let after_drawings = drawings(&document_xml(&resized));
+    let before_kept = drawing_sized(&before_drawings, kept_cx, kept_cy);
+    let after_kept = drawing_sized(&after_drawings, kept_cx, kept_cy);
+    assert_eq!(
+        after_kept, before_kept,
+        "the other drawing is byte for byte"
+    );
+    let before_changed = drawing_sized(&before_drawings, emu_of(40.0), emu_of(20.0));
+    let after_changed = drawing_sized(&after_drawings, emu_of(50.0), emu_of(25.0));
+    assert_ne!(after_changed, before_changed);
+    assert_eq!(
+        mask_drawing_sizes(after_changed),
+        mask_drawing_sizes(before_changed)
+    );
+}
+
+#[test]
+fn file_picture_move_inside_its_paragraph_is_refused() {
+    let (session, before) = opened("basic.docx");
+    let mut seeded = body_para(&before, 3).clone();
+    seeded.inlines.push(image_inline("png", 40.2, 15.7));
+    let mut seed = patch_replacing(&before.imported, 3, vec![changed_para(seeded)]);
+    seed.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+    let written = save(&session, &seed);
+    let held = Session::from_bytes(&written).expect("reopen");
+    let imported = import::import(&Document::from_bytes(&written).expect("reopen"));
+    let mut para = para_by_src(&imported.imported.body, 3).clone();
+    let taken = take_image(&mut para.inlines);
+    para.inlines.insert(0, taken);
+    let patch = patch_replacing(&imported.imported, 3, vec![changed_para(para)]);
+    assert_contract(&held, &imported, &patch, "source order");
+}
+
+#[test]
+fn file_picture_move_to_another_paragraph_or_cell_is_refused() {
+    let (session, before) = opened("basic.docx");
+    let pictures = body_images(&before.imported.body);
+    let picture = pictures.first().expect("picture");
+    let src = picture.para.expect("para");
+    let mut source = para_by_src(&before.imported.body, src).clone();
+    let taken = take_image(&mut source.inlines);
+    let mut other = body_para(&before, 3).clone();
+    other.inlines.push(taken.clone());
+    let mut table = fixture_table(&before.imported).clone();
+    let Block::P(cell_para) = &mut table.rows[0].cells[0].blocks[0] else {
+        panic!("cell");
+    };
+    cell_para.inlines.push(taken);
+    let mut body = Vec::new();
+    for block in &before.imported.body {
+        let block_src = block_src(block).expect("src");
+        if block_src == src {
+            body.push(changed_para(source.clone()));
+        } else if block_src == 3 {
+            body.push(changed_para(other.clone()));
+        } else if block_src == 14 {
+            body.push(PatchBlock::Changed(Block::Table(table.clone())));
+        } else {
+            body.push(PatchBlock::Keep { keep: block_src });
+        }
+    }
+    let patch = Patch {
+        body,
+        sections: before.imported.sections.clone(),
+        new_lists: Vec::new(),
+        added_styles: Vec::new(),
+        media: Vec::new(),
+    };
+    assert_contract(&session, &before, &patch, "source order");
+}
+
+#[test]
+fn resize_and_move_leave_the_fixture_ledgers_unchanged() {
+    for name in ["basic.docx", "preserve.docx"] {
+        let (session, before) = opened(name);
+        let srcs = para_srcs(&before.imported.body);
+        let src = *srcs.first().expect(name);
+        let mut para = para_by_src(&before.imported.body, src).clone();
+        para.inlines.push(image_inline("png", 40.2, 15.7));
+        let mut patch = patch_replacing(&before.imported, src, vec![changed_para(para)]);
+        patch.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+        let written = save(&session, &patch);
+        let after = reopen(&written);
+        assert_eq!(
+            after.ledger.counts, before.ledger.counts,
+            "{name} fresh resize"
+        );
+        assert_eq!(images_near(&after.imported.body, 40.2).len(), 1, "{name}");
+
+        let target = srcs.get(1).copied().unwrap_or(src);
+        let mut moved = para_by_src(&before.imported.body, target).clone();
+        moved.inlines.insert(0, image_inline("png", 36.41, 18.205));
+        let mut move_patch = patch_replacing(&before.imported, target, vec![changed_para(moved)]);
+        move_patch.media = vec![media_part("png", "pic.png", PNG_BYTES)];
+        let moved_bytes = save(&session, &move_patch);
+        let moved_doc = reopen(&moved_bytes);
+        assert_eq!(
+            moved_doc.ledger.counts, before.ledger.counts,
+            "{name} fresh move"
+        );
+        assert_eq!(
+            images_near(&moved_doc.imported.body, 36.41).len(),
+            1,
+            "{name}"
+        );
+
+        if let Some(picture) = body_images(&before.imported.body).into_iter().next() {
+            let para_src = picture.para.expect("para");
+            let mut edited = para_by_src(&before.imported.body, para_src).clone();
+            resize_run(
+                &mut edited,
+                picture.run.expect("run"),
+                picture.width + 4.0,
+                picture.height + 2.0,
+            );
+            let file_patch =
+                patch_replacing(&before.imported, para_src, vec![changed_para(edited)]);
+            let file_bytes = save(&session, &file_patch);
+            let file_doc = reopen(&file_bytes);
+            assert_eq!(
+                file_doc.ledger.counts, before.ledger.counts,
+                "{name} file resize"
+            );
+            let saved = body_images(&file_doc.imported.body)
+                .into_iter()
+                .find(|image| image.run == picture.run)
+                .expect("resized file picture");
+            assert!(size_near(saved.width, picture.width + 4.0), "{name}");
+            assert!(size_near(saved.height, picture.height + 2.0), "{name}");
+        }
+    }
+}
+
+struct BodyImage {
+    para: Option<u32>,
+    run: Option<u32>,
+    media: String,
+    width: f64,
+    height: f64,
+}
+
+fn body_images(blocks: &[Block]) -> Vec<BodyImage> {
+    let mut out = Vec::new();
+    fn walk(blocks: &[Block], out: &mut Vec<BodyImage>) {
+        for block in blocks {
+            match block {
+                Block::P(para) => out.extend(images_of(para)),
+                Block::Table(table) => {
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            walk(&cell.blocks, out);
+                        }
+                    }
+                }
+                Block::Opaque(_) => {}
+            }
+        }
+    }
+    walk(blocks, &mut out);
+    out
+}
+
+fn images_of(para: &Para) -> Vec<BodyImage> {
+    para.inlines
+        .iter()
+        .filter_map(|inline| match inline {
+            Inline::Atom {
+                atom:
+                    Atom::Image {
+                        media,
+                        width_pt,
+                        height_pt,
+                    },
+                src,
+            } => Some(BodyImage {
+                para: para.src,
+                run: *src,
+                media: media.clone(),
+                width: *width_pt,
+                height: *height_pt,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn para_srcs(blocks: &[Block]) -> Vec<u32> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::P(para) => para.src,
+            _ => None,
+        })
+        .collect()
+}
+
+fn emu_of(pt: f64) -> i64 {
+    (pt * 12_700.0).round() as i64
+}
+
+fn drawings(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<w:drawing") {
+        let tail = &rest[start..];
+        let Some(end) = tail.find("</w:drawing>") else {
+            break;
+        };
+        out.push(tail[..end + "</w:drawing>".len()].to_string());
+        rest = &tail[end + "</w:drawing>".len()..];
+    }
+    out
+}
+
+fn drawing_sized(drawings: &[String], cx: i64, cy: i64) -> &str {
+    let width = format!("cx=\"{cx}\"");
+    let height = format!("cy=\"{cy}\"");
+    drawings
+        .iter()
+        .find(|drawing| drawing.contains(&width) && drawing.contains(&height))
+        .map(String::as_str)
+        .unwrap_or_else(|| panic!("no drawing {cx} by {cy}"))
+}
+
+fn mask_drawing_sizes(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let Some(end) = tail.find('>') else {
+            out.push_str(tail);
+            break;
+        };
+        let tag = &tail[..=end];
+        let local = tag_local_name(tag);
+        if local == "extent" || local == "ext" || local == "effectExtent" {
+            out.push('<');
+            out.push_str(local);
+            out.push('>');
+        } else {
+            out.push_str(tag);
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn tag_local_name(tag: &str) -> &str {
+    let body = tag
+        .trim_start_matches('<')
+        .trim_start_matches('/')
+        .trim_end_matches('>')
+        .trim_end_matches('/');
+    let name = body.split_whitespace().next().unwrap_or("");
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+fn resize_run(para: &mut Para, run: u32, width: f64, height: f64) {
+    for inline in &mut para.inlines {
+        if let Inline::Atom {
+            atom:
+                Atom::Image {
+                    width_pt,
+                    height_pt,
+                    ..
+                },
+            src,
+        } = inline
+            && *src == Some(run)
+        {
+            *width_pt = width;
+            *height_pt = height;
+        }
+    }
+}
+
+fn take_image(inlines: &mut Vec<Inline>) -> Inline {
+    let index = inlines
+        .iter()
+        .position(|inline| {
+            matches!(
+                inline,
+                Inline::Atom {
+                    atom: Atom::Image { .. },
+                    ..
+                }
+            )
+        })
+        .expect("image inline");
+    inlines.remove(index)
+}

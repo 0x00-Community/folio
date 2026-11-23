@@ -1,10 +1,14 @@
 // DOM wiring for the input layer. The decisions it applies are pure functions in input.ts, so Node can test them
 // without a document.
 import { comparePos, flatText, indexOf } from '../model.ts'
-import type { Pos } from '../model.ts'
+import type { ParaId, Pos } from '../model.ts'
 import { t } from '../i18n.ts'
-import { compositionDelete, deleteSelection, insertText, selectedText } from './edit.ts'
+import { formatMargin, pageUnit } from '../ui/page-setup.ts'
+import { compositionDelete, deleteSelection, findImage, imageDropTarget, imageMaxWidth, insertText, moveAtom, resizeImage, selectedText } from './edit.ts'
 import type { Command, EditorState } from './edit.ts'
+import { MIN_IMAGE_PT, MOVE_THRESHOLD_PX, resizeBox } from './image-geom.ts'
+import type { ImageGesture, PageBox, ResizeHandle } from './image-geom.ts'
+import { PT_TO_PX } from './render.ts'
 import {
   chordOf,
   defaultKeymap,
@@ -35,6 +39,10 @@ export interface EditingSurface {
   moveToLineEdge(edge: 'start' | 'end', extend: boolean): void
   setTextSelection(anchor: Pos, head: Pos): void
   fileCommand(op: 'save' | 'saveAs'): void
+  zoom(): number
+  imageBox(pos: Pos): PageBox | null
+  previewImage(preview: ImageGesture | null): void
+  setNotice(text: string | null): void
 }
 
 export interface InputBinding {
@@ -46,6 +54,32 @@ export interface InputBinding {
 
 const EDGE = 28
 const STEP = 32
+const HANDLES: ReadonlySet<string> = new Set(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'])
+
+type PictureDrag =
+  | { kind: 'pending', pos: Pos, x: number, y: number }
+  | { kind: 'resize', pos: Pos, handle: ResizeHandle, x: number, y: number, box: PageBox, widthPt: number, heightPt: number }
+  | { kind: 'move', from: Pos, x: number, y: number, active: boolean, file: boolean }
+
+function handleOf(target: EventTarget | null): ResizeHandle | null {
+  const element = target instanceof Element ? target : null
+  const node = element?.closest('[data-handle]')
+  if (!(node instanceof HTMLElement)) return null
+  const name = node.dataset.handle
+  if (name && HANDLES.has(name)) return name as ResizeHandle
+  return null
+}
+
+function imageOf(target: EventTarget | null): Pos | null {
+  const element = target instanceof Element ? target : null
+  const img = element?.closest('img.atom[data-atom="image"]')
+  if (!(img instanceof HTMLElement)) return null
+  const block = img.closest('.blk.p')
+  const id = block instanceof HTMLElement ? block.dataset.id : undefined
+  const offset = Number(img.dataset.o)
+  if (!id || !Number.isInteger(offset)) return null
+  return { p: id as ParaId, o: offset }
+}
 
 /**
  * Wires one textarea to the editor. The textarea is the only focus target. Returns the detach function and a reset
@@ -61,6 +95,12 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   let skipInsert: string | null = null
   let pastePending = false
   let drag: { move: (event: MouseEvent) => void; up: (event: MouseEvent) => void } | null = null
+  let picture: PictureDrag | null = null
+  let pictureMove: ((event: MouseEvent) => void) | null = null
+  let pictureUp: ((event: MouseEvent) => void) | null = null
+  let scrollFrame = 0
+  let pointerX = 0
+  let pointerY = 0
 
   sink.setAttribute('aria-label', t('inputLabel'))
 
@@ -163,6 +203,12 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   }
 
   function onKeyDown(event: KeyboardEvent): void {
+    if (picture && event.key === 'Escape') {
+      event.preventDefault()
+      cancelPicture()
+      return
+    }
+    if (picture) cancelPicture()
     if (event.isComposing || mode.kind === 'composing') return
     const action = keymap.get(chordOf(event, editor.platform))
     if (!action) return
@@ -175,6 +221,7 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   }
 
   function onBeforeInput(event: InputEvent): void {
+    if (picture) cancelPicture()
     if (fromKey) {
       event.preventDefault()
       return
@@ -197,6 +244,7 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   }
 
   function onCompositionStart(): void {
+    cancelPicture()
     endDrag()
     const sel = editor.state.sel
     if (sel.kind === 'text' && (sel.anchor.p !== sel.head.p || sel.anchor.o !== sel.head.o)) {
@@ -281,6 +329,163 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
     else if (clientX > box.right - EDGE) host.scrollLeft += STEP
   }
 
+  function stopScroll(): void {
+    if (scrollFrame) cancelAnimationFrame(scrollFrame)
+    scrollFrame = 0
+  }
+
+  function armScroll(): void {
+    if (scrollFrame) return
+    const tick = (): void => {
+      scrollFrame = 0
+      if (!picture || picture.kind !== 'move' || !picture.active) return
+      autoscroll(pointerX, pointerY)
+      const box = host.getBoundingClientRect()
+      const near = pointerY < box.top + EDGE || pointerY > box.bottom - EDGE
+      if (near) scrollFrame = requestAnimationFrame(tick)
+    }
+    scrollFrame = requestAnimationFrame(tick)
+  }
+
+  function cancelPicture(): void {
+    if (pictureMove) document.removeEventListener('mousemove', pictureMove, true)
+    if (pictureUp) document.removeEventListener('mouseup', pictureUp, true)
+    window.removeEventListener('blur', cancelPicture)
+    document.removeEventListener('mouseout', onPictureLeave, true)
+    pictureMove = null
+    pictureUp = null
+    picture = null
+    stopScroll()
+    editor.previewImage(null)
+    editor.setNotice(null)
+  }
+
+  function onPictureLeave(event: MouseEvent): void {
+    if (!picture || event.relatedTarget) return
+    cancelPicture()
+  }
+
+  function listenPicture(): void {
+    const move = (event: MouseEvent): void => onPictureMove(event)
+    const up = (event: MouseEvent): void => onPictureUp(event)
+    pictureMove = move
+    pictureUp = up
+    document.addEventListener('mousemove', move, true)
+    document.addEventListener('mouseup', up, true)
+    window.addEventListener('blur', cancelPicture)
+    document.addEventListener('mouseout', onPictureLeave, true)
+  }
+
+  function sizeLabel(widthPt: number, heightPt: number): string {
+    const unit = pageUnit()
+    return `${formatMargin(widthPt, unit)} × ${formatMargin(heightPt, unit)} ${t('page.unit')}`
+  }
+
+  function resizeLimits(pos: Pos): { min: number, maxWidth: number } {
+    return {
+      min: MIN_IMAGE_PT * PT_TO_PX,
+      maxWidth: imageMaxWidth(editor.state.doc, pos.p) * PT_TO_PX,
+    }
+  }
+
+  function startResize(handle: ResizeHandle, event: MouseEvent): void {
+    const sel = editor.state.sel
+    if (sel.kind !== 'text') return
+    const from = sel.anchor.o <= sel.head.o && sel.anchor.p === sel.head.p ? sel.anchor : sel.head
+    const atom = findImage(editor.state.doc, from)
+    const box = editor.imageBox(from)
+    if (!atom || atom.atom.type !== 'image' || !box) return
+    picture = {
+      kind: 'resize',
+      pos: from,
+      handle,
+      x: event.clientX,
+      y: event.clientY,
+      box,
+      widthPt: atom.atom.widthPt,
+      heightPt: atom.atom.heightPt,
+    }
+    listenPicture()
+  }
+
+  function startPicturePress(pos: Pos, event: MouseEvent): void {
+    const sel = editor.state.sel
+    const covered = sel.kind === 'text'
+      && ((sel.anchor.p === pos.p && sel.anchor.o === pos.o && sel.head.p === pos.p && sel.head.o === pos.o + 1)
+        || (sel.head.p === pos.p && sel.head.o === pos.o && sel.anchor.p === pos.p && sel.anchor.o === pos.o + 1))
+    if (!covered) editor.setTextSelection(pos, { p: pos.p, o: pos.o + 1 })
+    picture = { kind: 'pending', pos, x: event.clientX, y: event.clientY }
+    listenPicture()
+  }
+
+  function onPictureMove(event: MouseEvent): void {
+    if (!picture) return
+    event.preventDefault()
+    pointerX = event.clientX
+    pointerY = event.clientY
+    if (picture.kind === 'pending') {
+      const dx = event.clientX - picture.x
+      const dy = event.clientY - picture.y
+      if (dx * dx + dy * dy <= MOVE_THRESHOLD_PX * MOVE_THRESHOLD_PX) return
+      const atom = findImage(editor.state.doc, picture.pos)
+      const file = atom?.src != null
+      if (file) editor.setNotice(t('image.move.kept'))
+      picture = { kind: 'move', from: picture.pos, x: picture.x, y: picture.y, active: true, file }
+    }
+    if (picture.kind === 'resize') {
+      const next = resizeBox(
+        picture.box,
+        picture.handle,
+        event.clientX - picture.x,
+        event.clientY - picture.y,
+        editor.zoom(),
+        resizeLimits(picture.pos),
+      )
+      editor.previewImage({
+        kind: 'resize',
+        box: next,
+        label: sizeLabel(next.width / PT_TO_PX, next.height / PT_TO_PX),
+      })
+      return
+    }
+    if (picture.kind === 'move') {
+      const point = picture.file ? null : editor.positionAtPoint(event.clientX, event.clientY)
+      const target = point && imageDropTarget(editor.state.doc, picture.from, point) ? point : null
+      editor.previewImage({ kind: 'move', from: picture.from, target })
+      armScroll()
+    }
+  }
+
+  function onPictureUp(event: MouseEvent): void {
+    const current = picture
+    if (!current) return
+    if (current.kind === 'resize') {
+      const next = resizeBox(
+        current.box,
+        current.handle,
+        event.clientX - current.x,
+        event.clientY - current.y,
+        editor.zoom(),
+        resizeLimits(current.pos),
+      )
+      const widthPt = next.width / PT_TO_PX
+      const heightPt = next.height / PT_TO_PX
+      cancelPicture()
+      const moved = Math.abs(next.width - current.box.width) > 0.05 * PT_TO_PX
+        || Math.abs(next.height - current.box.height) > 0.05 * PT_TO_PX
+      if (moved) editor.run(resizeImage(current.pos, widthPt, heightPt))
+      return
+    }
+    if (current.kind === 'move' && current.active && !current.file) {
+      const point = editor.positionAtPoint(event.clientX, event.clientY)
+      const target = point && imageDropTarget(editor.state.doc, current.from, point) ? point : null
+      cancelPicture()
+      if (target) editor.run(moveAtom(current.from, target))
+      return
+    }
+    cancelPicture()
+  }
+
   function onMouseDown(event: MouseEvent): void {
     if (event.button !== 0 || mode.kind === 'composing') return
     if (event.metaKey || event.ctrlKey || event.altKey) return
@@ -288,6 +493,18 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
     const target = event.target
     const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null
     if (!element?.closest('.page')) return
+    const handle = handleOf(event.target)
+    const image = event.shiftKey ? null : imageOf(event.target)
+    if (handle || image) {
+      event.preventDefault()
+      editor.focus()
+      endDrag()
+      cancelPicture()
+      goal = null
+      if (handle) startResize(handle, event)
+      else if (image) startPicturePress(image, event)
+      return
+    }
     const pos = editor.positionAtPoint(event.clientX, event.clientY)
     if (!pos) return
     event.preventDefault()
@@ -340,6 +557,7 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
       return mode.kind === 'composing'
     },
     detach() {
+      cancelPicture()
       endDrag()
       controller.abort()
       mode = IDLE
@@ -348,6 +566,7 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
     },
     reset() {
       const composing = mode.kind === 'composing'
+      cancelPicture()
       endDrag()
       mode = IDLE
       goal = null

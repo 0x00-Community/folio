@@ -18,6 +18,8 @@ import {
   INSERTED_TABLE_BORDERS,
   initialState,
   insertColumn,
+  imageChrome,
+  imageMoveIssue,
   insertImage,
   insertLineBreak,
   insertPageBreak,
@@ -25,7 +27,9 @@ import {
   insertTable,
   insertText,
   move,
+  moveAtom,
   redo,
+  resizeImage,
   selectAll,
   selectAround,
   selectedText,
@@ -630,6 +634,112 @@ test('images scale to the content width and page setup replaces one section', ()
     assert.equal(cellImage.atom.heightPt, pt(50), 'the cell scale keeps the ratio')
   }
   assert.equal(inCell.doc.media.byKey.get(mediaKey('cell'))?.contentType, 'image/jpeg', 'the cell image keeps its content type')
+})
+
+test('a selected picture resizes and moves as one command, and a file picture cannot move', () => {
+  const picture = imageAtom('pic', 80, 40)
+  const sourced = imageAtom('file', 144, 72, 4)
+  const para = paragraph('p', [text('ab', 1), picture, text('cd', 2)], {}, { src: 3 })
+  const other = paragraph('q', [text('end', 5)], {}, { src: 6 })
+  const locked = paragraph('locked', [picture], {}, { lock: { reason: 'revisions' } })
+  const doc = makeDoc([para, other])
+  const selected = rangeAt(initialState(doc), { p: para.id, o: 2 }, { p: para.id, o: 3 })
+  assert.equal(imageChrome(selected.doc, selected.sel), 'handles', 'one picture shows handles')
+  assert.equal(selectedText(selected), '', 'copy takes the range and the picture has no plain text')
+
+  const replaced = run(selected, insertText('Z'))
+  assert.equal(flatText(asParagraph(replaced.doc.body[0])), 'abZcd', 'typing replaces the picture')
+  const removed = run(selected, deleteBackward('char'))
+  assert.equal(flatText(asParagraph(removed.doc.body[0])), 'abcd', 'backspace removes the selected picture')
+  const deleted = run(selected, deleteForward('char'))
+  assert.equal(flatText(asParagraph(deleted.doc.body[0])), 'abcd', 'delete removes the selected picture')
+  const after = run(selected, move('forward', 'char', false))
+  assert.deepEqual(after.sel, { kind: 'text', anchor: { p: para.id, o: 3 }, head: { p: para.id, o: 3 } }, 'forward leaves the caret after the picture')
+  const before = run(selected, move('backward', 'char', false))
+  assert.deepEqual(before.sel, { kind: 'text', anchor: { p: para.id, o: 2 }, head: { p: para.id, o: 2 } }, 'backward leaves the caret before the picture')
+
+  const resized = run(selected, resizeImage({ p: para.id, o: 2 }, 40, 20))
+  const resizedAtom = asParagraph(resized.doc.body[0]).inlines[1]
+  assert.ok(resizedAtom && resizedAtom.kind === 'atom' && resizedAtom.atom.type === 'image', 'the picture is still an image')
+  if (resizedAtom && resizedAtom.kind === 'atom' && resizedAtom.atom.type === 'image') {
+    assert.equal(resizedAtom.atom.widthPt, pt(40), 'the width is replaced')
+    assert.equal(resizedAtom.atom.heightPt, pt(20), 'the height is replaced')
+    assert.equal(resizedAtom.atom.media, picture.atom.type === 'image' ? picture.atom.media : picture.atom, 'the media stays')
+    assert.equal(resizedAtom.src, null, 'a fresh picture keeps a null src')
+  }
+  assert.equal(resized.doc.body[1], other, 'the other paragraph stays')
+  assert.deepEqual(resized.sel, { kind: 'text', anchor: { p: para.id, o: 2 }, head: { p: para.id, o: 3 } }, 'the picture stays selected')
+  const restored = undo(resized)
+  assert.ok(restored, 'undo applies')
+  if (restored) {
+    assert.equal(asParagraph(restored.doc.body[0]).inlines[1], picture, 'undo restores the original picture object')
+    checkDoc(restored.doc)
+  }
+  const same = resizeImage({ p: para.id, o: 2 }, 80, 40)(selected)
+  assert.equal(same?.intent, 'none', 'the starting size adds no undo entry')
+  if (same) {
+    const held = apply(selected, same, 0)
+    assert.equal(held.history, selected.history, 'an unchanged size is not history')
+    assert.equal(held.doc, selected.doc, 'an unchanged size keeps the document')
+  }
+  refused(selected, resizeImage({ p: para.id, o: 2 }, 4, 20))
+  refused(selected, resizeImage({ p: para.id, o: 2 }, 500, 20))
+  refused(selected, resizeImage({ p: para.id, o: 2 }, 40, 1.5))
+  refused(selected, resizeImage({ p: para.id, o: 0 }, 40, 20))
+  const short = imageAtom('short', 40, 1.5)
+  const shortPara = paragraph('s', [short])
+  const keptShort = run(initialState(makeDoc([shortPara])), resizeImage({ p: shortPara.id, o: 0 }, 50, 1.5))
+  const keptAtom = asParagraph(keptShort.doc.body[0]).inlines[0]
+  assert.ok(keptAtom && keptAtom.kind === 'atom' && keptAtom.atom.type === 'image' && keptAtom.atom.heightPt === pt(1.5), 'a side that was already under 8pt can stay')
+
+  const moved = run(selected, moveAtom({ p: para.id, o: 2 }, { p: other.id, o: 3 }))
+  const host = asParagraph(moved.doc.body[1])
+  assert.equal(host.inlines[1], picture, 'the move keeps the picture object')
+  assert.equal(flatText(asParagraph(moved.doc.body[0])), 'abcd', 'the picture leaves its paragraph')
+  assert.deepEqual(moved.sel, { kind: 'text', anchor: { p: other.id, o: 3 }, head: { p: other.id, o: 4 } }, 'the picture is selected in its new place')
+  const back = undo(moved)
+  assert.ok(back, 'one undo restores the move')
+  if (back) assert.equal(asParagraph(back.doc.body[0]).inlines[1], picture, 'undo puts the original picture back')
+  assert.equal(imageMoveIssue(doc, { p: para.id, o: 2 }, { p: para.id, o: 2 }), 'same', 'the picture is not a drop target for itself')
+  refused(selected, moveAtom({ p: para.id, o: 2 }, { p: para.id, o: 3 }))
+
+  const inner = paragraph('cell', [text('x')])
+  const boxed = table('t', [row([cell([inner])])], [40])
+  const placed = run(initialState(makeDoc([para, boxed])), moveAtom({ p: para.id, o: 2 }, { p: inner.id, o: 0 }))
+  const fitted = asParagraph(asTable(placed.doc.body[1]).rows[0]?.cells[0]?.blocks[0]).inlines[0]
+  assert.ok(fitted && fitted.kind === 'atom' && fitted.atom.type === 'image', 'the picture lands in the cell')
+  if (fitted && fitted.kind === 'atom' && fitted.atom.type === 'image') {
+    assert.equal(fitted.atom.widthPt, pt(40), 'a narrower cell scales the width')
+    assert.equal(fitted.atom.heightPt, pt(20), 'the cell scale keeps the ratio')
+    assert.equal(fitted.atom.media, picture.atom.type === 'image' ? picture.atom.media : '', 'the scaled picture keeps its media')
+    assert.equal(fitted.src, null, 'the scaled picture keeps its src')
+  }
+  const cellBack = undo(placed)
+  assert.ok(cellBack, 'the scale shares the move undo entry')
+  if (cellBack) assert.equal(asParagraph(cellBack.doc.body[0]).inlines[1], picture, 'undo restores the unscaled picture')
+
+  const filed = paragraph('file', [text('ab', 1), sourced], {}, { src: 2 })
+  const fileDoc = makeDoc([filed, other])
+  const fileState = rangeAt(initialState(fileDoc), { p: filed.id, o: 2 }, { p: filed.id, o: 3 })
+  const fileSized = run(fileState, resizeImage({ p: filed.id, o: 2 }, 120, 60))
+  const fileAtom = asParagraph(fileSized.doc.body[0]).inlines[1]
+  assert.ok(fileAtom && fileAtom.kind === 'atom' && fileAtom.atom.type === 'image' && fileAtom.src === sourced.src, 'resizing a file picture keeps its run')
+  assert.equal(imageMoveIssue(fileDoc, { p: filed.id, o: 2 }, { p: other.id, o: 0 }), 'file', 'a file picture cannot move')
+  refused(fileState, moveAtom({ p: filed.id, o: 2 }, { p: other.id, o: 0 }))
+  refused(initialState(makeDoc([locked])), resizeImage({ p: locked.id, o: 0 }, 40, 20))
+
+  const preview = paragraph('preview', [picture])
+  const previewDoc = makeDoc([opaqueBlock('box', [preview], false)])
+  assert.equal(
+    imageChrome(previewDoc, { kind: 'text', anchor: { p: preview.id, o: 0 }, head: { p: preview.id, o: 1 } }),
+    'outline',
+    'a preview picture has an outline and no handles',
+  )
+  assert.equal(
+    imageChrome(makeDoc([locked]), { kind: 'text', anchor: { p: locked.id, o: 0 }, head: { p: locked.id, o: 1 } }),
+    'outline',
+    'a locked picture has an outline and no handles',
+  )
 })
 
 test('move, select, selected text, and word count', () => {

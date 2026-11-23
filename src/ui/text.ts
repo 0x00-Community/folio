@@ -43,12 +43,13 @@ export function formatTitle(name: string, dirty: boolean, appName: string): stri
  * Page and word count. While pagination is still running, the page count is prefixed with ≥
  * so a partial count is not shown as final. Zoom is a control on the status bar, not part of this line.
  */
-export function statusText(status: StatusCounts, translate: Translate): string {
+export function statusText(status: StatusCounts & { readonly notice?: string | null }, translate: Translate): string {
   const pages = status.pagesFinal ? String(status.pages) : `≥${status.pages}`
-  return [
+  const line = [
     translate('status.page', { page: status.page, pages }),
     translate('status.words', { words: status.words }),
   ].join(' · ')
+  return status.notice ? `${line} · ${status.notice}` : line
 }
 
 export const ZOOM_PERCENTS = [50, 75, 100, 125, 150, 200] as const

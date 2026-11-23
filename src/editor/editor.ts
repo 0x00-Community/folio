@@ -17,6 +17,7 @@ import {
   listMarkers,
   withCaretParagraph,
 } from './derive.ts'
+import type { ImageGesture, PageBox } from './image-geom.ts'
 import { pageOfBlock, PageView } from './pages.ts'
 import type { Decoration, RenderContext } from './render.ts'
 
@@ -36,6 +37,8 @@ export interface Status {
   readonly words: number
   /** Section index holding the caret, for page setup. */
   readonly section: number
+  /** A transient status-line message, or null. */
+  readonly notice: string | null
 }
 
 const EMPTY_IMAGE =
@@ -65,6 +68,7 @@ export class Editor implements EditingSurface {
   private editedSinceLoad = false
   private changeFrame = 0
   private destroyed = false
+  private notice: string | null = null
 
   /** Creates the page view inside `host` and shows the opened document. Input listeners belong to the input layer. */
   static mount(host: HTMLElement, opened: Opened, options: EditorOptions): Editor {
@@ -114,7 +118,9 @@ export class Editor implements EditingSurface {
     this.metricsSettled = false
     this.knownFonts.clear()
     this.pendingFonts.clear()
+    this.notice = null
     this.view.show(doc)
+    this.view.setImagePreview(null)
     this.paintSelection(true)
     if (previous !== opened.source) previous.free()
     this.scheduleChange()
@@ -203,6 +209,7 @@ export class Editor implements EditingSurface {
       pagesFinal: this.metricsSettled && this.view.layout.complete,
       words: wordCount(this.current.doc),
       section: pos !== null ? sectionIndex(this.current.doc, pos) : 0,
+      notice: this.notice,
     }
   }
 
@@ -228,6 +235,26 @@ export class Editor implements EditingSurface {
   setZoom(zoom: number): void {
     if (this.destroyed) return
     this.view.setZoom(zoom)
+    this.scheduleChange()
+  }
+
+  zoom(): number {
+    return this.view.currentZoom()
+  }
+
+  imageBox(pos: Pos): PageBox | null {
+    if (this.destroyed) return null
+    return this.view.imageBox(pos)
+  }
+
+  previewImage(preview: ImageGesture | null): void {
+    if (this.destroyed) return
+    this.view.setImagePreview(preview)
+  }
+
+  setNotice(text: string | null): void {
+    if (this.destroyed || this.notice === text) return
+    this.notice = text
     this.scheduleChange()
   }
 

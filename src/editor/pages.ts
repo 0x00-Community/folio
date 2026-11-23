@@ -1,3 +1,4 @@
+import { t } from '../i18n.ts'
 import { flatText } from '../model.ts'
 import type {
   Block,
@@ -13,6 +14,14 @@ import type {
   Table,
 } from '../model.ts'
 import { documentGridPitch } from './derive.ts'
+import { imageChrome, selectedImage } from './edit.ts'
+import {
+  HANDLE_HIT_SCREEN_PX,
+  HANDLE_SCREEN_PX,
+  RESIZE_HANDLES,
+  handleOrigin,
+} from './image-geom.ts'
+import type { ImageGesture, PageBox } from './image-geom.ts'
 import {
   blockElements,
   domPoint,
@@ -1825,6 +1834,7 @@ export class PageView {
   private decoOwner: Block | null = null
   private sink: HTMLTextAreaElement | null = null
   private lastPaint: { sel: Selection; sink: HTMLTextAreaElement } | null = null
+  private imagePreview: ImageGesture | null = null
   /** Set while a metrics pass remeasures in place. Pages above the hold are still estimates until it finishes. */
   private rewriting = false
   private hold: ViewportHold | null = null
@@ -2168,6 +2178,21 @@ export class PageView {
     this.restoreHold(hold)
     if (suppressAnchor) this.clearOverflowAnchor()
     this.syncFromGeometry()
+    if (this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
+  }
+
+  currentZoom(): number {
+    return this.zoom
+  }
+
+  /** The picture's border box in page pixels, or null when that page is not mounted. */
+  imageBox(pos: Pos): PageBox | null {
+    return this.imageFrame(pos)?.box ?? null
+  }
+
+  setImagePreview(preview: ImageGesture | null): void {
+    this.imagePreview = preview
+    if (this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
   }
 
   /**
@@ -3161,9 +3186,12 @@ export class PageView {
       return
     }
     const head = this.caretRect(sel.head)
-    this.drawCaret(head)
+    // A selected picture shows its frame and handles. A caret beside it and a tint over it would only hide it.
+    const picture = this.doc !== null && selectedImage(this.doc, sel) !== null
+    if (!picture) this.drawCaret(head)
     this.placeSink(head, sink)
-    if (sel.anchor.p !== sel.head.p || sel.anchor.o !== sel.head.o) this.drawSelection(sel.anchor, sel.head)
+    if (!picture && (sel.anchor.p !== sel.head.p || sel.anchor.o !== sel.head.o)) this.drawSelection(sel.anchor, sel.head)
+    this.paintImageChrome(sel)
   }
 
   private drawCaret(caret: CaretRect): void {
@@ -3171,6 +3199,7 @@ export class PageView {
     if (!(overlay instanceof HTMLElement)) return
     const mark = document.createElement('div')
     mark.className = 'caret'
+    mark.setAttribute('aria-hidden', 'true')
     mark.style.left = `${caret.x}px`
     mark.style.top = `${caret.top}px`
     mark.style.height = `${caret.height}px`
@@ -3233,6 +3262,7 @@ export class PageView {
           if (right - left < 0.5 || bottom - top < 0.5) continue
           const mark = document.createElement('div')
           mark.className = 'sel'
+          mark.setAttribute('aria-hidden', 'true')
           const z = this.zoom
           mark.style.left = `${(left - origin.left) / z}px`
           mark.style.top = `${(top - origin.top) / z}px`
@@ -3276,6 +3306,7 @@ export class PageView {
           const rect = td.getBoundingClientRect()
           const mark = document.createElement('div')
           mark.className = 'cell-sel'
+          mark.setAttribute('aria-hidden', 'true')
           const z = this.zoom
           mark.style.left = `${(rect.left - origin.left) / z}px`
           mark.style.top = `${(rect.top - origin.top) / z}px`
@@ -3285,5 +3316,116 @@ export class PageView {
         }
       }
     }
+  }
+
+  private paintImageChrome(sel: Selection): void {
+    for (const img of this.host.querySelectorAll('img.atom.dim')) img.classList.remove('dim')
+    const doc = this.doc
+    if (!doc || sel.kind !== 'text') return
+    const hit = selectedImage(doc, sel)
+    if (!hit) return
+    const frame = this.imageFrame({ p: hit.para.id, o: hit.offset })
+    if (!frame) return
+    const overlay = frame.pageEl.querySelector('.overlay')
+    if (!(overlay instanceof HTMLElement)) return
+    this.drawImageFrame(overlay, frame.box)
+    if (imageChrome(doc, sel) === 'handles') this.drawImageHandles(overlay, frame.box)
+    const preview = this.imagePreview
+    if (preview?.kind === 'resize') this.drawImageGhost(overlay, preview.box, preview.label)
+    if (preview?.kind === 'move') {
+      frame.img.classList.add('dim')
+      if (preview.target) this.drawCaret(this.caretRect(preview.target))
+    }
+  }
+
+  private imageFrame(pos: Pos): { pageEl: HTMLElement, img: HTMLElement, box: PageBox } | null {
+    if (!this.doc) return null
+    const pageIndex = this.pageOf(pos)
+    this.mountPage(pageIndex)
+    const pageEl = this.pageEls[pageIndex]
+    if (!pageEl) return null
+    const paraEl = this.paraElement(pageEl, pos)
+    if (!paraEl) return null
+    const img = paraEl.querySelector(`img.atom[data-atom="image"][data-o="${CSS.escape(String(pos.o))}"]`)
+    if (!(img instanceof HTMLElement)) return null
+    const origin = pageEl.getBoundingClientRect()
+    const rect = img.getBoundingClientRect()
+    const z = this.zoom > 0 ? this.zoom : 1
+    return {
+      pageEl,
+      img,
+      box: {
+        x: (rect.left - origin.left) / z,
+        y: (rect.top - origin.top) / z,
+        width: rect.width / z,
+        height: rect.height / z,
+      },
+    }
+  }
+
+  private drawImageFrame(overlay: HTMLElement, box: PageBox): void {
+    const frame = document.createElement('div')
+    frame.className = 'image-frame'
+    frame.setAttribute('aria-hidden', 'true')
+    const border = 1 / (this.zoom > 0 ? this.zoom : 1)
+    frame.style.left = `${box.x}px`
+    frame.style.top = `${box.y}px`
+    frame.style.width = `${box.width}px`
+    frame.style.height = `${box.height}px`
+    frame.style.borderWidth = `${border}px`
+    overlay.append(frame)
+  }
+
+  private drawImageHandles(overlay: HTMLElement, box: PageBox): void {
+    const z = this.zoom > 0 ? this.zoom : 1
+    for (const handle of RESIZE_HANDLES) {
+      const origin = handleOrigin(box, handle, HANDLE_HIT_SCREEN_PX, z)
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'image-handle'
+      button.dataset.handle = handle
+      button.tabIndex = -1
+      button.setAttribute('aria-label', t(`image.handle.${handle}`))
+      button.style.left = `${origin.x}px`
+      button.style.top = `${origin.y}px`
+      button.style.width = `${HANDLE_HIT_SCREEN_PX / z}px`
+      button.style.height = `${HANDLE_HIT_SCREEN_PX / z}px`
+      const mark = document.createElement('span')
+      mark.setAttribute('aria-hidden', 'true')
+      const size = HANDLE_SCREEN_PX / z
+      const border = 1 / z
+      mark.style.width = `${size}px`
+      mark.style.height = `${size}px`
+      mark.style.borderWidth = `${border}px`
+      mark.style.left = `${(HANDLE_HIT_SCREEN_PX - HANDLE_SCREEN_PX) / 2 / z}px`
+      mark.style.top = `${(HANDLE_HIT_SCREEN_PX - HANDLE_SCREEN_PX) / 2 / z}px`
+      button.append(mark)
+      overlay.append(button)
+    }
+  }
+
+  private drawImageGhost(overlay: HTMLElement, box: PageBox, label: string): void {
+    const z = this.zoom > 0 ? this.zoom : 1
+    const ghost = document.createElement('div')
+    ghost.className = 'image-ghost'
+    ghost.setAttribute('aria-hidden', 'true')
+    ghost.style.left = `${box.x}px`
+    ghost.style.top = `${box.y}px`
+    ghost.style.width = `${box.width}px`
+    ghost.style.height = `${box.height}px`
+    ghost.style.borderWidth = `${1 / z}px`
+    overlay.append(ghost)
+    const tag = document.createElement('div')
+    tag.className = 'image-size'
+    tag.setAttribute('aria-hidden', 'true')
+    tag.textContent = label
+    tag.style.left = `${box.x}px`
+    tag.style.top = `${box.y + box.height + 4 / z}px`
+    tag.style.fontSize = `${11 / z}px`
+    tag.style.lineHeight = `${16 / z}px`
+    tag.style.padding = `0 ${5 / z}px`
+    tag.style.borderWidth = `${1 / z}px`
+    tag.style.borderRadius = `${3 / z}px`
+    overlay.append(tag)
   }
 }

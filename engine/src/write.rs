@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rdocx::{
     Alignment, BorderStyle, BreakKind, Document, Length, ListLevel, ListNumberFormat, Paragraph,
-    Run, RunFontSlot, RunItemRef, RunRef, StyleBuilder, Twips, UnderlineStyle, VMerge,
+    Run, RunFontSlot, RunItemRef, RunRef, StoryKind, StyleBuilder, Twips, UnderlineStyle, VMerge,
 };
 
 use crate::import::{self, ParaAddr, SourceMap};
@@ -144,6 +144,7 @@ pub fn write(
             }
         }
     }
+    resize_sourced_pictures(&mut document, imported, patch)?;
     Ok(Written {
         document,
         removed,
@@ -224,6 +225,179 @@ fn length_pt(pt: f64) -> Length {
 /// Drawings store EMU. 914400 EMU per inch and 72 pt per inch is 12700 EMU per pt.
 fn image_length(pt: f64) -> Length {
     Length::emu((pt * verify::EMU_PER_PT).round() as i64)
+}
+
+struct SourcedImage {
+    run: u32,
+    media: String,
+    width: f64,
+    height: f64,
+}
+
+/// A sourced picture's size is not a run edit. `set_picture_size_at` changes that
+/// one drawing's extent after the patch has been applied, so a second use of the
+/// same media is left alone. The kit's refusal is the contract error.
+fn resize_sourced_pictures(
+    document: &mut Document,
+    imported: &wire::Imported,
+    patch: &Patch,
+) -> Result<(), WriteError> {
+    let sizes = patched_image_sizes(imported, &patch.body)?;
+    let pending: Vec<(SourcedImage, f64, f64)> = sourced_images(&imported.body)
+        .into_iter()
+        .filter_map(|image| {
+            let (width, height) = sizes.get(&image.run).copied()?;
+            if image_pt_same(image.width, width) && image_pt_same(image.height, height) {
+                None
+            } else {
+                Some((image, width, height))
+            }
+        })
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // A resize that lands on the same EMU leaves the picture in the match set, so the
+    // next picture of that size has to skip it. A resize that changes the EMU drops
+    // the picture out of the set and the next search starts at the new first match.
+    let mut consumed: HashMap<(String, i64, i64), usize> = HashMap::new();
+    for (image, width, height) in pending {
+        let old_w = image_length(image.width).to_emu();
+        let old_h = image_length(image.height).to_emu();
+        let new_w = image_length(width).to_emu();
+        let new_h = image_length(height).to_emu();
+        let key = (image.media.clone(), old_w, old_h);
+        let skip = consumed.get(&key).copied().unwrap_or(0);
+        let pictures = document.pictures()?;
+        let mut seen = 0usize;
+        let mut found = None;
+        for picture in pictures {
+            let matches = picture.location.story().kind() == StoryKind::Body
+                && picture.relationship_id == image.media
+                && emu_matches(picture.width, image.width)
+                && emu_matches(picture.height, image.height);
+            if !matches {
+                continue;
+            }
+            if seen == skip {
+                found = Some(picture);
+                break;
+            }
+            seen += 1;
+        }
+        let Some(picture) = found else {
+            return Err(contract(format!("picture run {} is missing", image.run)));
+        };
+        if new_w == old_w && new_h == old_h {
+            consumed.insert(key, skip + 1);
+        }
+        document
+            .set_picture_size_at(&picture, image_length(width), image_length(height))
+            .map_err(|error| contract(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn image_pt_same(left: f64, right: f64) -> bool {
+    (left - right).abs() < 1e-9
+}
+
+fn emu_matches(stored: i64, pt: f64) -> bool {
+    let written = (pt * verify::EMU_PER_PT).round() as i64;
+    stored == written || (stored as f64 / verify::EMU_PER_PT - pt).abs() < 1e-3
+}
+
+fn patched_image_sizes(
+    imported: &wire::Imported,
+    body: &[PatchBlock],
+) -> Result<HashMap<u32, (f64, f64)>, WriteError> {
+    let mut by_src = HashMap::new();
+    index_blocks(&imported.body, &mut by_src);
+    let mut sizes = HashMap::new();
+    for block in body {
+        let resolved = match block {
+            PatchBlock::Keep { keep } => *by_src
+                .get(keep)
+                .ok_or_else(|| contract(format!("keep {keep} is not a pristine block")))?,
+            PatchBlock::Changed(block) => block,
+        };
+        note_image_sizes(resolved, &mut sizes);
+    }
+    Ok(sizes)
+}
+
+fn note_image_sizes(block: &Block, sizes: &mut HashMap<u32, (f64, f64)>) {
+    match block {
+        Block::P(para) => note_inline_images(&para.inlines, sizes),
+        Block::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for child in &cell.blocks {
+                        note_image_sizes(child, sizes);
+                    }
+                }
+            }
+        }
+        Block::Opaque(_) => {}
+    }
+}
+
+fn note_inline_images(inlines: &[Inline], sizes: &mut HashMap<u32, (f64, f64)>) {
+    for inline in inlines {
+        if let Inline::Atom {
+            atom:
+                Atom::Image {
+                    width_pt,
+                    height_pt,
+                    ..
+                },
+            src: Some(src),
+        } = inline
+        {
+            sizes.insert(*src, (*width_pt, *height_pt));
+        }
+    }
+}
+
+fn sourced_images(blocks: &[Block]) -> Vec<SourcedImage> {
+    let mut out = Vec::new();
+    fn walk(blocks: &[Block], out: &mut Vec<SourcedImage>) {
+        for block in blocks {
+            match block {
+                Block::P(para) => {
+                    for inline in &para.inlines {
+                        if let Inline::Atom {
+                            atom:
+                                Atom::Image {
+                                    media,
+                                    width_pt,
+                                    height_pt,
+                                },
+                            src: Some(src),
+                        } = inline
+                        {
+                            out.push(SourcedImage {
+                                run: *src,
+                                media: media.clone(),
+                                width: *width_pt,
+                                height: *height_pt,
+                            });
+                        }
+                    }
+                }
+                Block::Table(table) => {
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            walk(&cell.blocks, out);
+                        }
+                    }
+                }
+                Block::Opaque(_) => {}
+            }
+        }
+    }
+    walk(blocks, &mut out);
+    out
 }
 
 #[allow(clippy::float_cmp)]

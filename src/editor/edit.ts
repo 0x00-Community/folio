@@ -1,4 +1,5 @@
 // How the model changes. Pure functions only: no DOM, no rdocx, no clock reads except the timestamp apply() is handed.
+import { MIN_IMAGE_PT } from './image-geom.ts'
 import {
   comparePos,
   flatText,
@@ -632,6 +633,195 @@ export function insertImage(media: MediaRef): Command {
     const inserted = insertAtom(doc, cleared.pos, atom)
     if (!inserted) return null
     return done(inserted.doc, caret(inserted.pos), null, 'discrete')
+  }
+}
+
+export type ImageMoveIssue = 'missing' | 'file' | 'locked' | 'preview' | 'story' | 'same'
+
+export function findImage(doc: Doc, pos: Pos): Atom | null {
+  const loc = safeLoc(indexOf(doc), pos.p)
+  if (!loc) return null
+  return imageAtomAt(loc.para, pos.o)
+}
+
+export function selectedImage(doc: Doc, sel: Selection): { para: Paragraph, offset: number, atom: Atom } | null {
+  if (sel.kind !== 'text') return null
+  let ordered: Ordered
+  try {
+    ordered = orderRange(indexOf(doc), sel.anchor, sel.head)
+  } catch {
+    return null
+  }
+  if (ordered.from.p !== ordered.to.p || ordered.to.o !== ordered.from.o + 1) return null
+  const atom = imageAtomAt(ordered.fromLoc.para, ordered.from.o)
+  if (!atom) return null
+  return { para: ordered.fromLoc.para, offset: ordered.from.o, atom }
+}
+
+/** Outline while one picture is selected. Handles only when that picture can be edited. */
+export function imageChrome(doc: Doc, sel: Selection): 'none' | 'outline' | 'handles' {
+  const hit = selectedImage(doc, sel)
+  if (!hit) return 'none'
+  const loc = safeLoc(indexOf(doc), hit.para.id)
+  if (!loc || loc.story !== 'body' || loc.para.lock || isPreview(doc, loc)) return 'outline'
+  return 'handles'
+}
+
+export function imageMaxWidth(doc: Doc, id: ParaId): number {
+  const loc = safeLoc(indexOf(doc), id)
+  if (!loc) return contentWidth(doc, 0)
+  return maxImageWidth(doc, loc)
+}
+
+export function imageResizeIssue(doc: Doc, pos: Pos, widthPt: number, heightPt: number): 'missing' | 'range' | null {
+  const image = findImage(doc, pos)
+  if (!image || image.atom.type !== 'image') return 'missing'
+  if (!imageSizeAllowed(image.atom.widthPt, image.atom.heightPt, widthPt, heightPt, imageMaxWidth(doc, pos.p))) {
+    return 'range'
+  }
+  return null
+}
+
+export function imageMoveIssue(doc: Doc, from: Pos, to: Pos): ImageMoveIssue | null {
+  const image = findImage(doc, from)
+  if (!image) return 'missing'
+  if (image.src !== null) return 'file'
+  const index = indexOf(doc)
+  const fromLoc = safeLoc(index, from.p)
+  const toLoc = safeLoc(index, to.p)
+  if (!fromLoc || !toLoc) return 'missing'
+  if (fromLoc.story !== 'body' || toLoc.story !== 'body') return 'story'
+  if (isPreview(doc, fromLoc) || isPreview(doc, toLoc)) return 'preview'
+  if (fromLoc.para.lock || toLoc.para.lock) return 'locked'
+  const dest = imageInsertAt(toLoc.para, to.o)
+  if (from.p === to.p && (dest === from.o || dest === from.o + 1)) return 'same'
+  return null
+}
+
+export function imageDropTarget(doc: Doc, from: Pos, to: Pos): boolean {
+  return imageMoveIssue(doc, from, to) === null
+}
+
+export function resizeImage(pos: Pos, widthPt: number, heightPt: number): Command {
+  return (state) => {
+    const loc = safeLoc(indexOf(state.doc), pos.p)
+    if (!loc || loc.story !== 'body' || loc.para.lock || isPreview(state.doc, loc)) return null
+    const image = imageAtomAt(loc.para, pos.o)
+    if (!image || image.atom.type !== 'image') return null
+    const max = maxImageWidth(state.doc, loc)
+    if (!imageSizeAllowed(image.atom.widthPt, image.atom.heightPt, widthPt, heightPt, max)) return null
+    const range = imageRange(loc.para.id, pos.o)
+    if (Math.abs(widthPt - image.atom.widthPt) < 1e-4 && Math.abs(heightPt - image.atom.heightPt) < 1e-4) {
+      return done(state.doc, range, null, 'none')
+    }
+    const next: Atom = {
+      ...image,
+      atom: { type: 'image', media: image.atom.media, widthPt: asPt(widthPt), heightPt: asPt(heightPt) },
+    }
+    const inlines = replaceAtomAt(loc.para.inlines, pos.o, next)
+    const doc = replaceParagraph(state.doc, { ...loc.para, inlines })
+    return done(doc, range, null, 'discrete')
+  }
+}
+
+export function moveAtom(from: Pos, to: Pos): Command {
+  return (state) => {
+    if (imageMoveIssue(state.doc, from, to)) return null
+    const index = indexOf(state.doc)
+    const fromLoc = safeLoc(index, from.p)
+    const toLoc = safeLoc(index, to.p)
+    const image = fromLoc ? imageAtomAt(fromLoc.para, from.o) : null
+    if (!fromLoc || !toLoc || !image || image.atom.type !== 'image') return null
+    const dest = imageInsertAt(toLoc.para, to.o)
+    const fitted = fitMovedImage(state.doc, toLoc, image)
+    if (from.p === to.p) {
+      const removed = deleteInlines(fromLoc.para.inlines, from.o, from.o + 1)
+      const insertAt = dest > from.o ? dest - 1 : dest
+      const inlines = normalizeInlines(insertInlines(removed, insertAt, [fitted]))
+      if (sameInlines(fromLoc.para.inlines, inlines)) return null
+      const doc = replaceParagraph(state.doc, { ...fromLoc.para, inlines })
+      return done(doc, imageRange(fromLoc.para.id, insertAt), null, 'discrete')
+    }
+    const stripped = normalizeInlines(deleteInlines(fromLoc.para.inlines, from.o, from.o + 1))
+    let doc = replaceParagraph(state.doc, { ...fromLoc.para, inlines: stripped })
+    const target = safeLoc(indexOf(doc), to.p)
+    if (!target) return null
+    const inlines = normalizeInlines(insertInlines(target.para.inlines, dest, [fitted]))
+    doc = replaceParagraph(doc, { ...target.para, inlines })
+    return done(doc, imageRange(target.para.id, dest), null, 'discrete')
+  }
+}
+
+function imageAtomAt(para: Paragraph, offset: number): Atom | null {
+  let cursor = 0
+  for (const inline of para.inlines) {
+    if (inline.kind === 'atom' && inline.atom.type === 'image' && cursor === offset) return inline
+    cursor += inlineLen(inline)
+  }
+  return null
+}
+
+function imageRange(id: ParaId, offset: number): Selection {
+  return { kind: 'text', anchor: { p: id, o: offset }, head: { p: id, o: offset + 1 } }
+}
+
+function imageInsertAt(para: Paragraph, offset: number): number {
+  const length = inlineLength(para.inlines)
+  return snapBack(flatText(para), clampOffset(offset, length))
+}
+
+function clampOffset(offset: number, length: number): number {
+  if (offset < 0) return 0
+  if (offset > length) return length
+  return offset
+}
+
+function maxImageWidth(doc: Doc, loc: ParaLoc): number {
+  const cell = cellWidth(doc, loc)
+  if (cell !== null && cell > 0) return cell
+  return contentWidth(doc, sectionIndex(doc, loc))
+}
+
+function imageSizeAllowed(
+  currentWidth: number,
+  currentHeight: number,
+  width: number,
+  height: number,
+  maxWidth: number,
+): boolean {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false
+  if (width > maxWidth + 1e-6) return false
+  const widthOk = width + 1e-6 >= MIN_IMAGE_PT || Math.abs(width - currentWidth) < 1e-4
+  const heightOk = height + 1e-6 >= MIN_IMAGE_PT || Math.abs(height - currentHeight) < 1e-4
+  return widthOk && heightOk
+}
+
+function replaceAtomAt(inlines: readonly Inline[], offset: number, atom: Atom): readonly Inline[] {
+  const out: Inline[] = []
+  let cursor = 0
+  let replaced = false
+  for (const inline of inlines) {
+    if (!replaced && inline.kind === 'atom' && cursor === offset) {
+      out.push(atom)
+      replaced = true
+    } else {
+      out.push(inline)
+    }
+    cursor += inlineLen(inline)
+  }
+  return replaced ? out : inlines
+}
+
+function fitMovedImage(doc: Doc, loc: ParaLoc, atom: Atom): Atom {
+  if (atom.atom.type !== 'image') return atom
+  const max = maxImageWidth(doc, loc)
+  const width = atom.atom.widthPt
+  const height = atom.atom.heightPt
+  if (!(width > max) || !(width > 0)) return atom
+  const scale = max / width
+  return {
+    ...atom,
+    atom: { type: 'image', media: atom.atom.media, widthPt: asPt(width * scale), heightPt: asPt(height * scale) },
   }
 }
 

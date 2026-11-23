@@ -100,8 +100,9 @@ In scope:
   when it is wider, with its real content type. Backspace and Delete remove it (the atom path exists).
 
 Not in this round. Do not add a control for any of these: merged or split cells, column resizing by drag, table
-styles and shading, cell range selection, nested table insertion, image resize handles, floating images, section
-break insertion, restart numbering, list format choice, headers and footers.
+styles and shading, cell range selection, nested table insertion, floating images, section
+break insertion, restart numbering, list format choice, headers and footers. Inline picture handles are in
+`image-handles.md`.
 
 ## Units and checks
 

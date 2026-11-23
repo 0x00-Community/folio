@@ -16,6 +16,7 @@ import { checkDoc, flatText } from '../model.ts'
 import type { Block, Doc, Paragraph, Pos, Table } from '../model.ts'
 import {
   cell,
+  imageAtom,
   makeDoc,
   mediaKey,
   mulberry32,
@@ -46,7 +47,7 @@ const CODES = new Set([
 function opsDoc(): Doc {
   const built = makeDoc([
     paragraph('p', [text('Hello')], { style: NORMAL, indent: { firstLineChars: 200 } }),
-    paragraph('open', [text('yes')]),
+    paragraph('open', [text('yes'), imageAtom('pic', 80, 40)]),
     paragraph('locked', [text('no')], {}, { lock: { reason: 'revisions' } }),
     table('t', [
       row([
@@ -118,7 +119,7 @@ function harness(doc: Doc): Harness {
       return true
     },
     pageOf: () => 0,
-    status: () => ({ page: 1, pages: 3, pagesFinal: true, words: wordCount(state.doc), section: 0 }),
+    status: () => ({ page: 1, pages: 3, pagesFinal: true, words: wordCount(state.doc), section: 0, notice: null }),
     busy: () => busy,
     async addMedia(blob): Promise<MediaRef> {
       media.push(blob)
@@ -620,6 +621,8 @@ test('every edit op is busy and leaves the host state object', async () => {
     { op: 'deleteColumns', at: { para: 'c', offset: 0 } },
     { op: 'deleteTable', table: 't' },
     { op: 'insertImage', base64: 'YQ==', contentType: 'image/png', at: end },
+    { op: 'resizeImage', at: { para: 'open', offset: 3 }, widthPt: 40, heightPt: 20 },
+    { op: 'moveImage', at: { para: 'open', offset: 3 }, to: { para: 'p', offset: 5 } },
     { op: 'setPageSetup', section: 0, page: pageBody(500) },
     { op: 'undo' },
     { op: 'redo' },
@@ -629,7 +632,7 @@ test('every edit op is busy and leaves the host state object', async () => {
     return request.op
   })
   const editOps = [...KEYS.keys()].filter((op) => !READ_OPS.has(op))
-  assert.equal(editOps.length, 26)
+  assert.equal(editOps.length, 28)
   assert.deepEqual([...names].sort(), [...editOps].sort())
 
   // Each request changes the editor state when the host is idle, so a missed busy check fails below.
@@ -901,4 +904,33 @@ test('random valid requests keep the document invariants', { timeout: 60_000 }, 
     checkDoc(h.host.state().doc)
     checkDoc(h.host.state().doc, baseline)
   }
+})
+
+test('resizeImage and moveImage name the picture and refuse a file-picture move', async () => {
+  const h = harness(opsDoc())
+  const missing = assertRefusal(await h.call({ op: 'resizeImage', at: { para: 'p', offset: 0 }, widthPt: 40, heightPt: 20 }))
+  assert.equal(missing.error.code, 'out-of-range')
+  const small = assertRefusal(await h.call({ op: 'resizeImage', at: { para: 'open', offset: 3 }, widthPt: 2, heightPt: 20 }))
+  assert.equal(small.error.code, 'out-of-range')
+  const unknown = assertRefusal(await h.call({ op: 'resizeImage', at: { para: 'nope', offset: 0 }, widthPt: 40, heightPt: 20 }))
+  assert.equal(unknown.error.code, 'unknown-address')
+  const locked = assertRefusal(await h.call({ op: 'moveImage', at: { para: 'open', offset: 3 }, to: { para: 'locked', offset: 0 } }))
+  assert.equal(locked.error.code, 'locked')
+  const filed = harness(makeDoc([
+    paragraph('file', [imageAtom('kept', 40, 20, 1)]),
+    paragraph('next', [text('go')]),
+  ]))
+  const refusedMove = assertRefusal(await filed.call({
+    op: 'moveImage',
+    at: { para: 'file', offset: 0 },
+    to: { para: 'next', offset: 0 },
+  }))
+  assert.equal(refusedMove.error.code, 'refused')
+  const resized = assertEdit(await filed.call({
+    op: 'resizeImage',
+    at: { para: 'file', offset: 0 },
+    widthPt: 24,
+    heightPt: 12,
+  }))
+  assert.equal(resized.selection.kind, 'text')
 })
