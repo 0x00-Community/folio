@@ -120,7 +120,7 @@ impl PrintLayout {
                 detail: format!("dpi {dpi} is not a positive finite number"),
             });
         }
-        oxml_pdf::render_page_to_png(&self.layout, index as usize, dpi).ok_or_else(|| {
+        oxml_pdf::render_page_to_png_fast(&self.layout, index as usize, dpi).ok_or_else(|| {
             PrintError::Render {
                 detail: format!("page {index} could not be encoded as png"),
             }
@@ -195,6 +195,12 @@ impl PrintLayout {
             });
         }
         spans
+    }
+
+    /// The laid-out pages. Tests pass this to `oxml_pdf::render_page_to_png`.
+    #[doc(hidden)]
+    pub fn layout_result(&self) -> &oxml_layout::LayoutResult {
+        &self.layout
     }
 
     fn used_font_ids(&self) -> BTreeSet<oxml_layout::FontId> {

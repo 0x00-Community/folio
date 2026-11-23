@@ -700,6 +700,7 @@ dependencies = [
  "oxml-layout",
  "oxml-media",
  "pdf-writer",
+ "png",
  "subsetter",
  "tiff",
  "tiny-skia",
@@ -964,6 +965,7 @@ version = "0.1.0"
 dependencies = [
  "oxml-layout",
  "oxml-pdf",
+ "png",
  "rdocx",
  "serde",
  "serde_json",

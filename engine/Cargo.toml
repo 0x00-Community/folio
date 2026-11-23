@@ -19,6 +19,8 @@ serde_json = "1"
 
 [dev-dependencies]
 rdocx = { path = "../../rdocx-editing-kit/crates/rdocx", default-features = false }
+oxml-pdf = { path = "../../rdocx-editing-kit/crates/oxml-pdf" }
+png = "=0.18.1"
 
 [profile.release]
 opt-level = "s"

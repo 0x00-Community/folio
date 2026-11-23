@@ -290,6 +290,78 @@ fn png_size(bytes: &[u8]) -> (u32, u32) {
     (width, height)
 }
 
+struct DecodedPng {
+    width: u32,
+    height: u32,
+    color: png::ColorType,
+    depth: png::BitDepth,
+    pixels: Vec<u8>,
+}
+
+fn decode_png(bytes: &[u8], label: &str) -> DecodedPng {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .unwrap_or_else(|error| panic!("{label} png header: {error}"));
+    let buffer_size = reader
+        .output_buffer_size()
+        .unwrap_or_else(|| panic!("{label} png buffer size overflow"));
+    let mut pixels = vec![0; buffer_size];
+    let info = reader
+        .next_frame(&mut pixels)
+        .unwrap_or_else(|error| panic!("{label} png frame: {error}"));
+    let size = info.buffer_size();
+    pixels.truncate(size);
+    DecodedPng {
+        width: info.width,
+        height: info.height,
+        color: info.color_type,
+        depth: info.bit_depth,
+        pixels,
+    }
+}
+
+fn keep_layout(name: &str) -> PrintLayout {
+    let session = open(name);
+    let imported = imported_of(&session);
+    session
+        .print_layout(&patch_json(&keep_patch(&imported)))
+        .unwrap_or_else(|error| panic!("{name}: {error:?}"))
+}
+
+fn assert_same_pixels(layout: &PrintLayout, doc: &str, page: u32, dpi: f64) {
+    let label = format!("{doc} page {page} at {dpi} dpi");
+    let encoded = layout
+        .page_png(page, dpi)
+        .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+    let reference = oxml_pdf::render_page_to_png(layout.layout_result(), page as usize, dpi)
+        .unwrap_or_else(|| panic!("{label}: render_page_to_png returned none"));
+    let encoded = decode_png(&encoded, &label);
+    let reference = decode_png(&reference, &format!("{label} reference"));
+    assert_eq!(
+        (encoded.width, encoded.height, encoded.color, encoded.depth),
+        (
+            reference.width,
+            reference.height,
+            reference.color,
+            reference.depth
+        ),
+        "{label} image info"
+    );
+    if encoded.pixels != reference.pixels {
+        let index = encoded
+            .pixels
+            .iter()
+            .zip(reference.pixels.iter())
+            .position(|(left, right)| left != right);
+        panic!(
+            "{label} pixels differ at {index:?}: page_png {} bytes, render_page_to_png {} bytes",
+            encoded.pixels.len(),
+            reference.pixels.len()
+        );
+    }
+}
+
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
@@ -383,6 +455,31 @@ fn basic_without_caller_font_uses_bundled_substitutes() {
     let again_pdf = again.pdf().expect("second layout pdf");
     let again_path = write_pdf("basic-no-font-again", &again_pdf);
     assert_eq!(pdftotext(&path), pdftotext(&again_path));
+}
+
+#[test]
+fn page_png_matches_render_page_to_png_pixels() {
+    for name in ["basic.docx", "tables.docx"] {
+        let layout = keep_layout(name);
+        let pages = layout.page_count();
+        assert!(pages > 0, "{name} has no pages");
+        for page in 0..pages {
+            for dpi in [96.0, 144.0] {
+                assert_same_pixels(&layout, name, page, dpi);
+            }
+        }
+    }
+
+    let layout = keep_layout("long.docx");
+    let pages = layout.page_count();
+    assert!(pages > 0, "long.docx has no pages");
+    let middle = pages / 2;
+    let last = pages - 1;
+    for page in [0, middle, last] {
+        for dpi in [96.0, 144.0] {
+            assert_same_pixels(&layout, "long.docx", page, dpi);
+        }
+    }
 }
 
 #[test]
