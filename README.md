@@ -54,7 +54,24 @@ on save and for the print preview. The reason, with the measurements behind it, 
 [`docs/design/design.md`](docs/design/design.md). What the runtime can and cannot do is in
 [`docs/design/grounding.md`](docs/design/grounding.md).
 
+## Install the prebuilt app
+
+On a machine that already has acde and the Dopame runtime, unpack the package attached to the
+[latest release](https://github.com/0x00-Community/folio/releases/latest) into the acde packages directory:
+
+```sh
+mkdir -p ~/.local/share/acde/packages
+unzip folio-v0.1.0-package.zip -d ~/.local/share/acde/packages
+```
+
+The package holds the interface, the backend and the engine, and is the same for every CPU architecture. There is
+no `.dmg` or other standalone installer: acde has no standalone packaging yet, and the runtime may not be
+redistributed.
+
 ## Setup
+
+For working on the code.
+
 
 You need Node 24 or newer (the tests run TypeScript directly through Node's type stripping) and the `acde` CLI,
 for `npm run dev`, `npm run build` and the end-to-end checks.

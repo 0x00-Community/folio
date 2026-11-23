@@ -46,7 +46,22 @@
 [`docs/design/design.md`](docs/design/design.md)。运行时能做什么、不能做什么，见
 [`docs/design/grounding.md`](docs/design/grounding.md)。
 
+## 安装预构建的应用
+
+在已经装好 acde 和 Dopame 运行时的机器上，把[最新 Release](https://github.com/0x00-Community/folio/releases/latest)
+里附带的应用包解压到 acde 的包目录：
+
+```sh
+mkdir -p ~/.local/share/acde/packages
+unzip folio-v0.1.0-package.zip -d ~/.local/share/acde/packages
+```
+
+应用包里有界面、后端和引擎，不分 CPU 架构。目前没有 `.dmg` 之类的独立安装包：acde 还没有独立打包的方式，运行时也不允许再分发。
+
 ## 环境准备
+
+用于参与开发。
+
 
 需要 Node 24 或更新版本（测试靠 Node 的类型剥离直接运行 TypeScript）和 `acde` 命令行工具，`npm run dev`、
 `npm run build` 和端到端检查都要用。
