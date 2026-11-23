@@ -15,6 +15,7 @@ import type {
 } from '../model.ts'
 import { documentGridPitch } from './derive.ts'
 import { imageChrome, selectedImage } from './edit.ts'
+import type { TextMatch } from './find.ts'
 import {
   HANDLE_HIT_SCREEN_PX,
   HANDLE_SCREEN_PX,
@@ -1804,6 +1805,16 @@ interface ViewportHold {
  * is an empty box of its exact size, so scroll geometry is exact without contents. All coordinates it returns are
  * page-container px at 100 percent zoom; zoom is a transform on the container, and this class divides it out.
  */
+function sameHits(prev: readonly TextMatch[], prevCurrent: number, next: readonly TextMatch[], nextCurrent: number): boolean {
+  if (prevCurrent !== nextCurrent || prev.length !== next.length) return false
+  for (let i = 0; i < prev.length; i++) {
+    const a = prev[i]
+    const b = next[i]
+    if (!a || !b || a.para !== b.para || a.start !== b.start || a.end !== b.end) return false
+  }
+  return true
+}
+
 export class PageView {
   private doc: Doc | null = null
   private ctx: () => RenderContext
@@ -1835,6 +1846,8 @@ export class PageView {
   private sink: HTMLTextAreaElement | null = null
   private lastPaint: { sel: Selection; sink: HTMLTextAreaElement } | null = null
   private imagePreview: ImageGesture | null = null
+  private findHits: readonly TextMatch[] = []
+  private findCurrent = -1
   /** Set while a metrics pass remeasures in place. Pages above the hold are still estimates until it finishes. */
   private rewriting = false
   private hold: ViewportHold | null = null
@@ -2153,6 +2166,14 @@ export class PageView {
     this.sink = sink
     this.lastPaint = { sel, sink }
     this.paintNow(sel, sink)
+  }
+
+  /** Tints on pages that are already mounted. Passing the same list does not paint again. */
+  setFindHits(hits: readonly TextMatch[], current: number): void {
+    if (sameHits(this.findHits, this.findCurrent, hits, current)) return
+    this.findHits = hits
+    this.findCurrent = current
+    if (this.lastPaint) this.paintNow(this.lastPaint.sel, this.lastPaint.sink)
   }
 
   scrollIntoView(pos: Pos): void {
@@ -3181,17 +3202,83 @@ export class PageView {
       const overlay = el.querySelector('.overlay')
       if (overlay && overlay.firstChild) overlay.replaceChildren()
     }
+    this.drawFindHits(false)
     if (sel.kind === 'cells') {
       this.paintCells(sel, sink)
+      this.drawFindHits(true)
       return
     }
     const head = this.caretRect(sel.head)
     // A selected picture shows its frame and handles. A caret beside it and a tint over it would only hide it.
     const picture = this.doc !== null && selectedImage(this.doc, sel) !== null
-    if (!picture) this.drawCaret(head)
+    // The current match is the selection. Its own tint shows it, and the selection tint over it would turn it muddy.
+    const hit = this.findHits[this.findCurrent]
+    const onHit = hit !== undefined && sel.anchor.p === hit.para && sel.head.p === hit.para
+      && Math.min(sel.anchor.o, sel.head.o) === hit.start && Math.max(sel.anchor.o, sel.head.o) === hit.end
+    if (!picture && !onHit) this.drawCaret(head)
     this.placeSink(head, sink)
-    if (!picture && (sel.anchor.p !== sel.head.p || sel.anchor.o !== sel.head.o)) this.drawSelection(sel.anchor, sel.head)
+    if (!picture && !onHit && (sel.anchor.p !== sel.head.p || sel.anchor.o !== sel.head.o)) this.drawSelection(sel.anchor, sel.head)
     this.paintImageChrome(sel)
+    this.drawFindHits(true)
+  }
+
+  private drawFindHits(currentOnly: boolean): void {
+    if (this.findHits.length === 0) return
+    const byPara = new Map<string, TextMatch[]>()
+    for (let i = 0; i < this.findHits.length; i++) {
+      const hit = this.findHits[i]
+      if (!hit) continue
+      if ((i === this.findCurrent) !== currentOnly) continue
+      const list = byPara.get(hit.para)
+      if (list) list.push(hit)
+      else byPara.set(hit.para, [hit])
+    }
+    if (byPara.size === 0) return
+    const z = this.zoom
+    for (const pageEl of this.pageEls) {
+      if (pageEl.dataset.mounted !== '1') continue
+      const overlay = pageEl.querySelector('.overlay')
+      if (!(overlay instanceof HTMLElement)) continue
+      const origin = pageEl.getBoundingClientRect()
+      for (const node of pageEl.querySelectorAll<HTMLElement>('.blk.p')) {
+        if (node.closest('.repeat-head')) continue
+        const id = node.dataset.id
+        if (!id) continue
+        const hits = byPara.get(id)
+        if (!hits) continue
+        const slice = node.closest('.slice')
+        const sliceRect = slice instanceof HTMLElement ? slice.getBoundingClientRect() : null
+        for (const hit of hits) {
+          const range = rangeIn(node, hit.start, hit.end)
+          const boxes: { left: number, top: number, right: number, bottom: number }[] = []
+          for (const rect of range.getClientRects()) {
+            boxes.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom })
+          }
+          for (const rect of boxes) {
+            if (rect.right - rect.left < 0.5 || rect.bottom - rect.top < 0.5) continue
+            let left = rect.left
+            let top = rect.top
+            let right = rect.right
+            let bottom = rect.bottom
+            if (sliceRect) {
+              left = Math.max(left, sliceRect.left)
+              top = Math.max(top, sliceRect.top)
+              right = Math.min(right, sliceRect.right)
+              bottom = Math.min(bottom, sliceRect.bottom)
+            }
+            if (right - left < 0.5 || bottom - top < 0.5) continue
+            const mark = document.createElement('div')
+            mark.className = currentOnly ? 'find-hit current' : 'find-hit'
+            mark.setAttribute('aria-hidden', 'true')
+            mark.style.left = `${(left - origin.left) / z}px`
+            mark.style.top = `${(top - origin.top) / z}px`
+            mark.style.width = `${(right - left) / z}px`
+            mark.style.height = `${(bottom - top) / z}px`
+            overlay.append(mark)
+          }
+        }
+      }
+    }
   }
 
   private drawCaret(caret: CaretRect): void {

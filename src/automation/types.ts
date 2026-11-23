@@ -303,6 +303,14 @@ export interface EditOk {
   removed: string[]
 }
 
+/** `replace`. `replaced` and `skipped` count matches; same text is neither. */
+export interface ReplaceOk extends EditOk {
+  /** Matches whose text changed. */
+  replaced: number
+  /** Matches left alone because they are locked or touch a hyperlink. */
+  skipped: number
+}
+
 export interface InfoResponse {
   /** The read succeeded. */
   ok: true
@@ -419,7 +427,7 @@ export type ReadResponse =
   | SelectionResponse
   | HitTestResponse
 
-export type Response = ReadResponse | EditOk | Refusal
+export type Response = ReadResponse | EditOk | ReplaceOk | Refusal
 
 /** Reads. They do not change the document, including while the editor is busy. */
 export type ReadRequest =
@@ -459,6 +467,8 @@ export type ReadRequest =
     limit?: number
     /** When false or omitted, letter case is ignored. */
     matchCase?: boolean
+    /** When true, both ends of a match are word boundaries from the `zh` word segmenter. */
+    wholeWord?: boolean
   }
   | {
     /** Map a window point to an address. This is the only view-dependent read. */
@@ -661,6 +671,26 @@ export type EditRequest = { at?: Place } & (
     section: number
     /** The new page setup, in points. */
     page: PageSetupView
+  }
+  | {
+    /**
+     * Replace `text` with `with`. Without `all`, the first match at or after `from`
+     * (or the document start). `all` replaces every match in one undo entry.
+     * No match answers `ok` with `replaced: 0` and does not push undo.
+     */
+    op: 'replace'
+    /** The text to find. An empty string is `bad-request`. */
+    text: string
+    /** The replacement. An empty string deletes the match. */
+    with: string
+    /** When false or omitted, letter case is ignored. */
+    matchCase?: boolean
+    /** When true, both ends of a match are word boundaries. */
+    wholeWord?: boolean
+    /** Replace every match. `from` is ignored. */
+    all?: boolean
+    /** Start at this address when `all` is omitted. Matches that start earlier are skipped. */
+    from?: Address
   }
   | { op: 'undo' }
   | { op: 'redo' }

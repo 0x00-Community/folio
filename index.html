@@ -21,6 +21,8 @@
         --error-bg: #fde8e8;
         --error-text: #6b1d1d;
         --page-shadow: 0 1px 3px rgba(0,0,0,.12), 0 4px 16px rgba(0,0,0,.08);
+        --find-match: rgba(255, 213, 0, .35);
+        --find-current: rgba(255, 150, 0, .55);
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -38,11 +40,15 @@
           --field-bg: #1f2023;
           --error-bg: #3a2224;
           --error-text: #ffb4b4;
+          /* The page stays white in both themes, so the tints do not change. */
+          --find-match: rgba(255, 213, 0, .35);
+          --find-current: rgba(255, 150, 0, .55);
         }
       }
       html, body { height: 100%; margin: 0 }
       #pages { height: 100% }
       body.shell {
+        position: relative;
         display: flex;
         flex-direction: column;
         height: 100%;
@@ -221,6 +227,118 @@
       .toolbar select.font { width: 10em }
       .toolbar select.size { width: 4.5em }
       .toolbar select.style { width: 8em }
+      .findbar {
+        position: absolute;
+        right: 12px;
+        z-index: 3;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-columns: 28px 240px auto;
+        column-gap: 6px;
+        row-gap: 4px;
+        align-items: center;
+        max-width: calc(100% - 24px);
+        padding: 8px;
+        color: var(--text);
+        background: var(--chrome-bg);
+        border: 1px solid var(--chrome-border);
+        border-radius: 8px;
+        box-shadow: var(--chrome-shadow);
+        font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+        user-select: none;
+      }
+      .findbar .find-query { grid-column: 2; grid-row: 1 }
+      .findbar .find-replace-text { grid-column: 2; grid-row: 2 }
+      .findbar .find-toggle { grid-column: 1; grid-row: 1 }
+      .findbar .find-tools { grid-column: 3; grid-row: 1 }
+      .findbar .find-actions { grid-column: 3; grid-row: 2 }
+      .findbar .find-tools,
+      .findbar .find-actions {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+      .findbar input {
+        box-sizing: border-box;
+        width: 240px;
+        height: 26px;
+        margin: 0;
+        padding: 0 8px;
+        border: 1px solid var(--chrome-border);
+        border-radius: 5px;
+        background: var(--field-bg);
+        color: var(--text);
+        font: inherit;
+        user-select: text;
+      }
+      .findbar input[aria-invalid="true"] { border-color: var(--error-text) }
+      .findbar input::placeholder { color: var(--text-muted); opacity: 0.8 }
+      .findbar button {
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 5px;
+        appearance: none;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      .findbar button.icon { width: 28px; height: 28px }
+      .findbar button.text {
+        height: 26px;
+        padding: 0 8px;
+        border: 1px solid var(--chrome-border);
+        background: transparent;
+      }
+      .findbar button.icon svg { display: block; width: 18px; height: 18px }
+      .findbar .find-toggle svg { transform: rotate(-90deg) }
+      .findbar .find-toggle[aria-expanded="true"] svg { transform: none }
+      .findbar .prev svg { transform: rotate(180deg) }
+      .findbar button .glyph {
+        position: relative;
+        font-family: system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 18px;
+      }
+      .findbar button .glyph.word::after {
+        content: "";
+        position: absolute;
+        left: 1px;
+        right: 1px;
+        bottom: 0;
+        height: 1.5px;
+        border-radius: 1px;
+        background: currentColor;
+      }
+      .findbar .count {
+        margin-right: 4px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .findbar .count.muted { color: var(--text-muted) }
+      .findbar button:hover { background: var(--control-hover) }
+      .findbar button[aria-pressed="true"] {
+        background: var(--accent-soft);
+        color: var(--accent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+      }
+      .findbar button:active { background: var(--control-active) }
+      .findbar button:disabled { opacity: 0.38 }
+      .findbar button:disabled:hover { background: transparent; box-shadow: none }
+      .findbar button:focus,
+      .findbar input:focus { outline: none }
+      .findbar button:focus-visible,
+      .findbar input:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
       .toolbar .split {
         display: flex;
         flex: none;
@@ -502,7 +620,9 @@
       .tablebar[hidden],
       #pages[hidden],
       .preview[hidden],
-      .preview-bar button[hidden] {
+      .preview-bar button[hidden],
+      .findbar[hidden],
+      .findbar [hidden] {
         display: none !important;
       }
       .preview {

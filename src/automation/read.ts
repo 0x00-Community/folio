@@ -1,6 +1,7 @@
 // Pure views of a document. No DOM and no editor: the caller supplies list markers and a page lookup.
 import { wordCount } from '../editor/edit.ts'
-import { flatText, indexOf } from '../model.ts'
+import { findMatches } from '../editor/find.ts'
+import { comparePos, flatText, indexOf } from '../model.ts'
 import type { Atom, Block, Doc, Marks, NumId, PageSetup, Paragraph, ParaId, Pos, Table } from '../model.ts'
 import { previewParagraph } from './address.ts'
 import type {
@@ -161,32 +162,30 @@ export function readFind(
   from: Pos | null,
   limit: number,
   matchCase: boolean,
+  wholeWord = false,
 ): FindBody {
-  const index = indexOf(doc)
+  const all = findMatches(doc, needle, { matchCase, wholeWord })
   const matches: FindMatch[] = []
-  let started = from === null
-  for (const id of index.ordered) {
-    const loc = index.get(id)
-    if (loc.story !== 'body') break
-    if (previewParagraph(doc, loc)) continue
-    let startAt = 0
-    if (!started) {
-      if (!from || loc.para.id !== from.p) continue
-      started = true
-      startAt = from.o
+  if (from) {
+    const index = indexOf(doc)
+    let loc
+    try {
+      loc = index.get(from.p)
+    } catch {
+      return { matches, truncated: false }
     }
-    const text = flatText(loc.para)
-    let cursor = startAt
-    while (cursor <= text.length - needle.length) {
-      if (!equalsAt(text, cursor, needle, matchCase)) {
-        cursor += 1
-        continue
-      }
+    // A preview address never starts the scan: the old walker skipped that paragraph before marking it seen.
+    if (loc.story !== 'body' || previewParagraph(doc, loc)) return { matches, truncated: false }
+    for (const match of all) {
+      if (comparePos(index, { p: match.para, o: match.start }, from) < 0) continue
       if (matches.length >= limit) return { matches, truncated: true }
-      const end = cursor + needle.length
-      matches.push({ para: loc.para.id, start: cursor, end })
-      cursor = end
+      matches.push({ para: match.para, start: match.start, end: match.end })
     }
+    return { matches, truncated: false }
+  }
+  for (const match of all) {
+    if (matches.length >= limit) return { matches, truncated: true }
+    matches.push({ para: match.para, start: match.start, end: match.end })
   }
   return { matches, truncated: false }
 }
@@ -461,10 +460,3 @@ function pageSetupView(page: PageSetup): PageSetupView {
   }
 }
 
-function equalsAt(text: string, offset: number, needle: string, matchCase: boolean): boolean {
-  if (needle.length === 0 || offset + needle.length > text.length) return false
-  const slice = text.slice(offset, offset + needle.length)
-  if (matchCase) return slice === needle
-  // A case fold that changes UTF-16 length compares unequal and the match is missed.
-  return slice.toLowerCase() === needle.toLowerCase()
-}

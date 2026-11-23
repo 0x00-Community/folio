@@ -18,6 +18,9 @@ import {
   insertTable,
   insertText,
   moveAtom,
+  replaceAllText,
+  replaceCounts,
+  replaceMatch,
   resizeImage,
   selectAll,
   setAlign,
@@ -33,6 +36,7 @@ import {
   toggleMark,
 } from '../editor/edit.ts'
 import type { Command, EditorState, MarkValue } from '../editor/edit.ts'
+import { findMatches, followingMatch, matchFrom } from '../editor/find.ts'
 import { flatText, indexOf } from '../model.ts'
 import type {
   Block,
@@ -65,6 +69,7 @@ import type {
   EditOk,
   Place,
   Refusal,
+  ReplaceOk,
   Response,
   SelectionView,
 } from './types.ts'
@@ -84,7 +89,7 @@ export const KEYS: ReadonlyMap<string, readonly string[]> = new Map([
   ['selection', ['op', 'v']],
   ['blocks', ['op', 'v', 'from', 'count']],
   ['outline', ['op', 'v']],
-  ['find', ['op', 'v', 'text', 'from', 'limit', 'matchCase']],
+  ['find', ['op', 'v', 'text', 'from', 'limit', 'matchCase', 'wholeWord']],
   ['hitTest', ['op', 'v', 'clientX', 'clientY']],
   ['select', ['op', 'v', 'at']],
   ['selectCells', ['op', 'v', 'at', 'table', 'anchor', 'head']],
@@ -113,6 +118,7 @@ export const KEYS: ReadonlyMap<string, readonly string[]> = new Map([
   ['resizeImage', ['op', 'v', 'at', 'widthPt', 'heightPt']],
   ['moveImage', ['op', 'v', 'at', 'to']],
   ['setPageSetup', ['op', 'v', 'at', 'section', 'page']],
+  ['replace', ['op', 'v', 'at', 'text', 'with', 'matchCase', 'wholeWord', 'all', 'from']],
   ['undo', ['op', 'v', 'at']],
   ['redo', ['op', 'v', 'at']],
 ])
@@ -270,6 +276,8 @@ function route(
       return moveImageOp(host, note, request)
     case 'setPageSetup':
       return setPageSetupOp(host, note, request)
+    case 'replace':
+      return replaceOp(host, note, request)
     case 'undo':
       return historyOp(host, note, request, 'undo')
     case 'redo':
@@ -337,11 +345,10 @@ function readFindOp(host: Host, rev: number, record: Record<string, unknown>): R
   const text = requiredString(record, 'text')
   if (isRefusal(text)) return text
   if (text.length === 0 || text.length > TEXT_LIMIT) return bad('text')
-  let matchCase = false
-  if ('matchCase' in record) {
-    if (typeof record.matchCase !== 'boolean') return bad('matchCase')
-    matchCase = record.matchCase
-  }
+  const matchCase = optionalBool(record, 'matchCase')
+  if (isRefusal(matchCase)) return matchCase
+  const wholeWord = optionalBool(record, 'wholeWord')
+  if (isRefusal(wholeWord)) return wholeWord
   const limitRaw = optionalInt(record, 'limit', 1)
   if (isRefusal(limitRaw)) return limitRaw
   let from: Pos | null = null
@@ -352,7 +359,7 @@ function readFindOp(host: Host, rev: number, record: Record<string, unknown>): R
     if (!resolved.ok) return fromAddress(resolved.error)
     from = resolved.pos
   }
-  const found = readFind(host.state().doc, text, from, Math.min(limitRaw ?? FIND_DEFAULT, FIND_MAX), matchCase)
+  const found = readFind(host.state().doc, text, from, Math.min(limitRaw ?? FIND_DEFAULT, FIND_MAX), matchCase, wholeWord)
   return { ok: true, rev, matches: [...found.matches], truncated: found.truncated }
 }
 
@@ -691,6 +698,66 @@ function moveImageOp(host: Host, note: () => number, record: Record<string, unkn
     }
     return commit(host, note, 'moveImage', guarded, moveAtom(from, dest.pos))
   })
+}
+
+function replaceOp(host: Host, note: () => number, record: Record<string, unknown>): Response | Deferred {
+  const text = requiredString(record, 'text')
+  if (isRefusal(text)) return text
+  if (text.length === 0 || text.length > TEXT_LIMIT) return bad('text')
+  if (!('with' in record)) return bad('with')
+  const replacement = requiredString(record, 'with')
+  if (isRefusal(replacement)) return replacement
+  if (replacement.length > TEXT_LIMIT) return bad('with')
+  const matchCase = optionalBool(record, 'matchCase')
+  if (isRefusal(matchCase)) return matchCase
+  const wholeWord = optionalBool(record, 'wholeWord')
+  if (isRefusal(wholeWord)) return wholeWord
+  const all = optionalBool(record, 'all')
+  if (isRefusal(all)) return all
+  const place = optionalPlace(record)
+  if (isRefusal(place)) return place
+  const fromValue = record.from
+  const hasFrom = 'from' in record
+  return defer(() => {
+    let origin: Pos | null = null
+    if (hasFrom) {
+      const address = parseAddress(fromValue, 'from')
+      if (isRefusal(address)) return address
+      const resolved = resolveAddress(host.state().doc, address)
+      if (!resolved.ok) return fromAddress(resolved.error)
+      if (!all) origin = resolved.pos
+    }
+    // Locks are decided per match. A caret in a locked paragraph must not refuse the whole call.
+    const guarded = guard(host, place, false)
+    if (!guarded.ok) return guarded.refusal
+    const doc = host.state().doc
+    const options = { matchCase, wholeWord }
+    const matches = findMatches(doc, text, options)
+    if (all) {
+      const counts = replaceCounts(doc, matches, replacement)
+      if (counts.replaced === 0) return replaceAnswer(host, note, counts)
+      const ids = blockIds(doc)
+      const ran = host.run(replaceAllText(text, replacement, options))
+      if (!ran) return refused('replace')
+      return { ...edited(host, note, ids), ...counts }
+    }
+    const index = origin === null
+      ? (matches.length > 0 ? 0 : -1)
+      : matchFrom(doc, matches, origin)
+    if (index < 0) return replaceAnswer(host, note, { replaced: 0, skipped: 0 })
+    const match = matches[index]
+    if (!match) return replaceAnswer(host, note, { replaced: 0, skipped: 0 })
+    const counts = replaceCounts(doc, [match], replacement)
+    if (counts.replaced === 0) return replaceAnswer(host, note, counts)
+    const ids = blockIds(doc)
+    const ran = host.run(replaceMatch(match, replacement, followingMatch(matches, index, replacement)))
+    if (!ran) return refused('replace')
+    return { ...edited(host, note, ids), replaced: 1, skipped: 0 }
+  })
+}
+
+function replaceAnswer(host: Host, note: () => number, counts: { replaced: number, skipped: number }): ReplaceOk {
+  return { ...edited(host, note, blockIds(host.state().doc)), ...counts }
 }
 
 function setPageSetupOp(host: Host, note: () => number, record: Record<string, unknown>): Response | Deferred {
@@ -1286,6 +1353,13 @@ function parseCorner(value: unknown, field: string): { row: number, cell: number
   if (typeof value.row !== 'number' || !Number.isInteger(value.row) || value.row < 0) return bad('row')
   if (typeof value.cell !== 'number' || !Number.isInteger(value.cell) || value.cell < 0) return bad('cell')
   return { row: value.row, cell: value.cell }
+}
+
+function optionalBool(record: Record<string, unknown>, field: string): boolean | Refusal {
+  if (!(field in record)) return false
+  const value = record[field]
+  if (typeof value !== 'boolean') return bad(field)
+  return value
 }
 
 function optionalInt(record: Record<string, unknown>, field: string, min: number): number | undefined | Refusal {

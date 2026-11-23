@@ -630,6 +630,7 @@ test('every edit op is busy and leaves the host state object', async () => {
     { op: 'resizeImage', at: { para: 'open', offset: 3 }, widthPt: 40, heightPt: 20 },
     { op: 'moveImage', at: { para: 'open', offset: 3 }, to: { para: 'p', offset: 5 } },
     { op: 'setPageSetup', section: 0, page: pageBody(500) },
+    { op: 'replace', text: 'He', with: 'Xe' },
     { op: 'undo' },
     { op: 'redo' },
   ]
@@ -638,7 +639,7 @@ test('every edit op is busy and leaves the host state object', async () => {
     return request.op
   })
   const editOps = [...KEYS.keys()].filter((op) => !READ_OPS.has(op))
-  assert.equal(editOps.length, 29)
+  assert.equal(editOps.length, 30)
   assert.deepEqual([...names].sort(), [...editOps].sort())
 
   // Each request changes the editor state when the host is idle, so a missed busy check fails below.
@@ -859,7 +860,8 @@ test('random valid requests keep the document invariants', { timeout: 60_000 }, 
       { op: 'blocks', from: 0, count: 1 + Math.floor(rng() * 4) },
       { op: 'text', from: 0, count: 2 },
       { op: 'outline' },
-      { op: 'find', text: pick(['a', 'e', '你']), limit: 1 + Math.floor(rng() * 5), matchCase: rng() < 0.5 },
+      { op: 'find', text: pick(['a', 'e', '你']), limit: 1 + Math.floor(rng() * 5), matchCase: rng() < 0.5, ...(rng() < 0.5 ? { wholeWord: rng() < 0.5 } : {}) },
+      { op: 'replace', text: pick(['a', 'e', '你', '']), with: pick(['b', 'a', '']), matchCase: rng() < 0.5, wholeWord: rng() < 0.5, all: rng() < 0.5 },
       { op: 'hitTest', clientX: rng() * 40, clientY: rng() * 40 },
       { op: 'select', at: caret },
       { op: 'select', at: span },
@@ -940,4 +942,57 @@ test('resizeImage and moveImage name the picture and refuse a file-picture move'
     heightPt: 12,
   }))
   assert.equal(resized.selection.kind, 'text')
+})
+
+test('replace reports counts, skips links and locks, and adds no undo when nothing changes', async () => {
+  const link = 'to' as NonNullable<import('../model.ts').Marks['link']>
+  const built = makeDoc([
+    paragraph('a', [text('cat cat')]),
+    paragraph('lock', [text('cat')], {}, { lock: { reason: 'revisions' } }),
+    paragraph('linked', [text('cat', null, { link })]),
+    paragraph('b', [text('dog')]),
+  ])
+  checkDoc(built)
+  const h = harness(built)
+  const before = await h.call({ op: 'info' })
+  assert.equal(before.ok, true)
+  const rev = before.ok ? before.rev : -1
+  const none = await h.call({ op: 'replace', text: 'missing', with: 'x' })
+  assert.equal(none.ok, true)
+  if (none.ok && 'replaced' in none) {
+    assert.equal(none.replaced, 0)
+    assert.equal(none.skipped, 0)
+    assert.equal(none.rev, rev)
+  } else {
+    assert.fail(JSON.stringify(none))
+  }
+  assert.equal(h.host.state().doc, built)
+  const one = await h.call({ op: 'replace', text: 'cat', with: 'cot', matchCase: true })
+  assert.equal(one.ok, true)
+  if (!one.ok || !('replaced' in one)) assert.fail(JSON.stringify(one))
+  assert.equal(one.replaced, 1)
+  assert.equal(one.skipped, 0)
+  assert.equal(flatText(h.host.state().doc.body[0] as Paragraph), 'cot cat')
+  const rest = await h.call({ op: 'replace', text: 'cat', with: 'cot', all: true })
+  if (!rest.ok || !('replaced' in rest)) assert.fail(JSON.stringify(rest))
+  assert.equal(rest.replaced, 1)
+  assert.equal(rest.skipped, 2)
+  assert.equal(flatText(h.host.state().doc.body[0] as Paragraph), 'cot cot')
+  assert.equal(flatText(h.host.state().doc.body[1] as Paragraph), 'cat')
+  assert.equal(h.host.state().history.past.length, 2)
+  const undone = await h.call({ op: 'undo' })
+  assert.equal(undone.ok, true)
+  assert.equal(flatText(h.host.state().doc.body[0] as Paragraph), 'cot cat')
+  const word = await h.call({ op: 'find', text: 'cot', wholeWord: true, matchCase: true })
+  assert.equal(word.ok, true)
+  if (word.ok && 'matches' in word) assert.equal(word.matches.length, 1)
+  const inside = await h.call({ op: 'find', text: 'co', wholeWord: true, matchCase: true })
+  assert.equal(inside.ok, true)
+  if (inside.ok && 'matches' in inside) assert.equal(inside.matches.length, 0)
+  const loop = await h.call({ op: 'replace', text: 'dog', with: 'dogdog', all: true })
+  if (!loop.ok || !('replaced' in loop)) assert.fail(JSON.stringify(loop))
+  assert.equal(loop.replaced, 1)
+  const tail = h.host.state().doc.body[3]
+  assert.equal(tail?.kind, 'p')
+  if (tail?.kind === 'p') assert.equal(flatText(tail), 'dogdog')
 })

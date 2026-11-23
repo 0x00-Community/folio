@@ -184,6 +184,20 @@ test('shortcutChord reads the chord the keymap bound', () => {
   }
 })
 
+test('find chords open, step, and leave ⌘H unbound on macOS', () => {
+  assert.equal(shortcutChord('other', 'find'), 'mod+f')
+  assert.equal(shortcutChord('mac', 'find'), 'mod+f')
+  assert.equal(shortcutChord('other', 'replace'), 'mod+h')
+  assert.equal(shortcutChord('mac', 'replace'), 'ctrl+h')
+  assert.equal(shortcutChord('other', 'findNext'), 'mod+g')
+  assert.equal(shortcutChord('mac', 'findPrevious'), 'mod+shift+g')
+  assert.deepEqual(bound('other', keyEvent('f3')), { kind: 'find', op: 'next' })
+  assert.deepEqual(bound('other', keyEvent('f3', shift)), { kind: 'find', op: 'previous' })
+  assert.deepEqual(bound('mac', keyEvent('h', ctrl)), { kind: 'find', op: 'replace' })
+  assert.equal(bound('mac', keyEvent('h', cmd)), undefined)
+  assert.deepEqual(bound('other', keyEvent('g', { ...ctrl, ...shift })), { kind: 'find', op: 'previous' })
+})
+
 test('superscript is the plus key Shift delivers, and subscript stays on mod+=', () => {
   for (const [platform, held] of [['mac', cmd], ['other', ctrl]] as const) {
     assert.equal(chordOf(keyEvent('+', { ...held, ...shift }), platform), 'mod+shift+plus')

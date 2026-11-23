@@ -15,6 +15,8 @@ import {
   insertText,
   move,
   moveAtom,
+  replaceAllText,
+  replaceMatch,
   resizeImage,
   selectAll,
   selectAround,
@@ -316,7 +318,7 @@ export function randomCommand(rng: () => number, state: { doc: Doc, sel: Selecti
   const head = { p: other.para.id, o: offset(rng, other.para) }
   const tables = tablesIn(state.doc.body)
   const table = tables[Math.floor(rng() * tables.length)]
-  const kind = Math.floor(rng() * 37)
+  const kind = Math.floor(rng() * 39)
   switch (kind) {
     case 0: return generated('insertText', insertText(sampleText(rng)))
     case 1: return generated('insertLineBreak', insertLineBreak)
@@ -365,6 +367,20 @@ export function randomCommand(rng: () => number, state: { doc: Doc, sel: Selecti
       align: pick(rng, ['left', 'center', 'right', 'justify'] as const),
       indent: { left: pt(18), firstLine: pt(12), hanging: null },
       spacing: { before: pt(6), after: pt(6), line: randomSpacing(rng) },
+    }))
+    case 35: {
+      const value = flatText(loc.para)
+      const start = offset(rng, loc.para)
+      const end = Math.min(value.length, start + 1 + Math.floor(rng() * 4))
+      return generated('replaceMatch', replaceMatch(
+        { para: loc.para.id, start, end },
+        sampleText(rng),
+        null,
+      ))
+    }
+    case 36: return generated('replaceAllText', replaceAllText(sampleText(rng), sampleText(rng), {
+      matchCase: rng() < 0.5,
+      wholeWord: rng() < 0.5,
     }))
     default: {
       if (!table || table.rows.length === 0) return generated('setSelection', setSelection({ kind: 'text', anchor, head }))

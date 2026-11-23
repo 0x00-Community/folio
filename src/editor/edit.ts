@@ -1,4 +1,6 @@
 // How the model changes. Pure functions only: no DOM, no rdocx, no clock reads except the timestamp apply() is handed.
+import { findMatches } from './find.ts'
+import type { FindOptions, TextMatch } from './find.ts'
 import { MIN_IMAGE_PT } from './image-geom.ts'
 import {
   comparePos,
@@ -226,6 +228,142 @@ export function insertText(text: string): Command {
     const intent = text.includes('\n') ? 'discrete' : 'typing'
     return done(inserted.doc, caret(inserted.pos), null, intent)
   }
+}
+
+export interface ReplaceCounts {
+  readonly replaced: number
+  readonly skipped: number
+}
+
+/**
+ * How many of `matches` a replacement would change. Same text is neither replaced nor skipped.
+ * A locked paragraph, a preview, a hyperlink, or a span that is not plain text is skipped.
+ */
+export function replaceCounts(doc: Doc, matches: readonly TextMatch[], replacement: string): ReplaceCounts {
+  let replaced = 0
+  let skipped = 0
+  for (const match of matches) {
+    const action = spanAction(doc, match, replacement)
+    if (action === 'replace') replaced += 1
+    else if (action === 'skip') skipped += 1
+  }
+  return { replaced, skipped }
+}
+
+/** Replace one match and select `next` when it is given, or a caret at the end of the replacement. One undo entry. */
+export function replaceMatch(match: TextMatch, replacement: string, next: TextMatch | null): Command {
+  return (state) => applyReplacement(state, [match], replacement, next, false)
+}
+
+/** Replace every match of `needle` in one transaction. A replacement that contains `needle` is not searched again. */
+export function replaceAllText(needle: string, replacement: string, options: FindOptions): Command {
+  return (state) => applyReplacement(state, findMatches(state.doc, needle, options), replacement, null, true)
+}
+
+function applyReplacement(
+  state: EditorState,
+  matches: readonly TextMatch[],
+  replacement: string,
+  next: TextMatch | null,
+  all: boolean,
+): Transaction | null {
+  const planned = matches.flatMap((match) => {
+    const action = spanAction(state.doc, match, replacement)
+    return action === 'replace' ? [match] : []
+  })
+  if (planned.length === 0) return null
+  const doc = applySpans(state.doc, planned, replacement)
+  if (doc === state.doc) return null
+  const first = planned[0]
+  if (!first) return null
+  const sel = !all && next
+    ? rangeSel(next.para, next.start, next.end)
+    : caret({ p: first.para, o: first.start + replacement.length })
+  return done(doc, sel, null, 'discrete')
+}
+
+function applySpans(doc: Doc, matches: readonly TextMatch[], replacement: string): Doc {
+  const byPara = new Map<ParaId, TextMatch[]>()
+  for (const match of matches) {
+    const list = byPara.get(match.para)
+    if (list) list.push(match)
+    else byPara.set(match.para, [match])
+  }
+  let next = doc
+  for (const [id, list] of byPara) {
+    const loc = safeLoc(indexOf(next), id)
+    if (!loc) continue
+    let para = loc.para
+    const ordered = list.slice().sort((a, b) => b.start - a.start)
+    for (const match of ordered) {
+      const rewritten = rewriteSpan(para, match.start, match.end, replacement)
+      if (rewritten) para = rewritten
+    }
+    next = replaceParagraph(next, para)
+  }
+  return next
+}
+
+type SpanAction = 'replace' | 'skip' | 'same'
+
+function spanAction(doc: Doc, match: TextMatch, replacement: string): SpanAction {
+  const loc = safeLoc(indexOf(doc), match.para)
+  if (!loc || loc.story !== 'body' || isPreview(doc, loc) || loc.para.lock) return 'skip'
+  const text = flatText(loc.para)
+  if (!plainSpan(text, match.start, match.end)) return 'skip'
+  if (touchesLink(loc.para, match.start, match.end)) return 'skip'
+  if (text.slice(match.start, match.end) === replacement) return 'same'
+  return 'replace'
+}
+
+function plainSpan(text: string, start: number, end: number): boolean {
+  if (start < 0 || end > text.length || start >= end) return false
+  if (splitsPair(text, start) || splitsPair(text, end)) return false
+  return !text.slice(start, end).includes('\uFFFC')
+}
+
+function splitsPair(text: string, offset: number): boolean {
+  if (offset <= 0 || offset >= text.length) return false
+  const before = text.charCodeAt(offset - 1)
+  const after = text.charCodeAt(offset)
+  return before >= 0xD800 && before <= 0xDBFF && after >= 0xDC00 && after <= 0xDFFF
+}
+
+function touchesLink(para: Paragraph, start: number, end: number): boolean {
+  let cursor = 0
+  for (const inline of para.inlines) {
+    const len = inline.kind === 'text' ? inline.text.length : 1
+    const from = cursor
+    const to = cursor + len
+    cursor = to
+    if (to <= start || from >= end) continue
+    if (inline.kind === 'text' && inline.marks.link !== undefined) return true
+  }
+  return false
+}
+
+function runCovering(para: Paragraph, offset: number): TextRun | null {
+  let cursor = 0
+  for (const inline of para.inlines) {
+    const len = inline.kind === 'text' ? inline.text.length : 1
+    if (offset < cursor + len) return inline.kind === 'text' ? inline : null
+    cursor += len
+  }
+  return null
+}
+
+function rewriteSpan(para: Paragraph, start: number, end: number, replacement: string): Paragraph | null {
+  const run = runCovering(para, start)
+  const marks = run ? run.marks : {}
+  const src = run ? run.src : null
+  let inlines = deleteInlines(para.inlines, start, end)
+  if (replacement.length > 0) {
+    const inserted: TextRun = { kind: 'text', text: replacement, marks, src }
+    inlines = insertInlines(inlines, start, [inserted])
+  }
+  const normalized = normalizeInlines(inlines)
+  if (sameInlines(para.inlines, normalized)) return null
+  return { ...para, inlines: normalized }
 }
 
 export const insertLineBreak: Command = (state) => {

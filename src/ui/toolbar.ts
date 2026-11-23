@@ -38,6 +38,7 @@ export interface ToolbarHandlers {
   onParagraph(): void
   onPageSetup(): void
   onPrint(): void
+  onFind(): void
   onInsertTable(): void
   onInsertImage(): void
   onTableRow(where: 'above' | 'below'): void
@@ -174,7 +175,7 @@ export function createToolbar(
   const insertTable = iconButton(t('table.insert'), null, platform, () => handlers.onInsertTable(), 'table')
   const insertPicture = iconButton(t('image.insert'), null, platform, () => handlers.onInsertImage(), 'image')
   group(root).append(insertTable, insertPicture)
-  group(root, true).append(iconButton(t('print.preview'), null, platform, () => handlers.onPrint(), 'print'))
+  group(root, true).append(iconButton(t('find'), 'find', platform, () => handlers.onFind(), 'search'))
 
   const strip = document.createElement('div')
   strip.id = 'tablebar'

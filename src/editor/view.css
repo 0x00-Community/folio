@@ -71,6 +71,16 @@
   pointer-events: none;
 }
 
+.find-hit {
+  position: absolute;
+  background: var(--find-match);
+  pointer-events: none;
+}
+
+.find-hit.current {
+  background: var(--find-current);
+}
+
 .cell-sel {
   position: absolute;
   background: rgba(46, 116, 214, 0.18);

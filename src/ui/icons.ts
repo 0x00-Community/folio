@@ -32,6 +32,8 @@ export type IconName =
   | 'table-col-delete'
   | 'table-delete'
   | 'print'
+  | 'search'
+  | 'close'
   | 'chevron'
   | 'zoom-out'
   | 'zoom-in'
@@ -150,6 +152,10 @@ function draw(name: Exclude<IconName, MarkIcon | 'highlight'>, svg: SVGSVGElemen
       return drawTableDelete(svg)
     case 'print':
       return drawPrint(svg)
+    case 'search':
+      return drawSearch(svg)
+    case 'close':
+      return drawClose(svg)
     case 'chevron':
       return drawChevron(svg)
     case 'zoom-out':
@@ -214,6 +220,16 @@ function drawPrint(svg: SVGSVGElement): void {
   path(svg, 'M3.5 6.5 H14.5 V12.5 H3.5 Z')
   path(svg, 'M6.5 11.5 H11.5 V15.5 H6.5 Z')
   path(svg, 'M5.5 9.5 H7.5')
+}
+
+function drawSearch(svg: SVGSVGElement): void {
+  path(svg, 'M7.5 4 A3.5 3.5 0 1 0 7.51 4')
+  path(svg, 'M10 10 L14.5 14.5')
+}
+
+function drawClose(svg: SVGSVGElement): void {
+  path(svg, 'M5.5 5.5 L12.5 12.5')
+  path(svg, 'M12.5 5.5 L5.5 12.5')
 }
 
 function drawChevron(svg: SVGSVGElement): void {

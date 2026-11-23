@@ -28,6 +28,9 @@ export type Action =
   | { readonly kind: 'history'; readonly step: 'undo' | 'redo' }
   | { readonly kind: 'clipboard'; readonly op: 'copy' | 'cut' | 'paste' }
   | { readonly kind: 'file'; readonly op: 'save' | 'saveAs' }
+  | { readonly kind: 'find'; readonly op: FindOp }
+
+export type FindOp = 'open' | 'replace' | 'next' | 'previous'
 
 export type Binding = readonly [chord: string, action: Action]
 
@@ -151,12 +154,17 @@ export type ShortcutName =
   | 'superscript'
   | 'subscript'
   | 'clearFormatting'
+  | 'find'
+  | 'replace'
+  | 'findNext'
+  | 'findPrevious'
 
 /** The chord `defaultKeymap` binds for a toolbar command, or null when the keymap has none. Redo is the first binding. */
 export function shortcutChord(platform: Platform, name: ShortcutName): string | null {
   for (const [chord, action] of defaultKeymap(platform)) {
     if (action.kind === 'history' && action.step === name) return chord
     if (action.kind === 'file' && action.op === name) return chord
+    if (action.kind === 'find' && findName(action.op) === name) return chord
     if (
       action.kind === 'command'
       && (name === 'bold' || name === 'italic' || name === 'underline')
@@ -169,6 +177,13 @@ export function shortcutChord(platform: Platform, name: ShortcutName): string | 
     }
   }
   return null
+}
+
+function findName(op: FindOp): ShortcutName | null {
+  if (op === 'open') return 'find'
+  if (op === 'replace') return 'replace'
+  if (op === 'next') return 'findNext'
+  return 'findPrevious'
 }
 
 function step(direction: 'backward' | 'forward', unit: LogicalUnit): (extend: boolean) => Action {
@@ -229,6 +244,13 @@ export function defaultKeymap(platform: Platform): Keymap {
     ['mod+c', { kind: 'clipboard', op: 'copy' }],
     ['mod+x', { kind: 'clipboard', op: 'cut' }],
     ['mod+v', { kind: 'clipboard', op: 'paste' }],
+    // ⌘H hides the app on macOS and never reaches the page, so replace is ctrl+h there.
+    ['mod+f', { kind: 'find', op: 'open' }],
+    [platform === 'mac' ? 'ctrl+h' : 'mod+h', { kind: 'find', op: 'replace' }],
+    ['mod+g', { kind: 'find', op: 'next' }],
+    ['mod+shift+g', { kind: 'find', op: 'previous' }],
+    ['f3', { kind: 'find', op: 'next' }],
+    ['shift+f3', { kind: 'find', op: 'previous' }],
   ]
   const mac: Binding[] = [
     ...extendable('mod+arrowleft', glide('lineStart')),

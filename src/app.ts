@@ -24,6 +24,8 @@ import { openParagraph } from './ui/paragraph.ts'
 import { openInsertTable } from './ui/table-tools.ts'
 import { createUnsavedDialog } from './ui/unsaved.ts'
 import type { UnsavedChoice } from './ui/unsaved.ts'
+import { createFindBar } from './ui/find-bar.ts'
+import type { FindBar } from './ui/find-bar.ts'
 import { describePrintFailure, mountPreview, pdfFileName, previewDpi, PreviewMachine } from './ui/preview.ts'
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -135,6 +137,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   // object is the same, so this map is what `markers()` hands out for a given Doc.
   const markersByDoc = new WeakMap<Doc, ReadonlyMap<ParaId, string>>()
   const changeListeners = new Set<() => void>()
+  let findBar: FindBar | null = null
   let watchedEditor: Editor | null = null
   let unwatchEditor: (() => void) | null = null
 
@@ -234,6 +237,9 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     },
     onPrint() {
       void openPreview()
+    },
+    onFind() {
+      findBar?.command('open')
     },
     onInsertTable() {
       if (isDialogOpen() || current().toolbar().inTable) return
@@ -574,7 +580,10 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   const opened = engine.blank()
   editor = Editor.mount(host, opened, { locale: locale === 'zh' ? 'zh' : 'en' })
   file = { handle: null, name: t('untitled'), saved: editor.state.doc }
+  findBar = createFindBar(editor, pages)
   editor.on('change', renderChrome)
+  editor.on('change', () => findBar?.noteDocument())
+  editor.onFind((op) => findBar?.command(op))
   editor.onFile((op) => { void saveFromToolbar(op === 'saveAs') })
   renderChrome()
   // A file the user opened with this app arrives as a system request. The runtime holds it until a handler exists.
@@ -667,6 +676,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       return
     }
     if (!machine.begin()) return
+    findBar?.close(false)
     const editorNow = current()
     const doc = editorNow.state.doc
     heldScroll = { top: pages.scrollTop, left: pages.scrollLeft }

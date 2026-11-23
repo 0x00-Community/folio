@@ -9,7 +9,8 @@ import type { Command, EditorState, ToolbarState } from './edit.ts'
 import { attachInput } from './input-dom.ts'
 import type { EditingSurface, InputBinding } from './input-dom.ts'
 import { detectPlatform } from './input.ts'
-import type { Platform } from './input.ts'
+import type { FindOp, Platform } from './input.ts'
+import type { TextMatch } from './find.ts'
 import {
   cssGeneric,
   documentGridPitch,
@@ -52,6 +53,7 @@ export class Editor implements EditingSurface {
   private input: InputBinding | null = null
   private readonly listeners = new Set<() => void>()
   private readonly fileListeners = new Set<(op: 'save' | 'saveAs') => void>()
+  private readonly findListeners = new Set<(op: FindOp) => void>()
   private session: Source
   private current: EditorState
   private markers: ReadonlyMap<ParaId, string>
@@ -193,6 +195,30 @@ export class Editor implements EditingSurface {
   fileCommand(op: 'save' | 'saveAs'): void {
     if (this.destroyed) return
     for (const listener of this.fileListeners) listener(op)
+  }
+
+  /** Find, replace, and match navigation from the keymap. The find bar owns the panel. */
+  onFind(listener: (op: FindOp) => void): () => void {
+    this.findListeners.add(listener)
+    return () => {
+      this.findListeners.delete(listener)
+    }
+  }
+
+  findCommand(op: FindOp): void {
+    if (this.destroyed) return
+    for (const listener of this.findListeners) listener(op)
+  }
+
+  /** Text drag or picture drag. Escape cancels the picture drag before it closes the find bar. */
+  dragging(): boolean {
+    return this.input?.dragging ?? false
+  }
+
+  /** Match tints on mounted pages. An empty list clears them. Does not mount pages. */
+  setFindHits(hits: readonly TextMatch[], current: number): void {
+    if (this.destroyed) return
+    this.view.setFindHits(hits, current)
   }
 
   toolbar(): ToolbarState {
@@ -338,6 +364,7 @@ export class Editor implements EditingSurface {
     if (this.changeFrame !== 0) cancelAnimationFrame(this.changeFrame)
     this.changeFrame = 0
     this.listeners.clear()
+    this.findListeners.clear()
     this.view.destroy()
     this.sink.remove()
     this.session.free()

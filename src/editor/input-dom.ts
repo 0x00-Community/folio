@@ -20,7 +20,7 @@ import {
   trackGoal,
   transition,
 } from './input.ts'
-import type { Action, DragUnit, InputMode, Platform } from './input.ts'
+import type { Action, DragUnit, FindOp, InputMode, Platform } from './input.ts'
 import type { Decoration } from './render.ts'
 
 /** The slice of the facade the DOM layer is allowed to see. Page geometry stays behind these names. */
@@ -39,6 +39,7 @@ export interface EditingSurface {
   moveToLineEdge(edge: 'start' | 'end', extend: boolean): void
   setTextSelection(anchor: Pos, head: Pos): void
   fileCommand(op: 'save' | 'saveAs'): void
+  findCommand(op: FindOp): void
   zoom(): number
   imageBox(pos: Pos): PageBox | null
   previewImage(preview: ImageGesture | null): void
@@ -48,6 +49,8 @@ export interface EditingSurface {
 export interface InputBinding {
   /** True from compositionstart until compositionend, blur, or reset. */
   readonly composing: boolean
+  /** True during a text drag or a picture move or resize. */
+  readonly dragging: boolean
   detach(): void
   reset(): void
 }
@@ -134,6 +137,9 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
         return
       case 'file':
         editor.fileCommand(action.op)
+        return
+      case 'find':
+        editor.findCommand(action.op)
         return
       case 'visual':
         applyVisual(action, column)
@@ -555,6 +561,9 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   return {
     get composing() {
       return mode.kind === 'composing'
+    },
+    get dragging() {
+      return mode.kind === 'dragging' || picture !== null
     },
     detach() {
       cancelPicture()

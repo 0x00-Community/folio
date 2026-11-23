@@ -61,7 +61,7 @@ type ReadRequest =
   | { op: 'text'; from?: number; count?: number }
   | { op: 'text'; ids: string[] }                       // paragraph or table ids, at most 500
   | { op: 'outline' }
-  | { op: 'find'; text: string; from?: Address; limit?: number; matchCase?: boolean }
+  | { op: 'find'; text: string; from?: Address; limit?: number; matchCase?: boolean; wholeWord?: boolean }
   | { op: 'hitTest'; clientX: number; clientY: number }
 
 type EditRequest = { at?: Place } & (
@@ -87,11 +87,13 @@ type EditRequest = { at?: Place } & (
   | { op: 'resizeImage'; at: Address; widthPt: number; heightPt: number }
   | { op: 'moveImage'; at: Address; to: Address }
   | { op: 'setPageSetup'; section: number; page: PageSetupView }
+  | { op: 'replace'; text: string; with: string; matchCase?: boolean; wholeWord?: boolean; all?: boolean; from?: Address }
   | { op: 'undo' } | { op: 'redo' }
 )
 
-type Response = ReadResponse | EditOk | Refusal
+type Response = ReadResponse | EditOk | ReplaceOk | Refusal
 type EditOk = { ok: true; rev: number; selection: SelectionView; created: string[]; removed: string[] }
+type ReplaceOk = EditOk & { replaced: number; skipped: number }
 type Refusal = { ok: false; error: { code: ErrorCode; message: string; para?: string } }
 type ErrorCode =
   | 'bad-request' | 'unknown-op' | 'unsupported-version' | 'unknown-address' | 'out-of-range'
@@ -122,7 +124,12 @@ Read responses, each with `ok: true` and `rev`:
   `null`. `from` is its own block index. `to` is the index of the last block before the next heading of the same
   or a higher level, or the last block of the body. At most 5000 headings.
 - `find`: `{ matches: [{ para, start, end }], truncated }`, in document order, cells included, a match inside one
-  paragraph only. Default `limit` 100, at most 1000.
+  paragraph only. Default `limit` 100, at most 1000. `wholeWord` requires both ends to be word boundaries from the
+  `zh` word segmenter. Headers, footers, and preview paragraphs are still skipped.
+- `replace`: `ReplaceOk`. Without `all`, replaces the first match at or after `from`, or at the document start when
+  `from` is omitted. `all` replaces every match in one undo entry and ignores `from` after validating it. A locked
+  paragraph or a match that touches a hyperlink is skipped and still reported. The same text is not an edit. No match
+  is `{ ok: true, replaced: 0, skipped: 0 }` and pushes no undo entry. An empty `with` deletes the match.
 - `selection`: `{ selection: SelectionView }`.
 - `hitTest`: `{ at: { para, offset } | null }`.
 

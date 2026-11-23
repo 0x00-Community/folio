@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, namedRef, root, shot, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, evidencePath, fileMenuItem, namedRef, root, shot, summary, until } from './acde.mjs'
 import { checkPdf, pdfText, strip } from './pdf-check.mjs'
 
 const STRINGS = {
@@ -279,7 +279,7 @@ await check('the preview shows its own pages and hides the editor', async () => 
   const paragraphs = bodyParagraphs()
   assert(paragraphs.some((text) => String(text).includes(SENTENCE)), 'the sentence is not in a body paragraph')
 
-  act(buttonNamed(ui.preview), 'click')
+  act(fileMenuItem(ui.preview), 'click')
   await until(pageReady, { timeout: 90000, label: 'first page image' })
   const info = previewInfo()
   assert(info.hidden === false && info.name === ui.region, `region ${JSON.stringify(info)}`)
@@ -344,7 +344,7 @@ await check('opening the preview five times does not grow wasm by another layout
   const before = evaluate('window.__word.memoryBytes()')
   let afterFirst = before
   for (let i = 0; i < 5; i++) {
-    act(buttonNamed(ui.preview), 'click')
+    act(fileMenuItem(ui.preview), 'click')
     await until(pageReady, { timeout: 90000, label: `preview ${i + 1}` })
     act(buttonNamed(ui.close), 'click')
     await until(`(() => {
@@ -368,7 +368,7 @@ async function showLocale(lang) {
     { timeout: 60000, label: `locale ${lang}` },
   )
   await openBasic()
-  act(buttonNamed(STRINGS[lang].preview), 'click')
+  act(fileMenuItem(STRINGS[lang].preview), 'click')
   await until(pageReady, { timeout: 90000, label: `${lang} preview` })
   shot(evidencePath(`print/preview-${lang}.png`))
 }

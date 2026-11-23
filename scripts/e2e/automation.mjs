@@ -3,7 +3,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, freshPage, root, summary, until } from './acde.mjs'
+import { act, assert, buttonNamed, check, consoleErrors, ensureDev, evaluate, fileMenuItem, freshPage, root, summary, until } from './acde.mjs'
 
 const STRINGS = {
   en: { preview: 'Print preview', close: 'Close', cancel: 'Cancel' },
@@ -240,6 +240,19 @@ function buttonInEitherLocale(key) {
   throw new Error(errors.join('\n'))
 }
 
+function menuInEitherLocale(key) {
+  const errors = []
+  for (const lang of ['en', 'zh']) {
+    const name = STRINGS[lang][key]
+    try {
+      return fileMenuItem(name)
+    } catch (error) {
+      errors.push(String(error.message || error))
+    }
+  }
+  throw new Error(errors.join('\n'))
+}
+
 async function shows(name) {
   const end = Date.now() + 5000
   let last = ''
@@ -410,7 +423,7 @@ await check('the typed sentence is in the window, and an edit during preview is 
   must(call({ op: 'select', at: { para: hit.para, offset: hit.start } }), 'select sentence')
   await shows(SENTENCE)
 
-  act(buttonInEitherLocale('preview'), 'click')
+  act(menuInEitherLocale('preview'), 'click')
   await until(pageReady, { timeout: 90000, label: 'preview page' })
   const before = must(call({ op: 'find', text: SENTENCE, limit: 1 }), 'find during preview')
   assert(before.matches.length === 1, `sentence matches during preview ${before.matches.length}`)

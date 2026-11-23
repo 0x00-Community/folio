@@ -28,6 +28,9 @@ import {
   insertTable,
   insertText,
   move,
+  replaceAllText,
+  replaceCounts,
+  replaceMatch,
   moveAtom,
   redo,
   resizeImage,
@@ -972,6 +975,79 @@ test('history coalesces typing and deleting, and undo returns the same document'
   let limited = initialState(makeDoc([paragraph('p', [text('a')])]))
   for (let i = 0; i < HISTORY_LIMIT + 1; i++) limited = run(limited, setAlign(i % 2 === 0 ? 'center' : 'left'), i)
   assert.equal(limited.history.past.length, HISTORY_LIMIT, 'history keeps the newest 500 entries')
+})
+
+function linkKey(value: string): NonNullable<Marks['link']> {
+  return value as NonNullable<Marks['link']>
+}
+
+test('replace keeps the first character marks, skips links and locks, and undoes as one entry', () => {
+  const mixed = paragraph('p', [
+    text('Aa', null, { bold: true }),
+    text('Bb', null, { italic: true }),
+  ])
+  const mixedDoc = makeDoc([mixed])
+  let state = run(initialState(mixedDoc), replaceMatch({ para: mixed.id, start: 1, end: 3 }, 'X', null))
+  const rewritten = asParagraph(state.doc.body[0])
+  assert.equal(flatText(rewritten), 'AXb')
+  const covering = rewritten.inlines.find(inline => inline.kind === 'text' && inline.text.includes('X'))
+  assert.equal(covering?.kind, 'text')
+  if (covering?.kind === 'text') {
+    assert.equal(covering.marks.bold, true)
+    assert.equal(covering.marks.italic, undefined)
+  }
+  assert.equal(undo(state)?.doc, mixedDoc)
+
+  const linked = paragraph('p', [
+    text('Go ', null, { bold: true }),
+    text('here', null, { link: linkKey('to') }),
+  ])
+  const linkDoc = makeDoc([linked])
+  refused(initialState(linkDoc), replaceMatch({ para: linked.id, start: 3, end: 7 }, 'there', null))
+  refused(initialState(linkDoc), replaceMatch({ para: linked.id, start: 2, end: 4 }, 'X', null))
+  const kept = run(initialState(linkDoc), replaceMatch({ para: linked.id, start: 0, end: 2 }, 'Do', null))
+  assert.equal(flatText(asParagraph(kept.doc.body[0])), 'Do here')
+  const open = asParagraph(kept.doc.body[0]).inlines[0]
+  assert.equal(open?.kind, 'text')
+  if (open?.kind === 'text') assert.equal(open.marks.bold, true)
+
+  const locked = paragraph('lock', [text('secret')], {}, { lock: { reason: 'revisions' } })
+  const openPara = paragraph('open', [text('secret tale')])
+  const both = makeDoc([locked, openPara])
+  const counts = replaceCounts(both, [
+    { para: locked.id, start: 0, end: 6 },
+    { para: openPara.id, start: 0, end: 6 },
+  ], 'hidden')
+  assert.deepEqual(counts, { replaced: 1, skipped: 1 })
+  const replaced = run(initialState(both), replaceAllText('secret', 'hidden', { matchCase: true, wholeWord: false }))
+  assert.equal(replaced.history.past.length, 1)
+  assert.equal(flatText(asParagraph(replaced.doc.body[0])), 'secret')
+  assert.equal(flatText(asParagraph(replaced.doc.body[1])), 'hidden tale')
+  assert.equal(asParagraph(replaced.doc.body[0]), locked)
+  assert.equal(undo(replaced)?.doc, both)
+
+  const loop = makeDoc([paragraph('p', [text('cat')])])
+  const once = run(initialState(loop), replaceAllText('cat', 'catcat', { matchCase: false, wholeWord: false }))
+  assert.equal(flatText(asParagraph(once.doc.body[0])), 'catcat')
+  assert.equal(undo(once)?.doc, loop)
+
+  const same = makeDoc([paragraph('p', [text('same')])])
+  refused(initialState(same), replaceAllText('same', 'same', { matchCase: true, wholeWord: false }))
+  const emptied = run(initialState(same), replaceMatch({ para: 'p' as Paragraph['id'], start: 0, end: 4 }, '', null))
+  assert.equal(flatText(asParagraph(emptied.doc.body[0])), '')
+
+  const two = makeDoc([paragraph('a', [text('one one')])])
+  const moved = run(initialState(two), replaceMatch(
+    { para: 'a' as Paragraph['id'], start: 0, end: 3 },
+    'two',
+    { para: 'a' as Paragraph['id'], start: 4, end: 7 },
+  ))
+  assert.equal(flatText(asParagraph(moved.doc.body[0])), 'two one')
+  assert.deepEqual(moved.sel, {
+    kind: 'text',
+    anchor: { p: 'a', o: 4 },
+    head: { p: 'a', o: 7 },
+  })
 })
 
 test('random command sequences keep the document valid and round-trip through undo', { timeout: 120_000 }, () => {
