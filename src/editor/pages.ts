@@ -1376,6 +1376,207 @@ function assignStyle(el: HTMLElement, prop: 'width' | 'height' | 'top' | 'left',
   if (el.style[prop] !== value) el.style[prop] = value
 }
 
+export interface ImageHitCandidate {
+  readonly p: ParaId
+  readonly base: number
+  readonly left: number
+  readonly right: number
+  readonly top: number
+  readonly bottom: number
+  readonly cell: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number } | null
+  readonly inkBefore: boolean
+  readonly inkAfter: boolean
+  readonly contentAbove: boolean
+  readonly contentBelow: boolean
+}
+
+/**
+ * Resolves a click/drag point against inline images in the nearest slice. Keeps hits inside the image's own table
+ * cell, and sends clicks below the last image line (where `caretPositionFromPoint` sees no text node) to `base + 1`.
+ */
+export function resolveImageHit(
+  candidates: readonly ImageHitCandidate[],
+  x: number,
+  y: number,
+  rawX: number,
+  rawY: number,
+): Pos | null {
+  for (const item of candidates) {
+    if (item.right <= item.left || item.bottom <= item.top) continue
+    if (item.cell) {
+      if (x < item.cell.left || x > item.cell.right || y < item.cell.top || y > item.cell.bottom) continue
+    }
+    if (rawY >= item.top && rawY <= item.bottom) {
+      if (rawX >= item.left && rawX <= item.right) {
+        return { p: item.p, o: rawX > (item.left + item.right) / 2 ? item.base + 1 : item.base }
+      }
+      const after = rawX > item.right
+      if (after ? !item.inkAfter : !item.inkBefore) {
+        return { p: item.p, o: after ? item.base + 1 : item.base }
+      }
+      continue
+    }
+    if (rawY > item.bottom) {
+      if (!item.contentBelow && !item.inkAfter) {
+        return { p: item.p, o: item.base + 1 }
+      }
+      continue
+    }
+    if (!item.contentAbove && !item.inkBefore) {
+      return { p: item.p, o: rawX > item.right && !item.inkAfter ? item.base + 1 : item.base }
+    }
+  }
+  return null
+}
+
+/** Caret box on the left or right edge of an inline atom. Images sit `vertical-align: text-bottom`, so the caret sits at their bottom edge. */
+export function atomCaretBox(
+  rect: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number },
+  after: boolean,
+  isImage: boolean,
+  lineHeightPx: number,
+): { readonly left: number; readonly top: number; readonly height: number } {
+  const left = after ? rect.right : rect.left
+  const boxH = rect.bottom - rect.top
+  if (isImage) {
+    const height = Math.max(lineHeightPx, 1)
+    const top = boxH >= height ? rect.bottom - height : rect.top
+    return { left, top, height }
+  }
+  return { left, top: rect.top, height: Math.max(boxH, 1) }
+}
+
+function defaultCaretHeightPx(paraEl: HTMLElement): number {
+  for (const child of paraEl.children) {
+    if (!(child instanceof HTMLElement) || child.classList.contains('marker') || child.classList.contains('atom')) continue
+    const size = parseFloat(child.style.fontSize)
+    if (Number.isFinite(size) && size > 0) return Math.max(size * 1.15, 16)
+  }
+  return 16
+}
+
+function inlineAtomCaretViewport(
+  point: { readonly node: Node; readonly offset: number },
+  o: number,
+  sliceRect: DOMRect | null,
+  lineHeightPx: number,
+): { readonly left: number; readonly top: number; readonly height: number } | null {
+  if (point.node instanceof Text) return null
+  const parent = point.node
+  const prev = point.offset > 0 ? parent.childNodes[point.offset - 1] : null
+  const next = parent.childNodes[point.offset] ?? null
+  let atom: HTMLElement | null = null
+  let after = false
+  if (
+    prev instanceof HTMLElement
+    && prev.classList.contains('atom')
+    && prev.dataset.atom !== 'pageBreak'
+    && Number(prev.dataset.o) + 1 === o
+  ) {
+    atom = prev
+    after = true
+  } else if (
+    next instanceof HTMLElement
+    && next.classList.contains('atom')
+    && next.dataset.atom !== 'pageBreak'
+    && Number(next.dataset.o) === o
+  ) {
+    atom = next
+    after = false
+  }
+  if (!atom) return null
+  const rects = [...atom.getClientRects()].filter((item) => item.height > 0 || item.width > 0)
+  const rect =
+    rects.find((item) => !sliceRect || (item.bottom > sliceRect.top + 0.5 && item.top < sliceRect.bottom - 0.5)) ??
+    rects[after ? rects.length - 1 : 0]
+  if (!rect) return null
+  return atomCaretBox(rect, after, atom.dataset.atom === 'image', lineHeightPx)
+}
+
+/**
+ * The side of a picture a point on or around the picture's line names. acdert's caretPositionFromPoint never answers
+ * with an image: on a line a picture fills, or in empty space below a picture, it misses the image altogether.
+ */
+function imageSideAt(slice: HTMLElement, x: number, y: number, rawX: number, rawY: number): Pos | null {
+  const clip = slice.querySelector(':scope > .clip')
+  const clipRect = clip instanceof HTMLElement ? clip.getBoundingClientRect() : null
+  const candidates: ImageHitCandidate[] = []
+  for (const img of slice.querySelectorAll<HTMLElement>('img.atom[data-atom="image"]')) {
+    if (img.closest('.repeat-head')) continue
+    const raw = img.getBoundingClientRect()
+    if (raw.width <= 0 || raw.height <= 0) continue
+    const top = clipRect ? Math.max(raw.top, clipRect.top) : raw.top
+    const bottom = clipRect ? Math.min(raw.bottom, clipRect.bottom) : raw.bottom
+    if (bottom <= top + 0.5) continue
+    const block = img.closest('.blk.p')
+    const id = block instanceof HTMLElement ? block.dataset.id : undefined
+    const base = Number(img.dataset.o)
+    if (!(block instanceof HTMLElement) || !id || !Number.isInteger(base)) continue
+    const td = img.closest('td')
+    const cellEl = td instanceof HTMLElement && slice.contains(td) ? td : null
+    const scope = cellEl ?? slice
+    const box = new DOMRect(raw.left, top, raw.width, bottom - top)
+    candidates.push({
+      p: id as ParaId,
+      base,
+      left: raw.left,
+      right: raw.right,
+      top,
+      bottom,
+      cell: cellEl ? cellEl.getBoundingClientRect() : null,
+      inkBefore: lineHasInkBeside(img, box, false),
+      inkAfter: lineHasInkBeside(img, box, true),
+      contentAbove: scopeHasContentVertical(scope, block, img, box, clipRect, false),
+      contentBelow: scopeHasContentVertical(scope, block, img, box, clipRect, true),
+    })
+  }
+  return resolveImageHit(candidates, x, y, rawX, rawY)
+}
+
+/** True when the picture's line has text or another atom on the asked side of the picture. */
+function lineHasInkBeside(img: HTMLElement, box: DOMRect, after: boolean): boolean {
+  const parent = img.parentElement
+  if (!parent) return false
+  for (const child of parent.children) {
+    if (child === img || child.classList.contains('marker')) continue
+    for (const rect of child.getClientRects()) {
+      if (rect.width <= 0 || rect.bottom <= box.top + 0.5 || rect.top >= box.bottom - 0.5) continue
+      if (after ? rect.left >= box.right - 0.5 : rect.right <= box.left + 0.5) return true
+    }
+  }
+  return false
+}
+
+function scopeHasContentVertical(
+  scope: HTMLElement,
+  block: HTMLElement,
+  img: HTMLElement,
+  box: DOMRect,
+  clipRect: DOMRect | null,
+  below: boolean,
+): boolean {
+  for (const child of block.children) {
+    if (child === img || child.classList.contains('marker')) continue
+    for (const rect of child.getClientRects()) {
+      const top = clipRect ? Math.max(rect.top, clipRect.top) : rect.top
+      const bottom = clipRect ? Math.min(rect.bottom, clipRect.bottom) : rect.bottom
+      if ((rect.width <= 0 && bottom - top <= 0) || bottom <= top + 0.5) continue
+      if (below ? bottom > box.bottom + 1 : top < box.top - 1) return true
+    }
+  }
+  if (scope !== block) {
+    for (const other of scope.children) {
+      if (!(other instanceof HTMLElement) || other === block || !other.classList.contains('blk')) continue
+      const rect = other.getBoundingClientRect()
+      const top = clipRect ? Math.max(rect.top, clipRect.top) : rect.top
+      const bottom = clipRect ? Math.min(rect.bottom, clipRect.bottom) : rect.bottom
+      if (bottom <= top + 0.5) continue
+      if (below ? top >= box.bottom - 1 : bottom <= box.top + 1) return true
+    }
+  }
+  return false
+}
+
 function caretFromPoint(x: number, y: number): { node: Node; offset: number } | null {
   const doc = document as Document & {
     caretPositionFromPoint?: (px: number, py: number) => { offsetNode: Node; offset: number } | null
@@ -2000,16 +2201,38 @@ export class PageView {
         height: Math.max(preedit.height / z, 1),
       }
     }
-    const range = rangeIn(paraEl, pos.o, pos.o)
     const slice = paraEl.closest('.slice')
     const sliceRect = slice instanceof HTMLElement ? slice.getBoundingClientRect() : null
+    const point = domPoint(paraEl, pos.o)
+    const atomCaret = inlineAtomCaretViewport(point, pos.o, sliceRect, defaultCaretHeightPx(paraEl) * z)
+    if (atomCaret) {
+      const rawX = (atomCaret.left - origin.left) / z
+      const maxX = pageEl.offsetWidth > 1 ? pageEl.offsetWidth - 1 : rawX
+      return {
+        page: pageIndex,
+        x: Math.min(rawX, maxX),
+        top: (atomCaret.top - origin.top) / z,
+        height: Math.max(atomCaret.height / z, 1),
+      }
+    }
+    const range = scratchRange()
+    range.setStart(point.node, point.offset)
+    range.setEnd(point.node, point.offset)
     const rects = [...range.getClientRects()].filter((rect) => rect.height > 0)
     const rect =
       rects.find((item) => !sliceRect || (item.bottom > sliceRect.top + 0.5 && item.top < sliceRect.bottom - 0.5)) ??
       rects[0]
     if (!rect) {
       const box = paraEl.getBoundingClientRect()
-      return { page: pageIndex, x: (box.left - origin.left) / z, top: (box.top - origin.top) / z, height: 16 }
+      const padLeft = parseFloat(paraEl.style.paddingLeft) || 0
+      const padTop = parseFloat(paraEl.style.paddingTop) || 0
+      const indent = parseFloat(paraEl.style.textIndent) || 0
+      return {
+        page: pageIndex,
+        x: (box.left - origin.left) / z + Math.max(0, padLeft + indent),
+        top: (box.top - origin.top) / z + padTop,
+        height: defaultCaretHeightPx(paraEl),
+      }
     }
     return {
       page: pageIndex,
@@ -2042,13 +2265,13 @@ export class PageView {
       if (!pageEl) return null
       const slices = [...pageEl.querySelectorAll<HTMLElement>('.slice')]
       if (slices.length === 0) return null
-      let best: { rect: DOMRect; dist: number } | null = null
+      let best: { slice: HTMLElement; rect: DOMRect; dist: number } | null = null
       for (const slice of slices) {
         const rect = slice.getBoundingClientRect()
         const dx = clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0
         const dy = clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0
         const dist = dx * dx + dy * dy
-        if (!best || dist < best.dist) best = { rect, dist }
+        if (!best || dist < best.dist) best = { slice, rect, dist }
       }
       if (!best) return null
       let x = clientX
@@ -2057,6 +2280,8 @@ export class PageView {
         x = Math.min(Math.max(clientX, best.rect.left + 1), Math.max(best.rect.left + 1, best.rect.right - 1))
         y = Math.min(Math.max(clientY, best.rect.top + 1), Math.max(best.rect.top + 1, best.rect.bottom - 1))
       }
+      const beside = imageSideAt(best.slice, x, y, clientX, clientY)
+      if (beside) return beside
       const hidden: HTMLElement[] = []
       try {
         // acdert hit testing ignores the clip, so another page's shifted copy can take the hit.
@@ -2084,7 +2309,7 @@ export class PageView {
           return py < box.top || py > box.bottom ? null : next
         }
         const hit = probe(x, y) ?? probe(x, y + 1) ?? probe(x + 0.5, y)
-        if (!hit) return null
+        if (!hit) return this.sliceParaFallback(best.slice, x, y)
         const pos = posFromDom(hit.node, hit.offset)
         if (!pos) return null
         return this.adjustAtom(hit.node, pos, x)
@@ -2092,6 +2317,36 @@ export class PageView {
         for (const el of hidden) el.style.visibility = ''
       }
     })
+  }
+
+  private sliceParaFallback(slice: HTMLElement, x: number, y: number): Pos | null {
+    const clip = slice.querySelector(':scope > .clip')
+    const clipRect = clip instanceof HTMLElement ? clip.getBoundingClientRect() : null
+    if (clipRect && (y < clipRect.top - 1 || y > clipRect.bottom + 1)) return null
+    let best: { el: HTMLElement; rect: DOMRect; dist: number } | null = null
+    for (const paraEl of slice.querySelectorAll<HTMLElement>('.blk.p')) {
+      if (paraEl.closest('.repeat-head')) continue
+      const td = paraEl.closest('td')
+      if (td instanceof HTMLElement && slice.contains(td)) {
+        const cellRect = td.getBoundingClientRect()
+        if (x < cellRect.left || x > cellRect.right || y < cellRect.top || y > cellRect.bottom) continue
+      }
+      const raw = paraEl.getBoundingClientRect()
+      const top = clipRect ? Math.max(raw.top, clipRect.top) : raw.top
+      const bottom = clipRect ? Math.min(raw.bottom, clipRect.bottom) : raw.bottom
+      if (bottom <= top + 0.5) continue
+      const dy = y < top ? top - y : y > bottom ? y - bottom : 0
+      if (!best || dy < best.dist) best = { el: paraEl, rect: raw, dist: dy }
+    }
+    if (!best) return null
+    const id = best.el.dataset.id
+    if (!id) return null
+    const place = this.index().get(id)
+    if (!place) return { p: id as ParaId, o: 0 }
+    const length = flatText(place.para).length
+    if (length === 0) return { p: place.para.id, o: 0 }
+    const padLeft = (parseFloat(best.el.style.paddingLeft) || 0) * this.zoom
+    return { p: place.para.id, o: x <= best.rect.left + padLeft + 2 ? 0 : length }
   }
 
   /**

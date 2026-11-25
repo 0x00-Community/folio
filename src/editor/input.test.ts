@@ -13,7 +13,10 @@ import {
   dragUnit,
   gestureOffsets,
   IDLE,
+  isPictureFile,
   paragraphRange,
+  pastePlan,
+  PICTURE_TEXT,
   planBeforeInput,
   shortcutChord,
   trackGoal,
@@ -659,4 +662,24 @@ test('every mode and event pair returns a mode without throwing', () => {
       assert.ok(['idle', 'composing', 'dragging'].includes(next.kind), `${mode.kind} then ${event.kind}`)
     }
   }
+})
+
+test('a paste takes picture files first, then the held picture for its own mark, then text', () => {
+  const held = { text: PICTURE_TEXT }
+  assert.equal(pastePlan('words', 1, held), 'files', 'a picture on the clipboard wins over its text')
+  assert.equal(pastePlan(PICTURE_TEXT, 0, held), 'held', 'the mark this app wrote brings the picture back')
+  assert.equal(pastePlan(PICTURE_TEXT, 0, null), 'text', 'the mark with nothing held is only a character')
+  assert.equal(pastePlan('words', 0, held), 'text', 'text copied elsewhere since is typed, not the old picture')
+  assert.equal(pastePlan('', 0, held), 'none', 'an empty clipboard does not bring the old picture back')
+  assert.equal(pastePlan('', 0, null), 'none')
+})
+
+test('isPictureFile accepts PNG and JPEG by type, and by name only when the type is empty', () => {
+  assert.equal(isPictureFile({ type: 'image/png', name: 'a.png' }), true)
+  assert.equal(isPictureFile({ type: 'image/jpeg' }), true)
+  assert.equal(isPictureFile({ type: '', name: 'shot.JPG' }), true)
+  assert.equal(isPictureFile({ type: '', name: 'shot.jpeg' }), true)
+  assert.equal(isPictureFile({ type: '', name: 'notes.txt' }), false)
+  assert.equal(isPictureFile({ type: 'image/gif', name: 'a.gif' }), false)
+  assert.equal(isPictureFile({ type: 'application/pdf', name: 'a.png' }), false)
 })
