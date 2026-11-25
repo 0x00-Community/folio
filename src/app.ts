@@ -585,6 +585,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   editor.on('change', () => findBar?.noteDocument())
   editor.onFind((op) => findBar?.command(op))
   editor.onFile((op) => { void saveFromToolbar(op === 'saveAs') })
+  editor.onPictureError(() => showBand(t('image.error')))
   renderChrome()
   // A file the user opened with this app arrives as a system request. The runtime holds it until a handler exists.
   appWindow.on('request', request => {

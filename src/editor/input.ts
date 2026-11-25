@@ -394,3 +394,27 @@ export function planBeforeInput(inputType: string, data: string | null, composin
 export function detectPlatform(platform: string, userAgent = ''): Platform {
   return /mac/i.test(platform) || /mac/i.test(userAgent) ? 'mac' : 'other'
 }
+
+/** What the clipboard's plain text holds for one copied picture: the object replacement character. */
+export const PICTURE_TEXT = '\uFFFC'
+
+/** True for a file the engine can embed as a picture. The engine still checks the bytes. */
+export function isPictureFile(file: { readonly type: string; readonly name?: string }): boolean {
+  if (file.type === 'image/png' || file.type === 'image/jpeg') return true
+  if (file.type !== '') return false
+  return /\.(png|jpe?g)$/i.test(file.name ?? '')
+}
+
+/**
+ * What a paste inserts. Picture files on the clipboard win. Text that is the mark this app wrote for a copied
+ * picture brings that picture back, since the runtime's clipboard carries text only. Any other text is typed.
+ */
+export function pastePlan(
+  text: string,
+  pictureFiles: number,
+  held: { readonly text: string } | null,
+): 'files' | 'held' | 'text' | 'none' {
+  if (pictureFiles > 0) return 'files'
+  if (held && text === held.text) return 'held'
+  return text.length > 0 ? 'text' : 'none'
+}
