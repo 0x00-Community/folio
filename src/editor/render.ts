@@ -232,6 +232,24 @@ function firstLinePx(ctx: RenderContext, para: Paragraph, look: ParaLook): numbe
   return px(look.indent.firstLine)
 }
 
+/**
+ * Marker box and first-line content start in px. Clamping the marker to >= 0 keeps it inside `.page-body`'s clip;
+ * setting `paddingLeft` to `markerLeft + markerWidth` guarantees text and the caret never overlap the marker, even when
+ * a paragraph carries an explicit `left: 0` or `hanging: 0` indent.
+ */
+export function markerBoxPx(
+  leftPx: number,
+  hangingPx: number,
+): { readonly markerLeft: number; readonly markerWidth: number; readonly paddingLeft: number } {
+  const width = hangingPx > 0 ? hangingPx : px(18)
+  const markerLeft = hangingPx > 0 ? Math.max(0, leftPx - hangingPx) : Math.max(0, leftPx)
+  return {
+    markerLeft,
+    markerWidth: width,
+    paddingLeft: markerLeft + width,
+  }
+}
+
 function applyParaBox(el: HTMLElement, ctx: RenderContext, para: Paragraph, beforePx?: number): ParaLook {
   const look = ctx.paraLook(para)
   const before = beforePx ?? px(look.spacing.before)
@@ -243,8 +261,9 @@ function applyParaBox(el: HTMLElement, ctx: RenderContext, para: Paragraph, befo
   el.style.paddingTop = `${before}px`
   el.style.paddingBottom = `${after}px`
   el.style.paddingRight = `${right}px`
-  if (marker && hanging > 0) {
-    el.style.paddingLeft = `${left}px`
+  if (marker) {
+    const box = markerBoxPx(left, hanging)
+    el.style.paddingLeft = `${box.paddingLeft}px`
     el.style.textIndent = '0'
   } else {
     el.style.paddingLeft = `${left + hanging}px`
@@ -382,11 +401,10 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
     span.className = 'marker'
     span.contentEditable = 'false'
     span.textContent = marker
-    const left = px(look.indent.left)
-    const hanging = px(look.indent.hanging)
-    span.style.left = `${Math.max(0, left - hanging)}px`
+    const box = markerBoxPx(px(look.indent.left), px(look.indent.hanging))
+    span.style.left = `${box.markerLeft}px`
     span.style.top = `${before}px`
-    if (hanging > 0) span.style.width = `${hanging}px`
+    span.style.width = `${box.markerWidth}px`
     const run = ctx.look(para, {})
     applyRun(span, ctx, para, run, run.fonts.eastAsia, {})
     el.append(span)
