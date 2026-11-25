@@ -27,8 +27,11 @@ export type Action =
   | { readonly kind: 'visual'; readonly motion: VisualMotion; readonly extend: boolean }
   | { readonly kind: 'history'; readonly step: 'undo' | 'redo' }
   | { readonly kind: 'clipboard'; readonly op: 'copy' | 'cut' | 'paste' }
-  | { readonly kind: 'file'; readonly op: 'save' | 'saveAs' }
+  | { readonly kind: 'file'; readonly op: FileOp }
   | { readonly kind: 'find'; readonly op: FindOp }
+
+/** Requests the editor passes up to the app: the file on this tab, and the tab strip around it. */
+export type FileOp = 'save' | 'saveAs' | 'new' | 'open' | 'closeTab' | 'nextTab' | 'prevTab'
 
 export type FindOp = 'open' | 'replace' | 'next' | 'previous'
 
@@ -151,6 +154,8 @@ export type ShortcutName =
   | 'redo'
   | 'save'
   | 'saveAs'
+  | 'new'
+  | 'open'
   | 'superscript'
   | 'subscript'
   | 'clearFormatting'
@@ -241,6 +246,9 @@ export function defaultKeymap(platform: Platform): Keymap {
     ['mod+shift+z', { kind: 'history', step: 'redo' }],
     ['mod+s', { kind: 'file', op: 'save' }],
     ['mod+shift+s', { kind: 'file', op: 'saveAs' }],
+    ['mod+n', { kind: 'file', op: 'new' }],
+    ['mod+o', { kind: 'file', op: 'open' }],
+    ['mod+w', { kind: 'file', op: 'closeTab' }],
     ['mod+c', { kind: 'clipboard', op: 'copy' }],
     ['mod+x', { kind: 'clipboard', op: 'cut' }],
     ['mod+v', { kind: 'clipboard', op: 'paste' }],
@@ -260,7 +268,12 @@ export function defaultKeymap(platform: Platform): Keymap {
     ...extendable('alt+arrowup', step('backward', 'paragraph')),
     ...extendable('alt+arrowdown', step('forward', 'paragraph')),
   ]
-  return buildKeymap(platform === 'mac' ? [...common, ...mac] : common)
+  const ctrl = platform === 'mac' ? 'ctrl' : 'mod'
+  const tabs: Binding[] = [
+    [`${ctrl}+tab`, { kind: 'file', op: 'nextTab' }],
+    [`${ctrl}+shift+tab`, { kind: 'file', op: 'prevTab' }],
+  ]
+  return buildKeymap(platform === 'mac' ? [...common, ...tabs, ...mac] : [...common, ...tabs])
 }
 
 export { wordRange }

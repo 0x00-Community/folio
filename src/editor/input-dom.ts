@@ -20,7 +20,7 @@ import {
   trackGoal,
   transition,
 } from './input.ts'
-import type { Action, DragUnit, FindOp, InputMode, Platform } from './input.ts'
+import type { Action, DragUnit, FileOp, FindOp, InputMode, Platform } from './input.ts'
 import type { Decoration } from './render.ts'
 
 /** The slice of the facade the DOM layer is allowed to see. Page geometry stays behind these names. */
@@ -38,7 +38,7 @@ export interface EditingSurface {
   movePage(direction: 'up' | 'down', extend: boolean, goalX: number | null): number | null
   moveToLineEdge(edge: 'start' | 'end', extend: boolean): void
   setTextSelection(anchor: Pos, head: Pos): void
-  fileCommand(op: 'save' | 'saveAs'): void
+  fileCommand(op: FileOp): void
   findCommand(op: FindOp): void
   zoom(): number
   imageBox(pos: Pos): PageBox | null
