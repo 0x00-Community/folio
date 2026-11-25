@@ -1589,7 +1589,7 @@ function addMarkerBoxes(
     const has = Boolean(nextMarkers.get(id))
     if (had === has) return
     const found = ownedParagraph(doc, id)
-    if (!found || !(resolvedHanging(doc, found.para) > 0)) return
+    if (!found) return
     add(found.owner)
   }
   for (const id of previousMarkers.keys()) consider(id)
