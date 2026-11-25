@@ -9,7 +9,7 @@ import type { Command, EditorState, ToolbarState } from './edit.ts'
 import { attachInput } from './input-dom.ts'
 import type { EditingSurface, InputBinding } from './input-dom.ts'
 import { detectPlatform } from './input.ts'
-import type { FindOp, Platform } from './input.ts'
+import type { FileOp, FindOp, Platform } from './input.ts'
 import type { TextMatch } from './find.ts'
 import {
   cssGeneric,
@@ -52,7 +52,7 @@ export class Editor implements EditingSurface {
   private readonly sink: HTMLTextAreaElement
   private input: InputBinding | null = null
   private readonly listeners = new Set<() => void>()
-  private readonly fileListeners = new Set<(op: 'save' | 'saveAs') => void>()
+  private readonly fileListeners = new Set<(op: FileOp) => void>()
   private readonly findListeners = new Set<(op: FindOp) => void>()
   private session: Source
   private current: EditorState
@@ -184,15 +184,15 @@ export class Editor implements EditingSurface {
     }
   }
 
-  /** Save and Save As from the keymap. The app owns the file; this only delivers the request. */
-  onFile(listener: (op: 'save' | 'saveAs') => void): () => void {
+  /** File and tab chords from the keymap. The app owns files and tabs; this only delivers the request. */
+  onFile(listener: (op: FileOp) => void): () => void {
     this.fileListeners.add(listener)
     return () => {
       this.fileListeners.delete(listener)
     }
   }
 
-  fileCommand(op: 'save' | 'saveAs'): void {
+  fileCommand(op: FileOp): void {
     if (this.destroyed) return
     for (const listener of this.fileListeners) listener(op)
   }

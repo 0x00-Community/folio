@@ -166,7 +166,29 @@ test('the keymap reaches every visual motion, with and without Shift, plus undo,
     const ops = actions.flatMap(action => action.kind === 'clipboard' ? [action.op] : [])
     assert.deepEqual([...new Set(ops)].sort(), ['copy', 'cut', 'paste'], `clipboard on ${platform}`)
     const files = actions.flatMap(action => action.kind === 'file' ? [action.op] : [])
-    assert.deepEqual([...new Set(files)].sort(), ['save', 'saveAs'], `file on ${platform}`)
+    assert.deepEqual(
+      [...new Set(files)].sort(),
+      ['closeTab', 'new', 'nextTab', 'open', 'prevTab', 'save', 'saveAs'],
+      `file and tab chords on ${platform}`,
+    )
+  }
+})
+
+test('tab chords sit on Ctrl on both platforms, and new, open and close on the primary modifier', () => {
+  const op = (platform: Platform, chord: string): string | null => {
+    const action = keymaps[platform].get(chord)
+    return action?.kind === 'file' ? action.op : null
+  }
+  assert.equal(op('mac', 'ctrl+tab'), 'nextTab')
+  assert.equal(op('mac', 'ctrl+shift+tab'), 'prevTab')
+  assert.equal(op('other', 'mod+tab'), 'nextTab', 'Ctrl reads as mod off macOS')
+  assert.equal(op('other', 'mod+shift+tab'), 'prevTab')
+  for (const platform of PLATFORMS) {
+    assert.equal(op(platform, 'mod+n'), 'new', platform)
+    assert.equal(op(platform, 'mod+o'), 'open', platform)
+    assert.equal(op(platform, 'mod+w'), 'closeTab', platform)
+    assert.equal(shortcutChord(platform, 'new'), 'mod+n', platform)
+    assert.equal(shortcutChord(platform, 'open'), 'mod+o', platform)
   }
 })
 
